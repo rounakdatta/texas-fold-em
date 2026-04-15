@@ -1,0 +1,12 @@
+apiVersion: v2
+name: texas-fold-em
+description: Fold refresh-token broker — holds a long-lived refresh token and serves short-lived access tokens over HTTP.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+home: https://github.com/rounakdatta/texas-fold-em
+keywords:
+  - fold
+  - fold-money
+  - oauth2
+  - broker

@@ -1,0 +1,12 @@
+*.md
+*_test.go
+/texas-fold-em
+/coverage.out
+/state.json
+/contrib
+/.git
+/.github
+/.gitignore
+/.dockerignore
+/Dockerfile
+/Makefile
