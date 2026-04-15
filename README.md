@@ -4,7 +4,7 @@ A long-running Go broker that holds a [fold.money](https://fold.money) refresh
 token and issues short-lived access tokens to consumers on demand. Runs as a
 single-replica StatefulSet in Kubernetes.
 
-Reverse-engineering notes on the underlying Fold API live at `~/Desktop/fold.md`.
+Reverse-engineering notes on the underlying Fold API live in [`fold.md`](./fold.md) — the full endpoint catalog, response shapes, auth flow, known error codes, and operational guidance for running the broker.
 
 ## API
 
