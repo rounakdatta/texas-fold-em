@@ -50,5 +50,14 @@ jobs:
       - name: Push Helm chart to GHCR
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
-          helm package charts/texas-fold-em
+          # On a version tag (v1.2.3), publish the chart as-is from Chart.yaml.
+          # On a plain main push, append +<sha> so every commit produces a
+          # distinct, traceable chart version without requiring a manual bump.
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            helm package charts/texas-fold-em
+          else
+            SHA=$(echo "${{ github.sha }}" | head -c 7)
+            BASE_VER=$(grep '^version:' charts/texas-fold-em/Chart.yaml | awk '{print $2}')
+            helm package charts/texas-fold-em --version "${BASE_VER}+${SHA}"
+          fi
           helm push texas-fold-em-*.tgz oci://ghcr.io/rounakdatta/charts
