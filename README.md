@@ -17,10 +17,12 @@ Reverse-engineering notes on the underlying Fold API live in [`fold.md`](./fold.
 
 ## Install
 
+The Helm chart is published as an OCI artifact to GHCR alongside the Docker image.
+
 ```bash
-helm install tfe charts/texas-fold-em -n fold --create-namespace \
-  --set image.repository=ghcr.io/you/texas-fold-em \
-  --set image.tag=v1.0.0 \
+helm install tfe oci://ghcr.io/rounakdatta/charts/texas-fold-em \
+  --version 0.1.0 \
+  -n fold --create-namespace \
   --set secret.brokerKey="$(openssl rand -base64 32)" \
   --set secret.adminKey="$(openssl rand -base64 32)"
 ```

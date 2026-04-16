@@ -1,4 +1,4 @@
-name: Build and Push Docker Image
+name: Build and Push Docker Image + Helm Chart
 
 on:
   push:
@@ -39,10 +39,16 @@ jobs:
             type=sha,prefix=
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: Build and push
+      - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Push Helm chart to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
+          helm package charts/texas-fold-em
+          helm push texas-fold-em-*.tgz oci://ghcr.io/rounakdatta/charts
