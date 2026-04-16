@@ -1,14 +1,35 @@
 image:
   repository: ghcr.io/rounakdatta/texas-fold-em
-  # If empty, defaults to .Chart.AppVersion.
-  tag: ""
+  tag: latest
   pullPolicy: IfNotPresent
 
-# Single writer by design; don't increase.
-replicas: 1
+# Single writer by design — do not scale beyond 1
+replicaCount: 1
 
 service:
-  port: 80
+  type: ClusterIP
+  port: 8080
+
+persistence:
+  enabled: true
+  storageClass: ""
+  size: 1Gi
+  accessMode: ReadWriteOnce
+
+# Bearer keys. Either supply inline (secret.create: true) or bring your
+# own Secret (secret.create: false, secret.existingSecret: <name>).
+secret:
+  create: true
+  brokerKey: ""
+  adminKey: ""
+  existingSecret: ""
+
+env:
+  TEXAS_FOLDEM_REFRESH_LEAD: 2m
+  TEXAS_FOLDEM_KEEPWARM_EVERY: 30s
+  TEXAS_FOLDEM_HTTP_TIMEOUT: 15s
+  TEXAS_FOLDEM_SHUTDOWN_GRACE: 10s
+  TEXAS_FOLDEM_LOG_LEVEL: info
 
 resources:
   requests:
@@ -16,60 +37,3 @@ resources:
     memory: 32Mi
   limits:
     memory: 128Mi
-
-persistence:
-  # Holds one ~1 KiB JSON file. 1Gi only because that's the floor on many
-  # dynamic provisioners; on k3s local-path you can drop this to 64Mi.
-  size: 1Gi
-  storageClassName: ""
-
-# Passed through to TEXAS_FOLDEM_* env vars on the container.
-env:
-  refreshLead: 2m
-  keepwarmEvery: 1m
-  httpTimeout: 15s
-  shutdownGrace: 10s
-  logLevel: info
-
-# Bearer keys.
-#
-# Option A (default): chart creates a Secret from the values below.
-#   secret.create: true, supply brokerKey + adminKey.
-#
-# Option B: bring your own Secret (recommended for prod — sealed-secrets,
-# external-secrets, etc).
-#   secret.create: false, secret.existingSecret: <name>. The Secret must
-#   have keys named by secret.brokerKeyRef / secret.adminKeyRef.
-secret:
-  create: true
-  brokerKey: ""
-  adminKey: ""
-  existingSecret: ""
-  brokerKeyRef: broker-key
-  adminKeyRef: admin-key
-
-podSecurityContext:
-  runAsNonRoot: true
-  runAsUser: 65532
-  runAsGroup: 65532
-  fsGroup: 65532
-  fsGroupChangePolicy: OnRootMismatch
-  seccompProfile:
-    type: RuntimeDefault
-
-containerSecurityContext:
-  allowPrivilegeEscalation: false
-  readOnlyRootFilesystem: true
-  capabilities:
-    drop: ["ALL"]
-
-terminationGracePeriodSeconds: 20
-
-# Optional: extra labels / annotations on all objects.
-commonLabels: {}
-commonAnnotations: {}
-
-# Pod scheduling.
-nodeSelector: {}
-tolerations: []
-affinity: {}

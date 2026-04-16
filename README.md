@@ -2,7 +2,7 @@
 
 A long-running Go broker that holds a [fold.money](https://fold.money) refresh
 token and issues short-lived access tokens to consumers on demand. Runs as a
-single-replica StatefulSet in Kubernetes.
+single-replica Deployment in Kubernetes.
 
 Reverse-engineering notes on the underlying Fold API live in [`fold.md`](./fold.md) — the full endpoint catalog, response shapes, auth flow, known error codes, and operational guidance for running the broker.
 
@@ -33,8 +33,8 @@ Log in to [fold.money](https://fold.money), copy `refresh_token` and
 `device_hash` from `localStorage`, then:
 
 ```bash
-kubectl -n fold port-forward svc/tfe-texas-fold-em 8080:80 &
-ADMIN=$(kubectl -n fold get secret tfe-texas-fold-em -o jsonpath='{.data.admin-key}' | base64 -d)
+kubectl -n fold port-forward svc/tfe 8080:8080 &
+ADMIN=$(kubectl -n fold get secret tfe -o jsonpath='{.data.admin-key}' | base64 -d)
 
 curl -sS -X POST http://localhost:8080/init \
   -H "Authorization: Bearer $ADMIN" \
@@ -46,7 +46,7 @@ curl -sS -X POST http://localhost:8080/init \
 
 ```bash
 curl -sS -H "Authorization: Bearer $BROKER_KEY" \
-  http://tfe-texas-fold-em.fold.svc.cluster.local/token
+  http://tfe.fold.svc.cluster.local:8080/token
 # { "access_token": "...", "device_hash": "...", "user_uuid": "...", "expires_at": "..." }
 ```
 
@@ -74,10 +74,6 @@ curl "https://api.fold.money/api/v3/users/$UID/transactions?limit=10" \
 ```bash
 make test         # go test -race
 make build        # native binary
-make image        # docker build (local, single-arch)
-make image-push   # multi-arch buildx + push to IMAGE
-make helm-lint
-make helm-template
 ```
 
 ## License
