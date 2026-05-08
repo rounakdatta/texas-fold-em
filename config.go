@@ -42,6 +42,17 @@ type Config struct {
 	// the firefly-pat key of the texas-fold-em-credentials Secret in
 	// production. Required when the integration is enabled.
 	FireflyPAT string // TEXAS_FOLDEM_FIREFLY_PAT           required when integration enabled
+
+	// GeminiAPIKey is a Google AI Studio API key. Optional — when set,
+	// the classifier's Tier-3 (LLM RAG) fires for cases where Tier 1+2
+	// miss. When unset, Tier 3 is skipped and unmatched fold txns go
+	// straight to needs_review for human disposition.
+	GeminiAPIKey string // TEXAS_FOLDEM_GEMINI_API_KEY        optional
+
+	// GeminiModel selects the model. Defaults to gemini-3.1-flash-lite —
+	// the most cost-efficient model in the gemini-3 family at the time
+	// of writing.
+	GeminiModel string // TEXAS_FOLDEM_GEMINI_MODEL          default gemini-3.1-flash-lite
 }
 
 // LoadConfig reads env vars and returns a validated Config. It never reads
@@ -67,6 +78,8 @@ func LoadConfig() (Config, error) {
 		StagingDBPath:      envStr("TEXAS_FOLDEM_STAGING_DB_PATH", filepath.Join(home, ".texas-fold-em", "staging.db")),
 		FireflyBase:        strings.TrimRight(envStr("TEXAS_FOLDEM_FIREFLY_BASE", "http://firefly.apps.svc.cluster.local:8080"), "/"),
 		FireflyPAT:         os.Getenv("TEXAS_FOLDEM_FIREFLY_PAT"),
+		GeminiAPIKey:       os.Getenv("TEXAS_FOLDEM_GEMINI_API_KEY"),
+		GeminiModel:        envStr("TEXAS_FOLDEM_GEMINI_MODEL", "gemini-3.1-flash-lite"),
 	}
 
 	var problems []string

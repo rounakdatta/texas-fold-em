@@ -33,6 +33,8 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+
+	"github.com/rounakdatta/texas-fold-em/internal/integration/gemini"
 )
 
 // DefaultConfidenceThreshold is the cut-off above which a Tier-1 or
@@ -119,19 +121,22 @@ type StagedRow struct {
 	MerchantExtracted string
 }
 
-// Classifier runs the deterministic tiers. Stateless beyond its
-// dependencies; safe for concurrent use under a typical SQLite-bound
-// rate (the DB has MaxOpenConns=1 so writes serialise).
+// Classifier runs the deterministic tiers (and optionally Tier-3 LLM
+// when an LLM client is attached). Stateless beyond its dependencies;
+// safe for concurrent use under a typical SQLite-bound rate (the DB
+// has MaxOpenConns=1 so writes serialise).
 type Classifier struct {
 	db        *sql.DB
 	log       *slog.Logger
 	threshold float64
 	ftsTopK   int
+	llm       *gemini.Client // nil → Tier-3 skipped
 }
 
-// New constructs a Classifier. Pass DefaultConfidenceThreshold for
-// production; tests can pass a lower threshold to assert below-bar
-// behaviour without crafting borderline fixtures.
+// New constructs a Classifier with Tier-3 disabled. Use SetLLM to
+// enable it. Pass DefaultConfidenceThreshold for production; tests
+// can pass a lower threshold to assert below-bar behaviour without
+// crafting borderline fixtures.
 func New(db *sql.DB, log *slog.Logger, threshold float64, ftsTopK int) *Classifier {
 	if threshold <= 0 {
 		threshold = DefaultConfidenceThreshold
@@ -146,6 +151,10 @@ func New(db *sql.DB, log *slog.Logger, threshold float64, ftsTopK int) *Classifi
 		ftsTopK:   ftsTopK,
 	}
 }
+
+// SetLLM attaches a Gemini client. When set, ClassifyOne will fall
+// through to Tier-3 if Tiers 1 and 2 miss. Pass nil to disable.
+func (c *Classifier) SetLLM(llm *gemini.Client) { c.llm = llm }
 
 // ClassifyOne runs the tiered pipeline against one staged row. Pure
 // function — does not touch staged_fold_txns. Caller (Apply or the
@@ -164,6 +173,17 @@ func (c *Classifier) ClassifyOne(ctx context.Context, staged StagedRow) (Decisio
 	} else if ok {
 		return d, nil
 	}
+	// Tier 3 — LLM RAG. Only fires when a Gemini client is attached.
+	// On any error (network, parse, hallucinated IDs) we silently fall
+	// through to Tier 4 — Tier-3 is best-effort, never load-bearing.
+	if c.llm != nil {
+		if d, ok, err := c.tierThreeLLM(ctx, staged); err != nil {
+			c.log.Warn("tier 3 LLM error; falling through to human review",
+				"fold_uuid", staged.FoldUUID, "err", err)
+		} else if ok {
+			return d, nil
+		}
+	}
 	// Nothing matched; queue for human review.
 	return Decision{
 		Tier:       TierHumanReview,
@@ -171,7 +191,7 @@ func (c *Classifier) ClassifyOne(ctx context.Context, staged StagedRow) (Decisio
 		Evidence: Evidence{
 			Tier:               TierHumanReview,
 			MerchantNormalized: staged.MerchantExtracted,
-			Note:               "no Tier-1 lookup match, no Tier-2 FTS hits",
+			Note:               "no Tier-1 lookup match, no Tier-2 FTS hits, no usable Tier-3 LLM response",
 		},
 	}, nil
 }

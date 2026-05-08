@@ -33,6 +33,7 @@ import (
 	"github.com/rounakdatta/texas-fold-em/internal/integration/classifier"
 	"github.com/rounakdatta/texas-fold-em/internal/integration/firefly"
 	"github.com/rounakdatta/texas-fold-em/internal/integration/fold"
+	"github.com/rounakdatta/texas-fold-em/internal/integration/gemini"
 )
 
 // Version is baked in at build time via -ldflags. Defaults to "dev".
@@ -123,14 +124,23 @@ func run() error {
 		foldSyncer := integration.NewFoldSyncer(intDB, foldClient, intLog)
 		srv.SetFoldSyncer(foldSyncer)
 
-		// Deterministic classifier (Tiers 1+2). PR E adds Tier-3 (LLM RAG)
-		// as a fallback inside ClassifyOne; PR F adds the push step.
+		// Deterministic classifier (Tiers 1+2). Tier-3 attaches below if
+		// a Gemini API key is configured.
 		cls := classifier.New(intDB.DB, intLog, classifier.DefaultConfidenceThreshold, 10)
+
+		llmEnabled := false
+		if cfg.GeminiAPIKey != "" {
+			llmClient := gemini.NewClient(cfg.GeminiAPIKey, cfg.GeminiModel, "", nil)
+			cls.SetLLM(llmClient)
+			llmEnabled = true
+		}
 		srv.SetClassifier(cls)
 
 		intLog.Info("integration ready",
 			"firefly_base", cfg.FireflyBase,
 			"fold_base", cfg.APIBase,
+			"tier3_llm", llmEnabled,
+			"gemini_model", cfg.GeminiModel,
 			"endpoints", []string{
 				"POST /admin/firefly/sync",
 				"POST /admin/fold/sync",
