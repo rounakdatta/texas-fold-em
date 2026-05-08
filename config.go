@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -32,6 +33,53 @@ type Config struct {
 	// from StatePath so schema migrations in the integration code can never
 	// destabilise the broker's refresh chain.
 	StagingDBPath string // TEXAS_FOLDEM_STAGING_DB_PATH       default ~/.texas-fold-em/staging.db
+
+	// FireflyBase is the base URL for the firefly host. The default
+	// targets the in-cluster Service; tests and local runs override.
+	// Required when the integration is enabled.
+	FireflyBase string // TEXAS_FOLDEM_FIREFLY_BASE          default http://firefly.apps.svc.cluster.local:8080
+
+	// FireflyPAT is a Firefly III Personal Access Token. Sourced from
+	// the firefly-pat key of the texas-fold-em-credentials Secret in
+	// production. Required when the integration is enabled.
+	FireflyPAT string // TEXAS_FOLDEM_FIREFLY_PAT           required when integration enabled
+
+	// GeminiAPIKey is a Google AI Studio API key. Optional — when set,
+	// the classifier's Tier-3 (LLM RAG) fires for cases where Tier 1+2
+	// miss. When unset, Tier 3 is skipped and unmatched fold txns go
+	// straight to needs_review for human disposition.
+	GeminiAPIKey string // TEXAS_FOLDEM_GEMINI_API_KEY        optional
+
+	// GeminiModel selects the model. Defaults to gemini-3.1-flash-lite —
+	// the most cost-efficient model in the gemini-3 family at the time
+	// of writing.
+	GeminiModel string // TEXAS_FOLDEM_GEMINI_MODEL          default gemini-3.1-flash-lite
+
+	// FireflyReadOnly is the operator-facing kill-switch for the push
+	// endpoint. When true, /admin/push will refuse confirmed writes
+	// (preview mode still works). The flag exists so an operator who
+	// has any doubt about the integration can stop all writes at the
+	// HTTP boundary without redeploying.
+	FireflyReadOnly bool // TEXAS_FOLDEM_FIREFLY_READONLY     default false
+
+	// UICookieAuth toggles cookie-based auth for /admin/ui/* routes.
+	// false (default): trust upstream proxy auth (tinyauth ForwardAuth
+	// at the cluster ingress). true: require a tfe-admin cookie set
+	// via GET /admin/ui/login?key=<admin>. Use cookie mode for local
+	// development against a port-forward.
+	UICookieAuth bool // TEXAS_FOLDEM_UI_COOKIE_AUTH       default false
+
+	// PeriodicSyncEvery is the cadence for the integrated cron loop:
+	// fold sync → classify pending. 0 disables the loop entirely
+	// (manual /admin/* triggers still work). Recommended cadence is
+	// 1h once everything's stable; start at 0 (manual only) and bump
+	// once you trust the classifier proposals.
+	PeriodicSyncEvery time.Duration // TEXAS_FOLDEM_PERIODIC_SYNC_EVERY   default 0 (disabled)
+
+	// PeriodicSyncLimit is the per-cycle fold transactions fetch limit.
+	// 50 is a reasonable default for an hourly cycle; bump higher for
+	// less frequent cycles to avoid missing transactions.
+	PeriodicSyncLimit int // TEXAS_FOLDEM_PERIODIC_SYNC_LIMIT   default 50
 }
 
 // LoadConfig reads env vars and returns a validated Config. It never reads
@@ -55,6 +103,14 @@ func LoadConfig() (Config, error) {
 		ShutdownGrace:      envDur("TEXAS_FOLDEM_SHUTDOWN_GRACE", 10*time.Second),
 		IntegrationEnabled: envBool("TEXAS_FOLDEM_INTEGRATION_ENABLED", false),
 		StagingDBPath:      envStr("TEXAS_FOLDEM_STAGING_DB_PATH", filepath.Join(home, ".texas-fold-em", "staging.db")),
+		FireflyBase:        strings.TrimRight(envStr("TEXAS_FOLDEM_FIREFLY_BASE", "http://firefly.apps.svc.cluster.local:8080"), "/"),
+		FireflyPAT:         os.Getenv("TEXAS_FOLDEM_FIREFLY_PAT"),
+		GeminiAPIKey:       os.Getenv("TEXAS_FOLDEM_GEMINI_API_KEY"),
+		GeminiModel:        envStr("TEXAS_FOLDEM_GEMINI_MODEL", "gemini-3.1-flash-lite"),
+		FireflyReadOnly:    envBool("TEXAS_FOLDEM_FIREFLY_READONLY", false),
+		UICookieAuth:       envBool("TEXAS_FOLDEM_UI_COOKIE_AUTH", false),
+		PeriodicSyncEvery:  envDur("TEXAS_FOLDEM_PERIODIC_SYNC_EVERY", 0),
+		PeriodicSyncLimit:  envInt("TEXAS_FOLDEM_PERIODIC_SYNC_LIMIT", 50),
 	}
 
 	var problems []string
@@ -69,6 +125,14 @@ func LoadConfig() (Config, error) {
 	}
 	if cfg.RefreshLead < 30*time.Second {
 		problems = append(problems, "TEXAS_FOLDEM_REFRESH_LEAD must be at least 30s")
+	}
+	if cfg.IntegrationEnabled {
+		if cfg.FireflyBase == "" {
+			problems = append(problems, "TEXAS_FOLDEM_FIREFLY_BASE is required when integration is enabled")
+		}
+		if cfg.FireflyPAT == "" {
+			problems = append(problems, "TEXAS_FOLDEM_FIREFLY_PAT is required when integration is enabled")
+		}
 	}
 	if len(problems) > 0 {
 		return Config{}, errors.New("invalid config: " + strings.Join(problems, "; "))
@@ -93,6 +157,20 @@ func envDur(k string, def time.Duration) time.Duration {
 		return def
 	}
 	return d
+}
+
+// envInt parses an integer env var, falling back to def on parse error
+// or empty value.
+func envInt(k string, def int) int {
+	v := os.Getenv(k)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil {
+		return def
+	}
+	return n
 }
 
 // envBool parses common true-ish values; anything else (or unset) falls

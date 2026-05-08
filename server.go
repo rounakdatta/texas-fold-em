@@ -11,21 +11,27 @@ import (
 	"time"
 
 	"github.com/rounakdatta/texas-fold-em/internal/integration"
+	"github.com/rounakdatta/texas-fold-em/internal/integration/classifier"
+	"github.com/rounakdatta/texas-fold-em/internal/integration/ui"
 )
 
 // Server wires the Broker up to HTTP. Routes are defined in Handler().
 //
-// integration is optional: when nil, the broker behaves exactly as
-// before (no /admin/integration endpoints, /health omits the
-// integration block). When set, future PRs will register the fold→
-// firefly classifier endpoints behind it.
+// The integration fields are optional: when nil, the broker behaves
+// exactly as before (no /admin/firefly/sync endpoint, /health omits the
+// integration block). When set, the integration routes are registered.
 type Server struct {
-	broker      *Broker
-	brokerKey   string
-	adminKey    string
-	log         *slog.Logger
-	started     time.Time
-	integration *integration.DB
+	broker        *Broker
+	brokerKey     string
+	adminKey      string
+	log           *slog.Logger
+	started       time.Time
+	integration   *integration.DB
+	fireflySyncer *integration.Syncer
+	foldSyncer    *integration.FoldSyncer
+	classifier    *classifier.Classifier
+	pusher        *integration.Pusher
+	uiHandler     *ui.Handler
 }
 
 // NewServer constructs a Server. Keys are required (config validation
@@ -44,6 +50,26 @@ func NewServer(broker *Broker, brokerKey, adminKey string, log *slog.Logger) *Se
 // passing nil clears it. Called from main only when the
 // TEXAS_FOLDEM_INTEGRATION_ENABLED feature flag is true.
 func (s *Server) SetIntegration(db *integration.DB) { s.integration = db }
+
+// SetFireflySyncer attaches the firefly syncer. When set, the
+// POST /admin/firefly/sync endpoint is registered.
+func (s *Server) SetFireflySyncer(syncer *integration.Syncer) { s.fireflySyncer = syncer }
+
+// SetFoldSyncer attaches the fold staging syncer. When set, the
+// POST /admin/fold/sync endpoint is registered.
+func (s *Server) SetFoldSyncer(syncer *integration.FoldSyncer) { s.foldSyncer = syncer }
+
+// SetClassifier attaches the classifier. When set, the
+// POST /admin/classify endpoint is registered.
+func (s *Server) SetClassifier(c *classifier.Classifier) { s.classifier = c }
+
+// SetPusher attaches the Pusher. When set, the
+// POST /admin/push/{fold_uuid} endpoint is registered.
+func (s *Server) SetPusher(p *integration.Pusher) { s.pusher = p }
+
+// SetUI attaches the review UI handler. When set, /admin/ui/* routes
+// are registered.
+func (s *Server) SetUI(h *ui.Handler) { s.uiHandler = h }
 
 // Handler returns the full HTTP mux. Routes:
 //
@@ -64,6 +90,25 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.Handle("GET /token", s.bearer(s.brokerKey, s.handleToken))
 	mux.Handle("POST /init", s.bearer(s.adminKey, s.handleInit))
+	if s.fireflySyncer != nil {
+		// Long-running sync — admin-key gated. Body returns the SyncReport
+		// (counts + duration) so an operator can confirm the result.
+		mux.Handle("POST /admin/firefly/sync", s.bearer(s.adminKey, s.handleFireflySync))
+	}
+	if s.foldSyncer != nil {
+		mux.Handle("POST /admin/fold/sync", s.bearer(s.adminKey, s.handleFoldSync))
+	}
+	if s.classifier != nil {
+		mux.Handle("POST /admin/classify", s.bearer(s.adminKey, s.handleClassify))
+	}
+	if s.pusher != nil {
+		mux.Handle("POST /admin/push/{fold_uuid}", s.bearer(s.adminKey, s.handlePush))
+	}
+	if s.uiHandler != nil {
+		// UI mounts its own routes; auth handled by the UI handler
+		// (cookie or upstream-proxy/tinyauth, configured in main).
+		s.uiHandler.Mount(mux)
+	}
 	return s.withLogging(mux)
 }
 

@@ -30,6 +30,12 @@ import (
 	"time"
 
 	"github.com/rounakdatta/texas-fold-em/internal/integration"
+	"github.com/rounakdatta/texas-fold-em/internal/integration/classifier"
+	"github.com/rounakdatta/texas-fold-em/internal/integration/cron"
+	"github.com/rounakdatta/texas-fold-em/internal/integration/firefly"
+	"github.com/rounakdatta/texas-fold-em/internal/integration/fold"
+	"github.com/rounakdatta/texas-fold-em/internal/integration/gemini"
+	"github.com/rounakdatta/texas-fold-em/internal/integration/ui"
 )
 
 // Version is baked in at build time via -ldflags. Defaults to "dev".
@@ -76,6 +82,13 @@ func run() error {
 	broker := NewBroker(store, client, log, cfg.RefreshLead)
 	srv := NewServer(broker, cfg.BrokerKey, cfg.AdminKey, log)
 
+	// Root ctx cancels on SIGINT/SIGTERM. Created early so the optional
+	// integration cron goroutine below can attach to the same lifecycle
+	// as the broker keepwarm and the http server.
+	rootCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	var wg sync.WaitGroup
+
 	// Optional fold→firefly integration. Only fires when explicitly enabled
 	// via TEXAS_FOLDEM_INTEGRATION_ENABLED — on a stock deploy this code
 	// path stays cold and the broker continues to behave exactly as before.
@@ -93,12 +106,96 @@ func run() error {
 			}
 		}()
 		srv.SetIntegration(intDB)
-		intLog.Info("integration db ready")
-	}
 
-	// Root ctx cancels on SIGINT/SIGTERM. Everything downstream observes it.
-	rootCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
+		// Firefly read-side client + syncer. The PAT is sourced from the
+		// firefly-pat key of the Bitwarden-synced texas-fold-em-credentials
+		// Secret in production deploys.
+		fireflyClient := firefly.NewClient(cfg.FireflyBase, cfg.FireflyPAT, nil)
+		fireflySyncer := integration.NewSyncer(intDB, fireflyClient, intLog)
+		srv.SetFireflySyncer(fireflySyncer)
+
+		// Fold read-side client + staging syncer. Bridges the broker's
+		// access tokens into the data-side fold endpoint via a closure;
+		// keeps the broker's auth-side client and the integration's
+		// data-side client physically separate.
+		foldClient := fold.NewClient(cfg.APIBase, func(ctx context.Context) (fold.AccessToken, error) {
+			tok, err := broker.Token(ctx)
+			if err != nil {
+				return fold.AccessToken{}, err
+			}
+			return fold.AccessToken{
+				AccessToken: tok.AccessToken,
+				DeviceHash:  tok.DeviceHash,
+				UserUUID:    tok.UserUUID,
+				ExpiresAt:   tok.ExpiresAt,
+			}, nil
+		}, nil)
+		foldSyncer := integration.NewFoldSyncer(intDB, foldClient, intLog)
+		srv.SetFoldSyncer(foldSyncer)
+
+		// Deterministic classifier (Tiers 1+2). Tier-3 attaches below if
+		// a Gemini API key is configured.
+		cls := classifier.New(intDB.DB, intLog, classifier.DefaultConfidenceThreshold, 10)
+
+		llmEnabled := false
+		if cfg.GeminiAPIKey != "" {
+			llmClient := gemini.NewClient(cfg.GeminiAPIKey, cfg.GeminiModel, "", nil)
+			cls.SetLLM(llmClient)
+			llmEnabled = true
+		}
+		srv.SetClassifier(cls)
+
+		// Pusher — firefly write side. Read-only kill-switch propagated
+		// from cfg. The Pusher refuses confirmed writes when readOnly,
+		// but preview (?confirm=false) still works for inspection.
+		// Active-learning hook: every successful push reinforces
+		// merchant_lookup so the next fold txn from the same merchant
+		// auto-classifies via Tier 1.
+		pusher := integration.NewPusher(intDB, fireflyClient, intLog, cfg.FireflyReadOnly)
+		pusher.SetLearner(cls)
+		srv.SetPusher(pusher)
+
+		// Review UI. Auth mode chosen by config: UICookie for local dev
+		// (cookie set via /admin/ui/login?key=<admin>), UIBypass for
+		// production where the cluster ingress runs tinyauth ForwardAuth.
+		uiAuth := ui.AuthModeBypass
+		if cfg.UICookieAuth {
+			uiAuth = ui.AuthModeCookie
+		}
+		uiHandler, err := ui.New(intDB.DB, pusher, intLog, cfg.AdminKey, uiAuth)
+		if err != nil {
+			return fmt.Errorf("ui handler: %w", err)
+		}
+		srv.SetUI(uiHandler)
+
+		intLog.Info("integration ready",
+			"firefly_base", cfg.FireflyBase,
+			"fold_base", cfg.APIBase,
+			"tier3_llm", llmEnabled,
+			"gemini_model", cfg.GeminiModel,
+			"firefly_readonly", cfg.FireflyReadOnly,
+			"ui_auth", uiAuthLabel(uiAuth),
+			"periodic_sync_every", cfg.PeriodicSyncEvery,
+			"endpoints", []string{
+				"POST /admin/firefly/sync",
+				"POST /admin/fold/sync",
+				"POST /admin/classify",
+				"POST /admin/push/{fold_uuid}",
+				"GET  /admin/ui/",
+			},
+		)
+
+		// Periodic sync cron. Disabled when PeriodicSyncEvery is 0
+		// (cron.PeriodicSync is also self-disabling on that value, but
+		// we skip the goroutine spawn entirely for cleanliness).
+		if cfg.PeriodicSyncEvery > 0 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				cron.PeriodicSync(rootCtx, foldSyncer, cls, cfg.PeriodicSyncEvery, cfg.PeriodicSyncLimit, intLog)
+			}()
+		}
+	}
 
 	httpSrv := &http.Server{
 		Addr:              cfg.ListenAddr,
@@ -109,9 +206,8 @@ func run() error {
 		IdleTimeout:       120 * time.Second,
 	}
 
-	// Spawn background workers. wg tracks them so we don't return from run()
-	// while they're still running.
-	var wg sync.WaitGroup
+	// Spawn background workers. wg (declared earlier) tracks them so
+	// we don't return from run() while they're still running.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -158,6 +254,14 @@ func run() error {
 	wg.Wait()
 	log.Info("shutdown complete")
 	return nil
+}
+
+// uiAuthLabel renders the auth mode for log output.
+func uiAuthLabel(m ui.AuthMode) string {
+	if m == ui.AuthModeCookie {
+		return "cookie (local-dev)"
+	}
+	return "bypass (relies on upstream proxy auth, e.g. tinyauth)"
 }
 
 func newLogger(level string) *slog.Logger {

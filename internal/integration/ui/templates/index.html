@@ -1,0 +1,37 @@
+{{define "content"}}
+<h2>{{.Status}} ({{len .Rows}})</h2>
+{{if eq (len .Rows) 0}}
+  <p style="color:var(--muted)">No rows in this state. {{if eq .Status "needs_review"}}If everything's auto-classified, this is the goal — the active-learning loop is doing its job.{{end}}</p>
+{{else}}
+  <table>
+    <thead>
+      <tr>
+        <th>When</th>
+        <th>Amount</th>
+        <th>Mode</th>
+        <th>Merchant</th>
+        <th>Tier</th>
+        <th>Conf</th>
+        <th>Proposed category</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Rows}}
+      <tr>
+        <td>{{.TxnTimestamp}}</td>
+        <td class="amount {{if eq .Type "OUTGOING"}}amount-out{{else}}amount-in{{end}}">
+          {{if eq .Type "OUTGOING"}}-{{else}}+{{end}}{{.Currency}} {{.AmountDisplay}}
+        </td>
+        <td><span class="pill pill-{{.Mode}}">{{.Mode}}</span></td>
+        <td>{{.MerchantExtracted}}</td>
+        <td class="tier">{{.TierLabel}}</td>
+        <td>{{if .Confidence}}{{printf "%.2f" .Confidence}}{{end}}</td>
+        <td>{{.ProposedCategoryName}}</td>
+        <td><a href="/admin/ui/staged/{{.FoldUUID}}">review →</a></td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+{{end}}
+{{end}}
