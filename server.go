@@ -12,6 +12,7 @@ import (
 
 	"github.com/rounakdatta/texas-fold-em/internal/integration"
 	"github.com/rounakdatta/texas-fold-em/internal/integration/classifier"
+	"github.com/rounakdatta/texas-fold-em/internal/integration/ui"
 )
 
 // Server wires the Broker up to HTTP. Routes are defined in Handler().
@@ -30,6 +31,7 @@ type Server struct {
 	foldSyncer    *integration.FoldSyncer
 	classifier    *classifier.Classifier
 	pusher        *integration.Pusher
+	uiHandler     *ui.Handler
 }
 
 // NewServer constructs a Server. Keys are required (config validation
@@ -65,6 +67,10 @@ func (s *Server) SetClassifier(c *classifier.Classifier) { s.classifier = c }
 // POST /admin/push/{fold_uuid} endpoint is registered.
 func (s *Server) SetPusher(p *integration.Pusher) { s.pusher = p }
 
+// SetUI attaches the review UI handler. When set, /admin/ui/* routes
+// are registered.
+func (s *Server) SetUI(h *ui.Handler) { s.uiHandler = h }
+
 // Handler returns the full HTTP mux. Routes:
 //
 //	GET  /livez       always 200 while process is alive (k8s liveness/readiness probe)
@@ -97,6 +103,11 @@ func (s *Server) Handler() http.Handler {
 	}
 	if s.pusher != nil {
 		mux.Handle("POST /admin/push/{fold_uuid}", s.bearer(s.adminKey, s.handlePush))
+	}
+	if s.uiHandler != nil {
+		// UI mounts its own routes; auth handled by the UI handler
+		// (cookie or upstream-proxy/tinyauth, configured in main).
+		s.uiHandler.Mount(mux)
 	}
 	return s.withLogging(mux)
 }
