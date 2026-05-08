@@ -11,8 +11,11 @@ import (
 	"strings"
 	"testing"
 
+	"time"
+
 	"github.com/rounakdatta/texas-fold-em/internal/integration"
 	"github.com/rounakdatta/texas-fold-em/internal/integration/firefly"
+	"github.com/rounakdatta/texas-fold-em/internal/integration/fold"
 )
 
 // TestServer_FireflySyncRoute_NotRegisteredWithoutSyncer guards against
@@ -68,6 +71,52 @@ func TestServer_FireflySync_ReturnsReport(t *testing.T) {
 	}
 }
 
+// TestServer_FoldSyncRoute_NotRegisteredWithoutSyncer mirrors the
+// firefly variant — asserts a stock deploy returns 404.
+func TestServer_FoldSyncRoute_NotRegisteredWithoutSyncer(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	w := do(t, srv.Handler(), "POST", "/admin/fold/sync", "admin-key", nil)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404 when fold syncer absent, got %d", w.Code)
+	}
+}
+
+// TestServer_FoldSync_RequiresAdminKey covers the auth gating.
+func TestServer_FoldSync_RequiresAdminKey(t *testing.T) {
+	srv := newTestServerWithIntegration(t)
+	tests := []struct {
+		name string
+		auth string
+		code int
+	}{
+		{"no auth", "", http.StatusUnauthorized},
+		{"broker key (wrong key)", "broker-key", http.StatusUnauthorized},
+		{"correct admin key", "admin-key", http.StatusOK},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := do(t, srv.Handler(), "POST", "/admin/fold/sync", tt.auth, nil)
+			if w.Code != tt.code {
+				t.Errorf("status=%d, want %d. body: %s", w.Code, tt.code, w.Body.String())
+			}
+		})
+	}
+}
+
+// TestServer_FoldSync_RejectsBadLimit guards against the limit param
+// going outside the upstream's accepted range.
+func TestServer_FoldSync_RejectsBadLimit(t *testing.T) {
+	srv := newTestServerWithIntegration(t)
+	for _, bad := range []string{"0", "-1", "abc", "9999"} {
+		t.Run(bad, func(t *testing.T) {
+			w := do(t, srv.Handler(), "POST", "/admin/fold/sync?limit="+bad, "admin-key", nil)
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("limit=%s expected 400, got %d", bad, w.Code)
+			}
+		})
+	}
+}
+
 // newTestServerWithIntegration is the integration-enabled counterpart
 // to newTestServer (in server_test.go): real SQLite + a fake firefly
 // upstream wired through a real Syncer.
@@ -105,7 +154,34 @@ func newTestServerWithIntegration(t *testing.T) *Server {
 	}))
 	t.Cleanup(fakeFF.Close)
 
+	// Minimal fake fold API: returns one transaction for any user.
+	fakeFold := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.URL.Path, "/v3/users/") || !strings.HasSuffix(r.URL.Path, "/transactions") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"data":{"transactions":[{
+				"uuid":"fake-uuid-1","amount":70.0,"source_amount":70.0,
+				"currency":"INR","source_currency":"INR",
+				"txn_timestamp":"2026-05-08T12:59:18Z","mode":"CARD","type":"OUTGOING",
+				"narration":"CARD/x/Cake Palace/Rs/70.00/OUTGOING"
+			}]},
+			"meta":{}
+		}`))
+	}))
+	t.Cleanup(fakeFold.Close)
+
+	tokenFn := func(_ context.Context) (fold.AccessToken, error) {
+		return fold.AccessToken{
+			AccessToken: "ats", DeviceHash: "dh", UserUUID: "user-1",
+			ExpiresAt: time.Now().Add(15 * time.Minute),
+		}, nil
+	}
+
 	srv.SetIntegration(db)
 	srv.SetFireflySyncer(integration.NewSyncer(db, firefly.NewClient(fakeFF.URL, "x", fakeFF.Client()), slog.New(slog.NewTextHandler(io.Discard, nil))))
+	srv.SetFoldSyncer(integration.NewFoldSyncer(db, fold.NewClient(fakeFold.URL, tokenFn, fakeFold.Client()), slog.New(slog.NewTextHandler(io.Discard, nil))))
 	return srv
 }
