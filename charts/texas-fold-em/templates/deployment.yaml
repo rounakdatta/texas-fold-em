@@ -39,6 +39,15 @@ spec:
             - name: {{ $key }}
               value: {{ $value | quote }}
             {{- end }}
+            {{/*
+              extraEnv accepts the full Kubernetes env-entry shape, so
+              callers can supply secretKeyRef / configMapKeyRef / fieldRef
+              entries — needed for the integration's FIREFLY_PAT and
+              GEMINI_API_KEY which come from a Secret.
+            */}}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           ports:
             - containerPort: 8080
               protocol: TCP

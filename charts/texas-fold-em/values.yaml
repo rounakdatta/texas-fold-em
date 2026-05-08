@@ -35,6 +35,22 @@ env:
   TEXAS_FOLDEM_SHUTDOWN_GRACE: 10s
   TEXAS_FOLDEM_LOG_LEVEL: info
 
+# extraEnv lets callers append arbitrary env entries to the container
+# spec — including ones using valueFrom (secretKeyRef etc.). Used by the
+# fold→firefly integration to plumb FIREFLY_PAT and GEMINI_API_KEY from
+# a Secret. Empty by default.
+#
+# Example:
+#   extraEnv:
+#     - name: TEXAS_FOLDEM_INTEGRATION_ENABLED
+#       value: "true"
+#     - name: TEXAS_FOLDEM_FIREFLY_PAT
+#       valueFrom:
+#         secretKeyRef:
+#           name: texas-fold-em-credentials
+#           key: firefly-pat
+extraEnv: []
+
 resources:
   requests:
     cpu: 10m
