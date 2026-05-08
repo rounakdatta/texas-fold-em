@@ -3,8 +3,7 @@ kind: Service
 metadata:
   name: {{ .Release.Name }}
   labels:
-    app.kubernetes.io/name: texas-fold-em
-    app.kubernetes.io/instance: {{ .Release.Name }}
+    {{- include "texas-fold-em.labels" . | nindent 4 }}
 spec:
   type: {{ .Values.service.type }}
   ports:
@@ -12,5 +11,4 @@ spec:
       targetPort: 8080
       protocol: TCP
   selector:
-    app.kubernetes.io/name: texas-fold-em
-    app.kubernetes.io/instance: {{ .Release.Name }}
+    {{- include "texas-fold-em.selectorLabels" . | nindent 4 }}

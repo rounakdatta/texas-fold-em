@@ -1,11 +1,10 @@
-{{- if .Values.persistence.enabled }}
+{{- if and .Values.persistence.enabled (not .Values.persistence.existingClaim) }}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: {{ .Release.Name }}-data
   labels:
-    app.kubernetes.io/name: texas-fold-em
-    app.kubernetes.io/instance: {{ .Release.Name }}
+    {{- include "texas-fold-em.labels" . | nindent 4 }}
 spec:
   accessModes:
     - {{ .Values.persistence.accessMode }}

@@ -11,10 +11,14 @@ service:
   port: 8080
 
 persistence:
+  # Stores state.json (refresh-token chain + bookkeeping) at /data
   enabled: true
   storageClass: ""
   size: 1Gi
   accessMode: ReadWriteOnce
+  # Reuse a pre-existing PVC instead of letting the chart create one.
+  # Useful when migrating from an existing deployment.
+  existingClaim: ""
 
 # Bearer keys. Either supply inline (secret.create: true) or bring your
 # own Secret (secret.create: false, secret.existingSecret: <name>).
