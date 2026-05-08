@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/rounakdatta/texas-fold-em/internal/integration"
+	"github.com/rounakdatta/texas-fold-em/internal/integration/classifier"
 	"github.com/rounakdatta/texas-fold-em/internal/integration/firefly"
 	"github.com/rounakdatta/texas-fold-em/internal/integration/fold"
 )
@@ -122,12 +123,18 @@ func run() error {
 		foldSyncer := integration.NewFoldSyncer(intDB, foldClient, intLog)
 		srv.SetFoldSyncer(foldSyncer)
 
+		// Deterministic classifier (Tiers 1+2). PR E adds Tier-3 (LLM RAG)
+		// as a fallback inside ClassifyOne; PR F adds the push step.
+		cls := classifier.New(intDB.DB, intLog, classifier.DefaultConfidenceThreshold, 10)
+		srv.SetClassifier(cls)
+
 		intLog.Info("integration ready",
 			"firefly_base", cfg.FireflyBase,
 			"fold_base", cfg.APIBase,
 			"endpoints", []string{
 				"POST /admin/firefly/sync",
 				"POST /admin/fold/sync",
+				"POST /admin/classify",
 			},
 		)
 	}

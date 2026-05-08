@@ -30,6 +30,35 @@ func (s *Server) handleFireflySync(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, report)
 }
 
+// handleClassify is the admin-gated handler for POST /admin/classify.
+// Walks every status='pending' staged fold transaction and applies the
+// deterministic classifier tiers. Status transitions:
+//
+//	pending → ready_to_push  (high-confidence Tier-1 or Tier-2)
+//	pending → needs_review   (low-confidence or Tier-4)
+//
+// Idempotent: rows already past 'pending' are not touched. Re-running
+// classify is the recovery path when the merchant_lookup is freshly
+// rebuilt — a pending row that previously fell through to needs_review
+// can move to ready_to_push when the lookup learns the merchant.
+//
+// (For freshly-confirmed merchants to start auto-classifying, the
+// caller should /admin/firefly/sync first to rebuild merchant_lookup,
+// THEN /admin/classify. PR H will wire that into a single periodic
+// goroutine.)
+func (s *Server) handleClassify(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+
+	report, err := s.classifier.ClassifyPending(ctx)
+	if err != nil {
+		s.log.Error("classify failed", "err", err)
+		writeErr(w, http.StatusInternalServerError, "classify failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
+}
+
 // handleFoldSync is the admin-gated handler for POST /admin/fold/sync.
 // Pulls recent fold transactions and stages them in staged_fold_txns
 // (idempotent on fold_uuid). Optional ?limit=N override; defaults to 50.
