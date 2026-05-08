@@ -136,15 +136,23 @@ func run() error {
 		}
 		srv.SetClassifier(cls)
 
+		// Pusher — firefly write side. Read-only kill-switch propagated
+		// from cfg. The Pusher refuses confirmed writes when readOnly,
+		// but preview (?confirm=false) still works for inspection.
+		pusher := integration.NewPusher(intDB, fireflyClient, intLog, cfg.FireflyReadOnly)
+		srv.SetPusher(pusher)
+
 		intLog.Info("integration ready",
 			"firefly_base", cfg.FireflyBase,
 			"fold_base", cfg.APIBase,
 			"tier3_llm", llmEnabled,
 			"gemini_model", cfg.GeminiModel,
+			"firefly_readonly", cfg.FireflyReadOnly,
 			"endpoints", []string{
 				"POST /admin/firefly/sync",
 				"POST /admin/fold/sync",
 				"POST /admin/classify",
+				"POST /admin/push/{fold_uuid}",
 			},
 		)
 	}

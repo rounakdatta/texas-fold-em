@@ -53,6 +53,13 @@ type Config struct {
 	// the most cost-efficient model in the gemini-3 family at the time
 	// of writing.
 	GeminiModel string // TEXAS_FOLDEM_GEMINI_MODEL          default gemini-3.1-flash-lite
+
+	// FireflyReadOnly is the operator-facing kill-switch for the push
+	// endpoint. When true, /admin/push will refuse confirmed writes
+	// (preview mode still works). The flag exists so an operator who
+	// has any doubt about the integration can stop all writes at the
+	// HTTP boundary without redeploying.
+	FireflyReadOnly bool // TEXAS_FOLDEM_FIREFLY_READONLY     default false
 }
 
 // LoadConfig reads env vars and returns a validated Config. It never reads
@@ -80,6 +87,7 @@ func LoadConfig() (Config, error) {
 		FireflyPAT:         os.Getenv("TEXAS_FOLDEM_FIREFLY_PAT"),
 		GeminiAPIKey:       os.Getenv("TEXAS_FOLDEM_GEMINI_API_KEY"),
 		GeminiModel:        envStr("TEXAS_FOLDEM_GEMINI_MODEL", "gemini-3.1-flash-lite"),
+		FireflyReadOnly:    envBool("TEXAS_FOLDEM_FIREFLY_READONLY", false),
 	}
 
 	var problems []string
