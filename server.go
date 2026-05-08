@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/rounakdatta/texas-fold-em/internal/integration"
+	"github.com/rounakdatta/texas-fold-em/internal/integration/classifier"
 )
 
 // Server wires the Broker up to HTTP. Routes are defined in Handler().
@@ -27,6 +28,7 @@ type Server struct {
 	integration   *integration.DB
 	fireflySyncer *integration.Syncer
 	foldSyncer    *integration.FoldSyncer
+	classifier    *classifier.Classifier
 }
 
 // NewServer constructs a Server. Keys are required (config validation
@@ -54,6 +56,10 @@ func (s *Server) SetFireflySyncer(syncer *integration.Syncer) { s.fireflySyncer 
 // POST /admin/fold/sync endpoint is registered.
 func (s *Server) SetFoldSyncer(syncer *integration.FoldSyncer) { s.foldSyncer = syncer }
 
+// SetClassifier attaches the classifier. When set, the
+// POST /admin/classify endpoint is registered.
+func (s *Server) SetClassifier(c *classifier.Classifier) { s.classifier = c }
+
 // Handler returns the full HTTP mux. Routes:
 //
 //	GET  /livez       always 200 while process is alive (k8s liveness/readiness probe)
@@ -80,6 +86,9 @@ func (s *Server) Handler() http.Handler {
 	}
 	if s.foldSyncer != nil {
 		mux.Handle("POST /admin/fold/sync", s.bearer(s.adminKey, s.handleFoldSync))
+	}
+	if s.classifier != nil {
+		mux.Handle("POST /admin/classify", s.bearer(s.adminKey, s.handleClassify))
 	}
 	return s.withLogging(mux)
 }

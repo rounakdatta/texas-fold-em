@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/rounakdatta/texas-fold-em/internal/integration"
+	"github.com/rounakdatta/texas-fold-em/internal/integration/classifier"
 	"github.com/rounakdatta/texas-fold-em/internal/integration/firefly"
 	"github.com/rounakdatta/texas-fold-em/internal/integration/fold"
 )
@@ -183,5 +184,37 @@ func newTestServerWithIntegration(t *testing.T) *Server {
 	srv.SetIntegration(db)
 	srv.SetFireflySyncer(integration.NewSyncer(db, firefly.NewClient(fakeFF.URL, "x", fakeFF.Client()), slog.New(slog.NewTextHandler(io.Discard, nil))))
 	srv.SetFoldSyncer(integration.NewFoldSyncer(db, fold.NewClient(fakeFold.URL, tokenFn, fakeFold.Client()), slog.New(slog.NewTextHandler(io.Discard, nil))))
+	srv.SetClassifier(classifier.New(db.DB, slog.New(slog.NewTextHandler(io.Discard, nil)), classifier.DefaultConfidenceThreshold, 10))
 	return srv
+}
+
+// TestServer_ClassifyRoute_NotRegisteredWithoutClassifier mirrors the
+// other gating tests.
+func TestServer_ClassifyRoute_NotRegisteredWithoutClassifier(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	w := do(t, srv.Handler(), "POST", "/admin/classify", "admin-key", nil)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404 when classifier absent, got %d", w.Code)
+	}
+}
+
+// TestServer_Classify_RequiresAdminKey covers auth gating.
+func TestServer_Classify_RequiresAdminKey(t *testing.T) {
+	srv := newTestServerWithIntegration(t)
+	for _, tc := range []struct {
+		name string
+		auth string
+		code int
+	}{
+		{"no auth", "", http.StatusUnauthorized},
+		{"broker key", "broker-key", http.StatusUnauthorized},
+		{"correct admin key", "admin-key", http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := do(t, srv.Handler(), "POST", "/admin/classify", tc.auth, nil)
+			if w.Code != tc.code {
+				t.Errorf("status=%d, want %d", w.Code, tc.code)
+			}
+		})
+	}
 }
