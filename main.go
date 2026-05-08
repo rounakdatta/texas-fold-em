@@ -31,6 +31,7 @@ import (
 
 	"github.com/rounakdatta/texas-fold-em/internal/integration"
 	"github.com/rounakdatta/texas-fold-em/internal/integration/firefly"
+	"github.com/rounakdatta/texas-fold-em/internal/integration/fold"
 )
 
 // Version is baked in at build time via -ldflags. Defaults to "dev".
@@ -101,9 +102,33 @@ func run() error {
 		fireflyClient := firefly.NewClient(cfg.FireflyBase, cfg.FireflyPAT, nil)
 		fireflySyncer := integration.NewSyncer(intDB, fireflyClient, intLog)
 		srv.SetFireflySyncer(fireflySyncer)
+
+		// Fold read-side client + staging syncer. Bridges the broker's
+		// access tokens into the data-side fold endpoint via a closure;
+		// keeps the broker's auth-side client and the integration's
+		// data-side client physically separate.
+		foldClient := fold.NewClient(cfg.APIBase, func(ctx context.Context) (fold.AccessToken, error) {
+			tok, err := broker.Token(ctx)
+			if err != nil {
+				return fold.AccessToken{}, err
+			}
+			return fold.AccessToken{
+				AccessToken: tok.AccessToken,
+				DeviceHash:  tok.DeviceHash,
+				UserUUID:    tok.UserUUID,
+				ExpiresAt:   tok.ExpiresAt,
+			}, nil
+		}, nil)
+		foldSyncer := integration.NewFoldSyncer(intDB, foldClient, intLog)
+		srv.SetFoldSyncer(foldSyncer)
+
 		intLog.Info("integration ready",
 			"firefly_base", cfg.FireflyBase,
-			"endpoints", []string{"POST /admin/firefly/sync"},
+			"fold_base", cfg.APIBase,
+			"endpoints", []string{
+				"POST /admin/firefly/sync",
+				"POST /admin/fold/sync",
+			},
 		)
 	}
 

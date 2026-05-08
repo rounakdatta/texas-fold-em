@@ -26,6 +26,7 @@ type Server struct {
 	started       time.Time
 	integration   *integration.DB
 	fireflySyncer *integration.Syncer
+	foldSyncer    *integration.FoldSyncer
 }
 
 // NewServer constructs a Server. Keys are required (config validation
@@ -48,6 +49,10 @@ func (s *Server) SetIntegration(db *integration.DB) { s.integration = db }
 // SetFireflySyncer attaches the firefly syncer. When set, the
 // POST /admin/firefly/sync endpoint is registered.
 func (s *Server) SetFireflySyncer(syncer *integration.Syncer) { s.fireflySyncer = syncer }
+
+// SetFoldSyncer attaches the fold staging syncer. When set, the
+// POST /admin/fold/sync endpoint is registered.
+func (s *Server) SetFoldSyncer(syncer *integration.FoldSyncer) { s.foldSyncer = syncer }
 
 // Handler returns the full HTTP mux. Routes:
 //
@@ -72,6 +77,9 @@ func (s *Server) Handler() http.Handler {
 		// Long-running sync — admin-key gated. Body returns the SyncReport
 		// (counts + duration) so an operator can confirm the result.
 		mux.Handle("POST /admin/firefly/sync", s.bearer(s.adminKey, s.handleFireflySync))
+	}
+	if s.foldSyncer != nil {
+		mux.Handle("POST /admin/fold/sync", s.bearer(s.adminKey, s.handleFoldSync))
 	}
 	return s.withLogging(mux)
 }
