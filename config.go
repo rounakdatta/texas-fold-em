@@ -32,6 +32,16 @@ type Config struct {
 	// from StatePath so schema migrations in the integration code can never
 	// destabilise the broker's refresh chain.
 	StagingDBPath string // TEXAS_FOLDEM_STAGING_DB_PATH       default ~/.texas-fold-em/staging.db
+
+	// FireflyBase is the base URL for the firefly host. The default
+	// targets the in-cluster Service; tests and local runs override.
+	// Required when the integration is enabled.
+	FireflyBase string // TEXAS_FOLDEM_FIREFLY_BASE          default http://firefly.apps.svc.cluster.local:8080
+
+	// FireflyPAT is a Firefly III Personal Access Token. Sourced from
+	// the firefly-pat key of the texas-fold-em-credentials Secret in
+	// production. Required when the integration is enabled.
+	FireflyPAT string // TEXAS_FOLDEM_FIREFLY_PAT           required when integration enabled
 }
 
 // LoadConfig reads env vars and returns a validated Config. It never reads
@@ -55,6 +65,8 @@ func LoadConfig() (Config, error) {
 		ShutdownGrace:      envDur("TEXAS_FOLDEM_SHUTDOWN_GRACE", 10*time.Second),
 		IntegrationEnabled: envBool("TEXAS_FOLDEM_INTEGRATION_ENABLED", false),
 		StagingDBPath:      envStr("TEXAS_FOLDEM_STAGING_DB_PATH", filepath.Join(home, ".texas-fold-em", "staging.db")),
+		FireflyBase:        strings.TrimRight(envStr("TEXAS_FOLDEM_FIREFLY_BASE", "http://firefly.apps.svc.cluster.local:8080"), "/"),
+		FireflyPAT:         os.Getenv("TEXAS_FOLDEM_FIREFLY_PAT"),
 	}
 
 	var problems []string
@@ -69,6 +81,14 @@ func LoadConfig() (Config, error) {
 	}
 	if cfg.RefreshLead < 30*time.Second {
 		problems = append(problems, "TEXAS_FOLDEM_REFRESH_LEAD must be at least 30s")
+	}
+	if cfg.IntegrationEnabled {
+		if cfg.FireflyBase == "" {
+			problems = append(problems, "TEXAS_FOLDEM_FIREFLY_BASE is required when integration is enabled")
+		}
+		if cfg.FireflyPAT == "" {
+			problems = append(problems, "TEXAS_FOLDEM_FIREFLY_PAT is required when integration is enabled")
+		}
 	}
 	if len(problems) > 0 {
 		return Config{}, errors.New("invalid config: " + strings.Join(problems, "; "))

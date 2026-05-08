@@ -15,17 +15,17 @@ import (
 
 // Server wires the Broker up to HTTP. Routes are defined in Handler().
 //
-// integration is optional: when nil, the broker behaves exactly as
-// before (no /admin/integration endpoints, /health omits the
-// integration block). When set, future PRs will register the fold→
-// firefly classifier endpoints behind it.
+// The integration fields are optional: when nil, the broker behaves
+// exactly as before (no /admin/firefly/sync endpoint, /health omits the
+// integration block). When set, the integration routes are registered.
 type Server struct {
-	broker      *Broker
-	brokerKey   string
-	adminKey    string
-	log         *slog.Logger
-	started     time.Time
-	integration *integration.DB
+	broker        *Broker
+	brokerKey     string
+	adminKey      string
+	log           *slog.Logger
+	started       time.Time
+	integration   *integration.DB
+	fireflySyncer *integration.Syncer
 }
 
 // NewServer constructs a Server. Keys are required (config validation
@@ -44,6 +44,10 @@ func NewServer(broker *Broker, brokerKey, adminKey string, log *slog.Logger) *Se
 // passing nil clears it. Called from main only when the
 // TEXAS_FOLDEM_INTEGRATION_ENABLED feature flag is true.
 func (s *Server) SetIntegration(db *integration.DB) { s.integration = db }
+
+// SetFireflySyncer attaches the firefly syncer. When set, the
+// POST /admin/firefly/sync endpoint is registered.
+func (s *Server) SetFireflySyncer(syncer *integration.Syncer) { s.fireflySyncer = syncer }
 
 // Handler returns the full HTTP mux. Routes:
 //
@@ -64,6 +68,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.Handle("GET /token", s.bearer(s.brokerKey, s.handleToken))
 	mux.Handle("POST /init", s.bearer(s.adminKey, s.handleInit))
+	if s.fireflySyncer != nil {
+		// Long-running sync — admin-key gated. Body returns the SyncReport
+		// (counts + duration) so an operator can confirm the result.
+		mux.Handle("POST /admin/firefly/sync", s.bearer(s.adminKey, s.handleFireflySync))
+	}
 	return s.withLogging(mux)
 }
 
