@@ -28,6 +28,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/rounakdatta/texas-fold-em/internal/integration"
 )
 
 // Version is baked in at build time via -ldflags. Defaults to "dev".
@@ -73,6 +75,26 @@ func run() error {
 	client := NewFoldClient(cfg.APIBase, cfg.HTTPTimeout)
 	broker := NewBroker(store, client, log, cfg.RefreshLead)
 	srv := NewServer(broker, cfg.BrokerKey, cfg.AdminKey, log)
+
+	// Optional fold→firefly integration. Only fires when explicitly enabled
+	// via TEXAS_FOLDEM_INTEGRATION_ENABLED — on a stock deploy this code
+	// path stays cold and the broker continues to behave exactly as before.
+	if cfg.IntegrationEnabled {
+		intLog := log.With("component", "integration")
+		intLog.Info("opening integration db", "path", cfg.StagingDBPath)
+		intDB, err := integration.Open(context.Background(), cfg.StagingDBPath)
+		if err != nil {
+			return fmt.Errorf("open integration db: %w", err)
+		}
+		// Closed during graceful shutdown alongside the http server.
+		defer func() {
+			if err := intDB.Close(); err != nil {
+				intLog.Warn("integration db close", "err", err)
+			}
+		}()
+		srv.SetIntegration(intDB)
+		intLog.Info("integration db ready")
+	}
 
 	// Root ctx cancels on SIGINT/SIGTERM. Everything downstream observes it.
 	rootCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

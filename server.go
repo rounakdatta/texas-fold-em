@@ -9,15 +9,23 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/rounakdatta/texas-fold-em/internal/integration"
 )
 
 // Server wires the Broker up to HTTP. Routes are defined in Handler().
+//
+// integration is optional: when nil, the broker behaves exactly as
+// before (no /admin/integration endpoints, /health omits the
+// integration block). When set, future PRs will register the fold→
+// firefly classifier endpoints behind it.
 type Server struct {
-	broker    *Broker
-	brokerKey string
-	adminKey  string
-	log       *slog.Logger
-	started   time.Time
+	broker      *Broker
+	brokerKey   string
+	adminKey    string
+	log         *slog.Logger
+	started     time.Time
+	integration *integration.DB
 }
 
 // NewServer constructs a Server. Keys are required (config validation
@@ -31,6 +39,11 @@ func NewServer(broker *Broker, brokerKey, adminKey string, log *slog.Logger) *Se
 		started:   time.Now(),
 	}
 }
+
+// SetIntegration attaches the integration DB to the server. Idempotent;
+// passing nil clears it. Called from main only when the
+// TEXAS_FOLDEM_INTEGRATION_ENABLED feature flag is true.
+func (s *Server) SetIntegration(db *integration.DB) { s.integration = db }
 
 // Handler returns the full HTTP mux. Routes:
 //
@@ -68,14 +81,22 @@ func (s *Server) handleLivez(w http.ResponseWriter, r *http.Request) {
 // when's the next refresh due, what's the user UUID. No tokens.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	status := s.broker.Status()
+	type integrationStatus struct {
+		Enabled bool   `json:"enabled"`
+		DBPath  string `json:"db_path,omitempty"`
+	}
 	body := struct {
-		Service string `json:"service"`
-		Uptime  string `json:"uptime"`
+		Service     string             `json:"service"`
+		Uptime      string             `json:"uptime"`
+		Integration *integrationStatus `json:"integration,omitempty"`
 		Status
 	}{
 		Service: "texas-fold-em",
 		Uptime:  time.Since(s.started).Round(time.Second).String(),
 		Status:  status,
+	}
+	if s.integration != nil {
+		body.Integration = &integrationStatus{Enabled: true, DBPath: s.integration.Path()}
 	}
 	code := http.StatusOK
 	if !status.Ready() {
