@@ -34,6 +34,7 @@ import (
 	"github.com/rounakdatta/texas-fold-em/internal/integration/firefly"
 	"github.com/rounakdatta/texas-fold-em/internal/integration/fold"
 	"github.com/rounakdatta/texas-fold-em/internal/integration/gemini"
+	"github.com/rounakdatta/texas-fold-em/internal/integration/ui"
 )
 
 // Version is baked in at build time via -ldflags. Defaults to "dev".
@@ -142,17 +143,32 @@ func run() error {
 		pusher := integration.NewPusher(intDB, fireflyClient, intLog, cfg.FireflyReadOnly)
 		srv.SetPusher(pusher)
 
+		// Review UI. Auth mode chosen by config: UICookie for local dev
+		// (cookie set via /admin/ui/login?key=<admin>), UIBypass for
+		// production where the cluster ingress runs tinyauth ForwardAuth.
+		uiAuth := ui.AuthModeBypass
+		if cfg.UICookieAuth {
+			uiAuth = ui.AuthModeCookie
+		}
+		uiHandler, err := ui.New(intDB.DB, pusher, intLog, cfg.AdminKey, uiAuth)
+		if err != nil {
+			return fmt.Errorf("ui handler: %w", err)
+		}
+		srv.SetUI(uiHandler)
+
 		intLog.Info("integration ready",
 			"firefly_base", cfg.FireflyBase,
 			"fold_base", cfg.APIBase,
 			"tier3_llm", llmEnabled,
 			"gemini_model", cfg.GeminiModel,
 			"firefly_readonly", cfg.FireflyReadOnly,
+			"ui_auth", uiAuthLabel(uiAuth),
 			"endpoints", []string{
 				"POST /admin/firefly/sync",
 				"POST /admin/fold/sync",
 				"POST /admin/classify",
 				"POST /admin/push/{fold_uuid}",
+				"GET  /admin/ui/",
 			},
 		)
 	}
@@ -219,6 +235,14 @@ func run() error {
 	wg.Wait()
 	log.Info("shutdown complete")
 	return nil
+}
+
+// uiAuthLabel renders the auth mode for log output.
+func uiAuthLabel(m ui.AuthMode) string {
+	if m == ui.AuthModeCookie {
+		return "cookie (local-dev)"
+	}
+	return "bypass (relies on upstream proxy auth, e.g. tinyauth)"
 }
 
 func newLogger(level string) *slog.Logger {

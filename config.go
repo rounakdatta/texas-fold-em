@@ -60,6 +60,13 @@ type Config struct {
 	// has any doubt about the integration can stop all writes at the
 	// HTTP boundary without redeploying.
 	FireflyReadOnly bool // TEXAS_FOLDEM_FIREFLY_READONLY     default false
+
+	// UICookieAuth toggles cookie-based auth for /admin/ui/* routes.
+	// false (default): trust upstream proxy auth (tinyauth ForwardAuth
+	// at the cluster ingress). true: require a tfe-admin cookie set
+	// via GET /admin/ui/login?key=<admin>. Use cookie mode for local
+	// development against a port-forward.
+	UICookieAuth bool // TEXAS_FOLDEM_UI_COOKIE_AUTH       default false
 }
 
 // LoadConfig reads env vars and returns a validated Config. It never reads
@@ -88,6 +95,7 @@ func LoadConfig() (Config, error) {
 		GeminiAPIKey:       os.Getenv("TEXAS_FOLDEM_GEMINI_API_KEY"),
 		GeminiModel:        envStr("TEXAS_FOLDEM_GEMINI_MODEL", "gemini-3.1-flash-lite"),
 		FireflyReadOnly:    envBool("TEXAS_FOLDEM_FIREFLY_READONLY", false),
+		UICookieAuth:       envBool("TEXAS_FOLDEM_UI_COOKIE_AUTH", false),
 	}
 
 	var problems []string

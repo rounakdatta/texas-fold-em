@@ -1,0 +1,67 @@
+{{define "content"}}
+<p><a href="/admin/ui/?status={{.Row.Status}}">← back to {{.Row.Status}}</a></p>
+
+<div class="card">
+  <h2>fold transaction</h2>
+  <div class="grid">
+    <div>
+      <strong>uuid:</strong> <span class="tier">{{.Row.FoldUUID}}</span><br>
+      <strong>when:</strong> {{.Row.TxnTimestamp}}<br>
+      <strong>mode:</strong> <span class="pill pill-{{.Row.Mode}}">{{.Row.Mode}}</span><br>
+      <strong>type:</strong> {{.Row.Type}}<br>
+      <strong>amount:</strong> <span class="amount {{if eq .Row.Type "OUTGOING"}}amount-out{{else}}amount-in{{end}}">{{if eq .Row.Type "OUTGOING"}}-{{else}}+{{end}}{{.Row.Currency}} {{.Row.AmountDisplay}}</span>
+    </div>
+    <div>
+      <strong>extracted merchant:</strong> {{if .Row.MerchantExtracted}}{{.Row.MerchantExtracted}}{{else}}<span style="color:var(--muted)">—</span>{{end}}<br>
+      <strong>narration:</strong>
+      <div class="narration">{{.Row.Narration}}</div>
+    </div>
+  </div>
+</div>
+
+<div class="card evidence-card">
+  <h2>classifier decision</h2>
+  <div class="meta">
+    Tier {{.Row.TierLabel}} · Confidence {{if .Row.Confidence}}{{printf "%.2f" .Row.Confidence}}{{else}}—{{end}} · Status <span class="pill pill-{{.Row.Status}}">{{.Row.Status}}</span>
+  </div>
+  {{if .EvidencePretty}}<pre>{{.EvidencePretty}}</pre>{{end}}
+</div>
+
+<form method="post" action="/admin/ui/staged/{{.Row.FoldUUID}}/save">
+  <div class="card">
+    <h2>review &amp; edit</h2>
+    <div class="grid">
+      <div>
+        <label>destination account id</label>
+        <input type="number" name="destination_account_id" value="{{.Edit.DestinationAccountID}}" placeholder="firefly account id">
+        <small style="color:var(--muted)">{{.Edit.DestinationAccountName}}</small>
+      </div>
+      <div>
+        <label>source account id</label>
+        <input type="number" name="source_account_id" value="{{.Edit.SourceAccountID}}" placeholder="firefly account id">
+        <small style="color:var(--muted)">{{.Edit.SourceAccountName}}</small>
+      </div>
+      <div>
+        <label>category id</label>
+        <input type="number" name="category_id" value="{{.Edit.CategoryID}}">
+        <small style="color:var(--muted)">{{.Edit.CategoryName}}</small>
+      </div>
+      <div>
+        <label>budget id</label>
+        <input type="number" name="budget_id" value="{{.Edit.BudgetID}}">
+        <small style="color:var(--muted)">{{.Edit.BudgetName}}</small>
+      </div>
+    </div>
+    <label>description</label>
+    <textarea name="description">{{.Edit.Description}}</textarea>
+    <label>tags (comma-separated)</label>
+    <input type="text" name="tags" value="{{.Edit.Tags}}">
+
+    <div class="actions">
+      <button type="submit" class="btn">save edits</button>
+      <button type="submit" formaction="/admin/ui/staged/{{.Row.FoldUUID}}/push" class="btn btn-warn">save &amp; push to firefly</button>
+      <button type="submit" formaction="/admin/ui/staged/{{.Row.FoldUUID}}/skip" class="btn btn-err" formnovalidate>skip (don't push)</button>
+    </div>
+  </div>
+</form>
+{{end}}
