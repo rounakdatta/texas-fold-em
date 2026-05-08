@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/rounakdatta/texas-fold-em/internal/integration"
 )
 
 // handleFireflySync is the admin-gated handler for
@@ -25,6 +28,46 @@ func (s *Server) handleFireflySync(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.log.Error("firefly sync failed", "err", err)
 		writeErr(w, http.StatusBadGateway, "firefly sync failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
+}
+
+// handlePush is the admin-gated handler for
+// POST /admin/push/{fold_uuid}?confirm=true.
+//
+// Without ?confirm=true, returns the firefly POST body that WOULD be
+// sent (preview/dry-run). With ?confirm=true, performs the dedup check
+// (GET /api/v1/search/transactions?query=external_id_is:<uuid>) and
+// then POSTs to /api/v1/transactions if no existing match. Either way
+// audit_log gets a row.
+//
+// Path-parameterised because the UI links to one transaction at a time;
+// no batch push (yet).
+func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
+	foldUUID := r.PathValue("fold_uuid")
+	if foldUUID == "" {
+		writeErr(w, http.StatusBadRequest, "missing fold_uuid path parameter", "")
+		return
+	}
+	confirm := r.URL.Query().Get("confirm") == "true"
+
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	report, err := s.pusher.Push(ctx, foldUUID, confirm)
+	if err != nil {
+		switch {
+		case errors.Is(err, integration.PushNotFoundError):
+			writeErr(w, http.StatusNotFound, "staged transaction not found", err.Error())
+		case errors.Is(err, integration.PushNotReadyError):
+			writeErr(w, http.StatusConflict, "row not in pushable status", err.Error())
+		case errors.Is(err, integration.PushReadOnlyError):
+			writeErr(w, http.StatusServiceUnavailable, "firefly write surface is read-only", err.Error())
+		default:
+			s.log.Error("push failed", "fold_uuid", foldUUID, "err", err)
+			writeErr(w, http.StatusBadGateway, "push failed", err.Error())
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, report)

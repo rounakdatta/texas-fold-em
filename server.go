@@ -29,6 +29,7 @@ type Server struct {
 	fireflySyncer *integration.Syncer
 	foldSyncer    *integration.FoldSyncer
 	classifier    *classifier.Classifier
+	pusher        *integration.Pusher
 }
 
 // NewServer constructs a Server. Keys are required (config validation
@@ -60,6 +61,10 @@ func (s *Server) SetFoldSyncer(syncer *integration.FoldSyncer) { s.foldSyncer = 
 // POST /admin/classify endpoint is registered.
 func (s *Server) SetClassifier(c *classifier.Classifier) { s.classifier = c }
 
+// SetPusher attaches the Pusher. When set, the
+// POST /admin/push/{fold_uuid} endpoint is registered.
+func (s *Server) SetPusher(p *integration.Pusher) { s.pusher = p }
+
 // Handler returns the full HTTP mux. Routes:
 //
 //	GET  /livez       always 200 while process is alive (k8s liveness/readiness probe)
@@ -89,6 +94,9 @@ func (s *Server) Handler() http.Handler {
 	}
 	if s.classifier != nil {
 		mux.Handle("POST /admin/classify", s.bearer(s.adminKey, s.handleClassify))
+	}
+	if s.pusher != nil {
+		mux.Handle("POST /admin/push/{fold_uuid}", s.bearer(s.adminKey, s.handlePush))
 	}
 	return s.withLogging(mux)
 }

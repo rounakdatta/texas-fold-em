@@ -185,7 +185,43 @@ func newTestServerWithIntegration(t *testing.T) *Server {
 	srv.SetFireflySyncer(integration.NewSyncer(db, firefly.NewClient(fakeFF.URL, "x", fakeFF.Client()), slog.New(slog.NewTextHandler(io.Discard, nil))))
 	srv.SetFoldSyncer(integration.NewFoldSyncer(db, fold.NewClient(fakeFold.URL, tokenFn, fakeFold.Client()), slog.New(slog.NewTextHandler(io.Discard, nil))))
 	srv.SetClassifier(classifier.New(db.DB, slog.New(slog.NewTextHandler(io.Discard, nil)), classifier.DefaultConfidenceThreshold, 10))
+	srv.SetPusher(integration.NewPusher(db, firefly.NewClient(fakeFF.URL, "x", fakeFF.Client()),
+		slog.New(slog.NewTextHandler(io.Discard, nil)), false))
 	return srv
+}
+
+// TestServer_PushRoute_NotRegisteredWithoutPusher
+func TestServer_PushRoute_NotRegisteredWithoutPusher(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	w := do(t, srv.Handler(), "POST", "/admin/push/anything", "admin-key", nil)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404 when pusher absent, got %d", w.Code)
+	}
+}
+
+// TestServer_Push_RequiresAdminKey covers gating on the new
+// path-parameterised route.
+func TestServer_Push_RequiresAdminKey(t *testing.T) {
+	srv := newTestServerWithIntegration(t)
+	for _, tc := range []struct {
+		name string
+		auth string
+		// 404 because the staged row doesn't exist (correct admin key
+		// gets through gate, hits PushNotFoundError → 404).
+		// Unauthorized for everything else.
+		code int
+	}{
+		{"no auth", "", http.StatusUnauthorized},
+		{"broker key", "broker-key", http.StatusUnauthorized},
+		{"correct admin key (no row)", "admin-key", http.StatusNotFound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := do(t, srv.Handler(), "POST", "/admin/push/missing", tc.auth, nil)
+			if w.Code != tc.code {
+				t.Errorf("status=%d, want %d", w.Code, tc.code)
+			}
+		})
+	}
 }
 
 // TestServer_ClassifyRoute_NotRegisteredWithoutClassifier mirrors the
