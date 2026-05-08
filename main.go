@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/rounakdatta/texas-fold-em/internal/integration"
+	"github.com/rounakdatta/texas-fold-em/internal/integration/firefly"
 )
 
 // Version is baked in at build time via -ldflags. Defaults to "dev".
@@ -93,7 +94,17 @@ func run() error {
 			}
 		}()
 		srv.SetIntegration(intDB)
-		intLog.Info("integration db ready")
+
+		// Firefly read-side client + syncer. The PAT is sourced from the
+		// firefly-pat key of the Bitwarden-synced texas-fold-em-credentials
+		// Secret in production deploys.
+		fireflyClient := firefly.NewClient(cfg.FireflyBase, cfg.FireflyPAT, nil)
+		fireflySyncer := integration.NewSyncer(intDB, fireflyClient, intLog)
+		srv.SetFireflySyncer(fireflySyncer)
+		intLog.Info("integration ready",
+			"firefly_base", cfg.FireflyBase,
+			"endpoints", []string{"POST /admin/firefly/sync"},
+		)
 	}
 
 	// Root ctx cancels on SIGINT/SIGTERM. Everything downstream observes it.
