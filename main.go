@@ -31,6 +31,7 @@ import (
 
 	"github.com/rounakdatta/texas-fold-em/internal/integration"
 	"github.com/rounakdatta/texas-fold-em/internal/integration/classifier"
+	"github.com/rounakdatta/texas-fold-em/internal/integration/cron"
 	"github.com/rounakdatta/texas-fold-em/internal/integration/firefly"
 	"github.com/rounakdatta/texas-fold-em/internal/integration/fold"
 	"github.com/rounakdatta/texas-fold-em/internal/integration/gemini"
@@ -80,6 +81,13 @@ func run() error {
 	client := NewFoldClient(cfg.APIBase, cfg.HTTPTimeout)
 	broker := NewBroker(store, client, log, cfg.RefreshLead)
 	srv := NewServer(broker, cfg.BrokerKey, cfg.AdminKey, log)
+
+	// Root ctx cancels on SIGINT/SIGTERM. Created early so the optional
+	// integration cron goroutine below can attach to the same lifecycle
+	// as the broker keepwarm and the http server.
+	rootCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	var wg sync.WaitGroup
 
 	// Optional fold→firefly integration. Only fires when explicitly enabled
 	// via TEXAS_FOLDEM_INTEGRATION_ENABLED — on a stock deploy this code
@@ -140,7 +148,11 @@ func run() error {
 		// Pusher — firefly write side. Read-only kill-switch propagated
 		// from cfg. The Pusher refuses confirmed writes when readOnly,
 		// but preview (?confirm=false) still works for inspection.
+		// Active-learning hook: every successful push reinforces
+		// merchant_lookup so the next fold txn from the same merchant
+		// auto-classifies via Tier 1.
 		pusher := integration.NewPusher(intDB, fireflyClient, intLog, cfg.FireflyReadOnly)
+		pusher.SetLearner(cls)
 		srv.SetPusher(pusher)
 
 		// Review UI. Auth mode chosen by config: UICookie for local dev
@@ -163,6 +175,7 @@ func run() error {
 			"gemini_model", cfg.GeminiModel,
 			"firefly_readonly", cfg.FireflyReadOnly,
 			"ui_auth", uiAuthLabel(uiAuth),
+			"periodic_sync_every", cfg.PeriodicSyncEvery,
 			"endpoints", []string{
 				"POST /admin/firefly/sync",
 				"POST /admin/fold/sync",
@@ -171,11 +184,18 @@ func run() error {
 				"GET  /admin/ui/",
 			},
 		)
-	}
 
-	// Root ctx cancels on SIGINT/SIGTERM. Everything downstream observes it.
-	rootCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
+		// Periodic sync cron. Disabled when PeriodicSyncEvery is 0
+		// (cron.PeriodicSync is also self-disabling on that value, but
+		// we skip the goroutine spawn entirely for cleanliness).
+		if cfg.PeriodicSyncEvery > 0 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				cron.PeriodicSync(rootCtx, foldSyncer, cls, cfg.PeriodicSyncEvery, cfg.PeriodicSyncLimit, intLog)
+			}()
+		}
+	}
 
 	httpSrv := &http.Server{
 		Addr:              cfg.ListenAddr,
@@ -186,9 +206,8 @@ func run() error {
 		IdleTimeout:       120 * time.Second,
 	}
 
-	// Spawn background workers. wg tracks them so we don't return from run()
-	// while they're still running.
-	var wg sync.WaitGroup
+	// Spawn background workers. wg (declared earlier) tracks them so
+	// we don't return from run() while they're still running.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
