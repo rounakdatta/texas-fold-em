@@ -41,6 +41,15 @@ type PushReport struct {
 	PreviewBody         any       `json:"preview_body,omitempty"` // present when Action="preview"
 }
 
+// Learner is the optional active-learning hook called after a
+// successful push. The classifier package's Classifier satisfies it.
+// Decoupled via interface so push.go doesn't need to import classifier
+// directly (which would also work since they're sibling subpackages,
+// but interface-coupling lets us mock learning in push_test.go).
+type Learner interface {
+	LearnFromPushed(ctx context.Context, foldUUID string) error
+}
+
 // Pusher orchestrates: validate staged row → check firefly for an
 // existing transaction with the same external_id → POST → audit →
 // update staged_fold_txns. Read-only mode short-circuits before any
@@ -50,12 +59,19 @@ type Pusher struct {
 	fc       *firefly.Client
 	log      *slog.Logger
 	readOnly bool
+	learner  Learner // optional; when set, push success triggers reinforcement
 }
 
-// NewPusher constructs a Pusher.
+// NewPusher constructs a Pusher with no learner.
 func NewPusher(db *DB, fc *firefly.Client, log *slog.Logger, readOnly bool) *Pusher {
 	return &Pusher{db: db, fc: fc, log: log.With("component", "pusher"), readOnly: readOnly}
 }
+
+// SetLearner attaches a Learner. After a successful real push (not a
+// preview, not a dedup-no-op-for-already-pushed), the Pusher will call
+// LearnFromPushed in a non-blocking goroutine. Failures in the
+// learner are logged but never surface to the push caller.
+func (p *Pusher) SetLearner(l Learner) { p.learner = l }
 
 // pushableRow is the slim view of staged_fold_txns we read for a push.
 type pushableRow struct {
@@ -163,6 +179,14 @@ func (p *Pusher) Push(ctx context.Context, foldUUID string, confirm bool) (PushR
 		return PushReport{}, fmt.Errorf("mark pushed: %w", err)
 	}
 	p.audit(ctx, "firefly_create", row.FoldUUID, journalID, body, 200, "")
+
+	// Active-learning reinforcement. Synchronous so tests can assert,
+	// failures logged-not-fatal so a degraded learner can't break push.
+	if p.learner != nil {
+		if err := p.learner.LearnFromPushed(ctx, row.FoldUUID); err != nil {
+			p.log.Warn("learner failed; push still succeeded", "fold_uuid", row.FoldUUID, "err", err)
+		}
+	}
 
 	return PushReport{
 		FoldUUID:       row.FoldUUID,

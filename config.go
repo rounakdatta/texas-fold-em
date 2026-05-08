@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -67,6 +68,18 @@ type Config struct {
 	// via GET /admin/ui/login?key=<admin>. Use cookie mode for local
 	// development against a port-forward.
 	UICookieAuth bool // TEXAS_FOLDEM_UI_COOKIE_AUTH       default false
+
+	// PeriodicSyncEvery is the cadence for the integrated cron loop:
+	// fold sync → classify pending. 0 disables the loop entirely
+	// (manual /admin/* triggers still work). Recommended cadence is
+	// 1h once everything's stable; start at 0 (manual only) and bump
+	// once you trust the classifier proposals.
+	PeriodicSyncEvery time.Duration // TEXAS_FOLDEM_PERIODIC_SYNC_EVERY   default 0 (disabled)
+
+	// PeriodicSyncLimit is the per-cycle fold transactions fetch limit.
+	// 50 is a reasonable default for an hourly cycle; bump higher for
+	// less frequent cycles to avoid missing transactions.
+	PeriodicSyncLimit int // TEXAS_FOLDEM_PERIODIC_SYNC_LIMIT   default 50
 }
 
 // LoadConfig reads env vars and returns a validated Config. It never reads
@@ -96,6 +109,8 @@ func LoadConfig() (Config, error) {
 		GeminiModel:        envStr("TEXAS_FOLDEM_GEMINI_MODEL", "gemini-3.1-flash-lite"),
 		FireflyReadOnly:    envBool("TEXAS_FOLDEM_FIREFLY_READONLY", false),
 		UICookieAuth:       envBool("TEXAS_FOLDEM_UI_COOKIE_AUTH", false),
+		PeriodicSyncEvery:  envDur("TEXAS_FOLDEM_PERIODIC_SYNC_EVERY", 0),
+		PeriodicSyncLimit:  envInt("TEXAS_FOLDEM_PERIODIC_SYNC_LIMIT", 50),
 	}
 
 	var problems []string
@@ -142,6 +157,20 @@ func envDur(k string, def time.Duration) time.Duration {
 		return def
 	}
 	return d
+}
+
+// envInt parses an integer env var, falling back to def on parse error
+// or empty value.
+func envInt(k string, def int) int {
+	v := os.Getenv(k)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil {
+		return def
+	}
+	return n
 }
 
 // envBool parses common true-ish values; anything else (or unset) falls
