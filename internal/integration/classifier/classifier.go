@@ -608,19 +608,43 @@ type ClassifyReport struct {
 }
 
 // ClassifyPending iterates every status='pending' row in
-// staged_fold_txns and applies a Decision. Idempotent in the sense
-// that a row's terminal status (ready_to_push / needs_review) never
-// reverts to pending — re-running classify only acts on rows that are
-// still 'pending'.
+// staged_fold_txns and applies a Decision. Idempotent — terminal
+// statuses (pushed, skipped) are never touched.
 func (c *Classifier) ClassifyPending(ctx context.Context) (ClassifyReport, error) {
+	return c.classifyMatching(ctx, false)
+}
+
+// ReclassifyPendingAndReview also re-runs classification on existing
+// 'needs_review' rows where the human hasn't yet edited any fields
+// (confirmed_* still NULL). This is the intended escape hatch for
+// "I improved the classifier; re-run it on rows it previously punted
+// to human review". Rows the human has touched are left alone.
+func (c *Classifier) ReclassifyPendingAndReview(ctx context.Context) (ClassifyReport, error) {
+	return c.classifyMatching(ctx, true)
+}
+
+func (c *Classifier) classifyMatching(ctx context.Context, includeNeedsReview bool) (ClassifyReport, error) {
 	start := time.Now()
 	report := ClassifyReport{}
+
+	// The needs_review side has the extra "no human edits" guard so we
+	// never overwrite something the user has manually adjusted.
+	statusFilter := `status = 'pending'`
+	if includeNeedsReview {
+		statusFilter = `(status = 'pending'
+		                 OR (status = 'needs_review'
+		                     AND confirmed_destination_account_id IS NULL
+		                     AND confirmed_source_account_id      IS NULL
+		                     AND confirmed_category_id            IS NULL
+		                     AND confirmed_budget_id              IS NULL
+		                     AND confirmed_description            IS NULL))`
+	}
 
 	rows, err := c.db.QueryContext(ctx, `
 		SELECT fold_uuid, narration, mode, type, COALESCE(merchant_extracted,''),
 		       amount_paise, currency, txn_timestamp, raw_payload
 		FROM staged_fold_txns
-		WHERE status = 'pending'
+		WHERE `+statusFilter+`
 		ORDER BY txn_timestamp DESC
 	`)
 	if err != nil {
