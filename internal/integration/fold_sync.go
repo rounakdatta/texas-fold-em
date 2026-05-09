@@ -268,15 +268,15 @@ pages:
 			break
 		}
 
-		// Build the cursor for the next (older) page from the oldest
-		// timestamp we just saw. Fold returns newest-first, so the last
-		// element of txns is the oldest.
-		oldest := txns[len(txns)-1]
-		oldestTime, err := parseFoldTimestamp(oldest.TxnTimestamp)
-		if err != nil {
-			return report, fmt.Errorf("parse oldest timestamp %q: %w", oldest.TxnTimestamp, err)
+		// Echo fold's own pagination cursor back. Building one locally
+		// from a timestamp doesn't work — fold's cursor format includes
+		// the txn UUID for tie-breaking and the API rejects shorter
+		// forms with HTTP 400.
+		if resp.Data.After == "" {
+			stoppedAt = "exhausted"
+			break
 		}
-		afterCursor = fold.AfterCursorFromTime(oldestTime)
+		afterCursor = resp.Data.After
 	}
 
 	if err := tx.Commit(); err != nil {
