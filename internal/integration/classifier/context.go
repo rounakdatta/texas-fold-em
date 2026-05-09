@@ -3,7 +3,72 @@ package classifier
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 )
+
+// FoldAccountRef carries the human-readable details of a fold-side
+// asset (credit card or bank account) that the classifier joins onto
+// the staged transaction's raw_payload.account_id. This is the
+// keystone signal for source-account inference: without it, the LLM
+// sees only an opaque UUID; with it, "Tata Neu Plus 8943 (HDFC,
+// RuPay)" — directly text-matchable against firefly's asset list.
+type FoldAccountRef struct {
+	ID        string // fold's per-account UUID
+	Kind      string // "BANK" | "CREDIT_CARD"
+	Name      string // composed display name, e.g. "HDFC Tata Neu Plus ****8943"
+	Provider  string // "HDFC", "Axis Bank"
+	Network   string // credit-card-only: "Visa", "RuPay"
+	LastFour  string
+	IsClosed  bool
+}
+
+// lookupFoldAccountForStaged extracts account_id from the staged row's
+// raw_payload and returns the matching fold_accounts row, if any.
+// Returns (nil, nil) when raw_payload has no account_id, or when the
+// id isn't yet mirrored. Callers should always check for nil.
+func lookupFoldAccountForStaged(ctx context.Context, db *sql.DB, rawPayload string) (*FoldAccountRef, error) {
+	if rawPayload == "" {
+		return nil, nil
+	}
+	var probe struct {
+		AccountID string `json:"account_id"`
+	}
+	if err := json.Unmarshal([]byte(rawPayload), &probe); err != nil {
+		return nil, nil // non-JSON or older shape — silently skip
+	}
+	if probe.AccountID == "" {
+		return nil, nil
+	}
+	var (
+		ref   FoldAccountRef
+		prov  sql.NullString
+		net   sql.NullString
+		lf    sql.NullString
+		closedInt int
+	)
+	err := db.QueryRowContext(ctx, `
+		SELECT fold_account_id, kind, name, provider, network, last_four, is_closed
+		FROM fold_accounts
+		WHERE fold_account_id = ?
+	`, probe.AccountID).Scan(&ref.ID, &ref.Kind, &ref.Name, &prov, &net, &lf, &closedInt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if prov.Valid {
+		ref.Provider = prov.String
+	}
+	if net.Valid {
+		ref.Network = net.String
+	}
+	if lf.Valid {
+		ref.LastFour = lf.String
+	}
+	ref.IsClosed = closedInt == 1
+	return &ref, nil
+}
 
 // Context-gathering helpers for Tier-3 LLM RAG. None of these touch
 // firefly's API — every query reads our local mirror in firefly_txns.

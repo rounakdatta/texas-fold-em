@@ -86,8 +86,9 @@ type tier3Inputs struct {
 	categories       []AccountRef
 	budgets          []AccountRef
 	tagLibrary       []string
-	tier1            *Decision // nil if Tier 1 missed
-	tier2            *Decision // nil if Tier 2 missed
+	tier1            *Decision       // nil if Tier 1 missed
+	tier2            *Decision       // nil if Tier 2 missed
+	foldAccount      *FoldAccountRef // nil when raw_payload has no account_id, or it's not mirrored
 }
 
 // tierThreeLLM gathers context, builds the prompt, calls Gemini,
@@ -227,6 +228,7 @@ func (c *Classifier) gatherTier3Inputs(ctx context.Context, staged StagedRow, ti
 	cats, _ := listCategories(ctx, c.db)
 	buds, _ := listBudgets(ctx, c.db)
 	tags, _ := allTagsFromMirror(ctx, c.db)
+	foldAcc, _ := lookupFoldAccountForStaged(ctx, c.db, staged.RawPayload)
 	return tier3Inputs{
 		hits:            hits,
 		assetAccounts:   asset,
@@ -237,6 +239,7 @@ func (c *Classifier) gatherTier3Inputs(ctx context.Context, staged StagedRow, ti
 		tagLibrary:      tags,
 		tier1:           tier1,
 		tier2:           tier2,
+		foldAccount:     foldAcc,
 	}, nil
 }
 
@@ -383,6 +386,38 @@ func buildTier3Prompt(staged StagedRow, in tier3Inputs) string {
 	b.WriteString("\n\n")
 	b.WriteString(fmt.Sprintf("== FOLD TYPE: %s   MODE: %s ==\n", staged.Type, staged.Mode))
 	b.WriteString(fmt.Sprintf("(Firefly side will be: %s)\n\n", fireflyTxnTypeFor(staged.Type)))
+
+	// Block 1b: the resolved fold-side account. This is the single
+	// strongest source-account signal we have — fold's `account_id`
+	// is an opaque UUID, but with the mirror joined we know the
+	// human-readable name (and provider/network/last-four) of the
+	// card or bank that paid. Match it against the firefly asset list
+	// by name; same provider + same last-four is a near-certain link.
+	if in.foldAccount != nil {
+		fa := in.foldAccount
+		b.WriteString("== FOLD-SIDE PAYING ACCOUNT (resolved from raw_payload.account_id) ==\n")
+		b.WriteString(fmt.Sprintf("  name:     %q\n", fa.Name))
+		b.WriteString(fmt.Sprintf("  kind:     %s\n", fa.Kind))
+		if fa.Provider != "" {
+			b.WriteString(fmt.Sprintf("  provider: %q\n", fa.Provider))
+		}
+		if fa.Network != "" {
+			b.WriteString(fmt.Sprintf("  network:  %q\n", fa.Network))
+		}
+		if fa.LastFour != "" {
+			b.WriteString(fmt.Sprintf("  last4:    %s\n", fa.LastFour))
+		}
+		b.WriteString("STRONG HINT: this is the user's own asset that paid. ")
+		switch staged.Type {
+		case "OUTGOING":
+			b.WriteString("Pick the firefly asset whose name best matches the above (provider + product + last4) as source_account_id. ")
+			b.WriteString("Do NOT default to a popular card from FTS hits if a different asset is named here.\n\n")
+		case "INCOMING":
+			b.WriteString("Pick the firefly asset whose name best matches the above (provider + product + last4) as destination_account_id.\n\n")
+		default:
+			b.WriteString("Pick the firefly asset whose name best matches the above (provider + product + last4).\n\n")
+		}
+	}
 
 	// Block 2: hints from the deterministic tiers.
 	b.WriteString("== DETERMINISTIC HINTS ==\n")
