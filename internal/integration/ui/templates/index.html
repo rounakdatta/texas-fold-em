@@ -19,7 +19,7 @@
     <tbody>
       {{range .Rows}}
       <tr>
-        <td>{{.TxnTimestamp}}</td>
+        <td><time datetime="{{.TxnTimestampUTC}}">{{.TxnTimestamp}}</time></td>
         <td class="amount {{if eq .Type "OUTGOING"}}amount-out{{else}}amount-in{{end}}">
           {{if eq .Type "OUTGOING"}}-{{else}}+{{end}}{{.Currency}} {{.AmountDisplay}}
         </td>

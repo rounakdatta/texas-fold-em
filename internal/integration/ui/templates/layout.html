@@ -49,6 +49,10 @@
     .flash-ok { background:rgba(92,217,124,0.1); color:var(--ok); border:1px solid rgba(92,217,124,0.3); }
     .flash-err { background:rgba(255,107,107,0.1); color:var(--err); border:1px solid rgba(255,107,107,0.3); }
     .actions { margin-top: 22px; display:flex; gap:10px; }
+    .chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
+    .chip { display:inline-block; padding:3px 10px; border-radius:99px; background:rgba(124,92,255,0.12); color:var(--accent); border:1px solid rgba(124,92,255,0.3); font-size:11px; cursor:pointer; user-select:none; }
+    .chip:hover { background:rgba(124,92,255,0.22); }
+    small.hint { color:var(--muted); font-size:11px; display:block; margin-top:3px; }
   </style>
 </head>
 <body>
@@ -65,6 +69,35 @@
     {{if .Flash}}<div class="flash flash-{{.Flash.Kind}}">{{.Flash.Message}}</div>{{end}}
     {{block "content" .}}{{end}}
   </main>
+  <script>
+    // Convert every <time datetime="..."> element from UTC to the
+    // device's local timezone. Server renders a UTC timestamp in
+    // textContent as a fallback for no-JS clients.
+    (function () {
+      const fmt = new Intl.DateTimeFormat(undefined, {
+        year: 'numeric', month: 'short', day: '2-digit',
+        hour: '2-digit', minute: '2-digit'
+      });
+      document.querySelectorAll('time[datetime]').forEach(function (el) {
+        const d = new Date(el.getAttribute('datetime'));
+        if (!isNaN(d.getTime())) el.textContent = fmt.format(d);
+      });
+      // Click-to-add tag chips on the detail page.
+      document.querySelectorAll('[data-tag-chip]').forEach(function (el) {
+        el.addEventListener('click', function (e) {
+          e.preventDefault();
+          const input = document.querySelector('input[name="tags"]');
+          if (!input) return;
+          const newTag = el.getAttribute('data-tag-chip');
+          const cur = input.value.trim();
+          const parts = cur ? cur.split(',').map(function (p) { return p.trim(); }).filter(Boolean) : [];
+          if (parts.indexOf(newTag) === -1) parts.push(newTag);
+          input.value = parts.join(', ');
+          input.focus();
+        });
+      });
+    })();
+  </script>
 </body>
 </html>
 {{end}}
