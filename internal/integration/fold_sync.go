@@ -14,12 +14,16 @@ import (
 
 // FoldSyncReport is the structured outcome of a fold staging sync.
 type FoldSyncReport struct {
-	Fetched       int           `json:"fetched"`                  // total returned by the fold API
-	Inserted      int           `json:"inserted"`                 // newly staged
-	Skipped       int           `json:"skipped"`                  // already present (idempotent re-run)
-	RawRefreshed  int           `json:"raw_refreshed"`            // already-staged rows whose raw_payload we updated to the verbatim wire bytes
-	Duration      time.Duration `json:"duration"`
-	NewestUUID    string        `json:"newest_uuid,omitempty"`
+	Fetched      int           `json:"fetched"`               // total returned by the fold API across all pages
+	Inserted     int           `json:"inserted"`              // newly staged
+	Skipped      int           `json:"skipped"`               // already present (idempotent re-run)
+	RawRefreshed int           `json:"raw_refreshed"`         // already-staged rows whose raw_payload we updated to the verbatim wire bytes
+	Pages        int           `json:"pages"`                 // number of fold-API pages walked (>1 only in since-firefly mode)
+	StoppedAt    string        `json:"stopped_at,omitempty"`  // human-readable reason the walk halted: "cutoff_reached" | "hard_cap" | "exhausted"
+	CutoffDate   string        `json:"cutoff_date,omitempty"` // RFC3339 firefly cutoff used (since-firefly mode only)
+	Duration     time.Duration `json:"duration"`
+	NewestUUID   string        `json:"newest_uuid,omitempty"`
+	OldestUUID   string        `json:"oldest_uuid,omitempty"`
 }
 
 // FoldSyncer pulls recent fold transactions and stages them in
@@ -112,6 +116,8 @@ func (s *FoldSyncer) SyncRecent(ctx context.Context, limit int) (FoldSyncReport,
 	committed = true
 	report.Duration = time.Since(start)
 
+	report.Pages = 1
+	report.StoppedAt = "exhausted"
 	s.log.Info("fold sync complete",
 		"fetched", report.Fetched,
 		"inserted", report.Inserted,
@@ -120,6 +126,199 @@ func (s *FoldSyncer) SyncRecent(ctx context.Context, limit int) (FoldSyncReport,
 		"duration_ms", report.Duration.Milliseconds(),
 	)
 	return report, nil
+}
+
+// SyncSinceFirefly walks fold transactions backwards from "now" until
+// it crosses the most-recent date already on the firefly side, capped
+// hard at maxTotal transactions across all pages.
+//
+// Pagination uses fold's `after=<base64>` cursor (built locally from
+// the oldest transaction on the previous page). The walk stops at the
+// first of three conditions:
+//
+//   - cutoff_reached  — every transaction on the most-recent page is
+//     ≤ the firefly cutoff. We're caught up; no need to go further.
+//   - hard_cap        — total transactions touched ≥ maxTotal. Safety
+//     belt against a runaway loop or a misconfigured cutoff.
+//   - exhausted       — fold returned an empty page. We've reached the
+//     start of the user's fold history.
+//
+// The hard cap is per-call rather than per-day. A maxTotal of ~2000
+// covers >18 months of typical activity (~150 txns/month observed) and
+// returns in seconds; tune up only if you genuinely need to backfill
+// further than that in one shot.
+//
+// If firefly_txns is empty (no mirror yet), we treat the cutoff as the
+// zero time, which means "fetch everything within maxTotal." That's
+// the correct behaviour for first-time setup.
+func (s *FoldSyncer) SyncSinceFirefly(ctx context.Context, maxTotal int) (FoldSyncReport, error) {
+	start := time.Now()
+	report := FoldSyncReport{}
+
+	if maxTotal <= 0 {
+		return report, fmt.Errorf("maxTotal must be positive, got %d", maxTotal)
+	}
+
+	cutoff, err := latestFireflyTxnDate(ctx, s.db.DB)
+	if err != nil {
+		return report, fmt.Errorf("read firefly cutoff: %w", err)
+	}
+	if !cutoff.IsZero() {
+		report.CutoffDate = cutoff.UTC().Format(time.RFC3339)
+	}
+
+	const pageSize = 100 // fold's hard ceiling
+	var (
+		afterCursor string
+		stoppedAt   string
+	)
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return report, fmt.Errorf("begin tx: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	insStmt, err := tx.PrepareContext(ctx, insertStagedFoldTxnSQL)
+	if err != nil {
+		return report, fmt.Errorf("prepare insert: %w", err)
+	}
+	defer insStmt.Close()
+	refStmt, err := tx.PrepareContext(ctx, refreshRawPayloadSQL)
+	if err != nil {
+		return report, fmt.Errorf("prepare refresh: %w", err)
+	}
+	defer refStmt.Close()
+
+pages:
+	for {
+		if err := ctx.Err(); err != nil {
+			return report, err
+		}
+		report.Pages++
+
+		resp, err := s.fc.ListTransactionsAfter(ctx, pageSize, afterCursor)
+		if err != nil {
+			return report, fmt.Errorf("list page %d: %w", report.Pages, err)
+		}
+		txns := resp.Data.Transactions
+		if len(txns) == 0 {
+			stoppedAt = "exhausted"
+			break
+		}
+		report.Fetched += len(txns)
+
+		// Track newest seen across the whole walk (first txn of first page).
+		if report.NewestUUID == "" {
+			report.NewestUUID = txns[0].UUID
+		}
+
+		// Walk this page newest-first; insert anything strictly newer
+		// than the cutoff. The moment we hit a txn at-or-before cutoff,
+		// we know the rest of the page (and every later page) is also
+		// at-or-before — fold returns newest-first within and across pages.
+		pageCrossedCutoff := false
+		for i, t := range txns {
+			ts, err := parseFoldTimestamp(t.TxnTimestamp)
+			if err != nil {
+				return report, fmt.Errorf("parse timestamp %q for %s: %w", t.TxnTimestamp, t.UUID, err)
+			}
+			if !cutoff.IsZero() && !ts.After(cutoff) {
+				pageCrossedCutoff = true
+				break
+			}
+
+			var raw json.RawMessage
+			if i < len(resp.Data.RawTransactions) {
+				raw = resp.Data.RawTransactions[i]
+			}
+			ok, err := s.insertStaged(ctx, insStmt, t, raw)
+			if err != nil {
+				return report, fmt.Errorf("insert %s: %w", t.UUID, err)
+			}
+			if ok {
+				report.Inserted++
+			} else {
+				report.Skipped++
+				refreshed, err := s.refreshRawPayload(ctx, refStmt, t.UUID, raw)
+				if err != nil {
+					return report, fmt.Errorf("refresh raw_payload for %s: %w", t.UUID, err)
+				}
+				if refreshed {
+					report.RawRefreshed++
+				}
+			}
+			report.OldestUUID = t.UUID
+
+			// Hard cap is checked AFTER the insert so the report
+			// counts everything we've actually written.
+			if report.Inserted+report.Skipped >= maxTotal {
+				stoppedAt = "hard_cap"
+				break pages
+			}
+		}
+
+		if pageCrossedCutoff {
+			stoppedAt = "cutoff_reached"
+			break
+		}
+
+		// Build the cursor for the next (older) page from the oldest
+		// timestamp we just saw. Fold returns newest-first, so the last
+		// element of txns is the oldest.
+		oldest := txns[len(txns)-1]
+		oldestTime, err := parseFoldTimestamp(oldest.TxnTimestamp)
+		if err != nil {
+			return report, fmt.Errorf("parse oldest timestamp %q: %w", oldest.TxnTimestamp, err)
+		}
+		afterCursor = fold.AfterCursorFromTime(oldestTime)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return report, fmt.Errorf("commit: %w", err)
+	}
+	committed = true
+	report.StoppedAt = stoppedAt
+	report.Duration = time.Since(start)
+
+	s.log.Info("fold sync since firefly complete",
+		"fetched", report.Fetched,
+		"inserted", report.Inserted,
+		"skipped", report.Skipped,
+		"raw_refreshed", report.RawRefreshed,
+		"pages", report.Pages,
+		"stopped_at", report.StoppedAt,
+		"cutoff_date", report.CutoffDate,
+		"duration_ms", report.Duration.Milliseconds(),
+	)
+	return report, nil
+}
+
+// latestFireflyTxnDate returns the most-recent date in firefly_txns,
+// or the zero time when the mirror is empty (first-time bootstrap).
+func latestFireflyTxnDate(ctx context.Context, db *sql.DB) (time.Time, error) {
+	var maxDate sql.NullString
+	err := db.QueryRowContext(ctx, `SELECT MAX(date) FROM firefly_txns`).Scan(&maxDate)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if !maxDate.Valid || maxDate.String == "" {
+		return time.Time{}, nil
+	}
+	// firefly_txns.date is stored as DATETIME; SQLite returns it as
+	// text. We've observed two surface forms in the existing data:
+	// "2026-05-08 06:44:00 +0000 UTC" (Go's default) and RFC3339.
+	for _, layout := range []string{"2006-01-02 15:04:05 -0700 MST", time.RFC3339, "2006-01-02 15:04:05", "2006-01-02"} {
+		if t, err := time.Parse(layout, maxDate.String); err == nil {
+			return t.UTC(), nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("unrecognised firefly date format: %q", maxDate.String)
 }
 
 // insertStagedFoldTxnSQL inserts a staged row. INSERT OR IGNORE so a

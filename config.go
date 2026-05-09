@@ -76,10 +76,13 @@ type Config struct {
 	// once you trust the classifier proposals.
 	PeriodicSyncEvery time.Duration // TEXAS_FOLDEM_PERIODIC_SYNC_EVERY   default 0 (disabled)
 
-	// PeriodicSyncLimit is the per-cycle fold transactions fetch limit.
-	// 50 is a reasonable default for an hourly cycle; bump higher for
-	// less frequent cycles to avoid missing transactions.
-	PeriodicSyncLimit int // TEXAS_FOLDEM_PERIODIC_SYNC_LIMIT   default 50
+	// PeriodicSyncLimit is the per-cycle hard cap on transactions
+	// fetched from fold. The cron uses the gap-fill (since-firefly)
+	// mode, so this is a safety belt on a single tick rather than the
+	// expected workload — a steady hourly cron sees only the new ones.
+	// 2000 covers >18 months of typical activity (~150 txns/month) so
+	// any realistic outage self-heals on the next tick.
+	PeriodicSyncLimit int // TEXAS_FOLDEM_PERIODIC_SYNC_LIMIT   default 2000
 }
 
 // LoadConfig reads env vars and returns a validated Config. It never reads
@@ -110,7 +113,7 @@ func LoadConfig() (Config, error) {
 		FireflyReadOnly:    envBool("TEXAS_FOLDEM_FIREFLY_READONLY", false),
 		UICookieAuth:       envBool("TEXAS_FOLDEM_UI_COOKIE_AUTH", false),
 		PeriodicSyncEvery:  envDur("TEXAS_FOLDEM_PERIODIC_SYNC_EVERY", 0),
-		PeriodicSyncLimit:  envInt("TEXAS_FOLDEM_PERIODIC_SYNC_LIMIT", 50),
+		PeriodicSyncLimit:  envInt("TEXAS_FOLDEM_PERIODIC_SYNC_LIMIT", 2000),
 	}
 
 	var problems []string

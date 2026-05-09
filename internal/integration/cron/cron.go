@@ -13,33 +13,41 @@ import (
 	"github.com/rounakdatta/texas-fold-em/internal/integration/classifier"
 )
 
-// PeriodicSync runs FoldSyncer.SyncRecent then ClassifyPending on a
-// fixed cadence. Designed to run as a goroutine launched from main:
+// PeriodicSync runs FoldSyncer.SyncSinceFirefly then ClassifyPending
+// on a fixed cadence. Designed to run as a goroutine launched from
+// main:
 //
-//	go cron.PeriodicSync(ctx, fs, cls, 1*time.Hour, 50, log)
+//	go cron.PeriodicSync(ctx, fs, cls, 1*time.Hour, 2000, log)
 //
 // Returns when ctx is cancelled.
 //
+// Self-healing by design: each tick fills the gap between firefly's
+// most recent date and now, capped at maxTotal. If a tick is missed
+// (broker outage, fold-API hiccup, machine reboot), the next tick
+// catches up automatically — no operator intervention needed. The
+// per-cycle cap is what prevents a runaway after a long outage; tune
+// it up only if you genuinely need to backfill more than a year of
+// activity in a single tick.
+//
 // Failure mode: any error in fold sync or classify is logged but
-// doesn't stop the loop. The cadence is the recovery — if fold's API
-// is briefly down, the next tick retries.
+// doesn't stop the loop. The cadence is the recovery.
 func PeriodicSync(
 	ctx context.Context,
 	foldSyncer *integration.FoldSyncer,
 	cls *classifier.Classifier,
 	every time.Duration,
-	limit int,
+	maxTotal int,
 	log *slog.Logger,
 ) {
 	if every <= 0 {
 		log.Info("periodic sync disabled (interval <= 0)")
 		return
 	}
-	if limit <= 0 {
-		limit = 50
+	if maxTotal <= 0 {
+		maxTotal = 2000
 	}
 	log = log.With("component", "periodic_sync")
-	log.Info("starting periodic sync loop", "interval", every, "limit", limit)
+	log.Info("starting periodic sync loop", "interval", every, "max_total", maxTotal)
 
 	// Tick immediately on startup so an operator who restarts the pod
 	// gets a fresh sync without waiting `every`. Then back to the
@@ -53,7 +61,7 @@ func PeriodicSync(
 			log.Info("periodic sync stopping", "reason", ctx.Err())
 			return
 		case <-tick.C:
-			runOneCycle(ctx, foldSyncer, cls, limit, log)
+			runOneCycle(ctx, foldSyncer, cls, maxTotal, log)
 			tick.Reset(every)
 		}
 	}
@@ -63,11 +71,11 @@ func runOneCycle(
 	ctx context.Context,
 	foldSyncer *integration.FoldSyncer,
 	cls *classifier.Classifier,
-	limit int,
+	maxTotal int,
 	log *slog.Logger,
 ) {
 	if foldSyncer != nil {
-		report, err := foldSyncer.SyncRecent(ctx, limit)
+		report, err := foldSyncer.SyncSinceFirefly(ctx, maxTotal)
 		if err != nil {
 			log.Warn("fold sync error (cycle continues)", "err", err)
 			return
@@ -76,6 +84,9 @@ func runOneCycle(
 			"fetched", report.Fetched,
 			"inserted", report.Inserted,
 			"skipped", report.Skipped,
+			"pages", report.Pages,
+			"stopped_at", report.StoppedAt,
+			"cutoff_date", report.CutoffDate,
 		)
 	}
 	if cls != nil {
