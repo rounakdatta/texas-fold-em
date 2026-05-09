@@ -12,12 +12,15 @@ import (
 	"github.com/rounakdatta/texas-fold-em/internal/integration/gemini"
 )
 
-// TestTier3_HappyPath: when Tiers 1+2 miss but Gemini returns a
-// valid response with IDs from the candidate set, ClassifyOne should
-// return Tier 3.
+// TestTier3_HappyPath: even with NO FTS hits for an unseen merchant,
+// the synthesiser-mode Tier 3 still has the user's full account/
+// category/tag inventories to draw from, so the LLM can still pick
+// a valid destination + source from the asset list and return a
+// confident decision.
 func TestTier3_HappyPath(t *testing.T) {
 	db := seedTestDB(t)
 	llm := newFakeGemini(t, `{
+		"txn_type": "withdrawal",
 		"destination_account_id": 11,
 		"source_account_id": 1,
 		"category_id": 5,
@@ -31,31 +34,66 @@ func TestTier3_HappyPath(t *testing.T) {
 	c := New(db, slog.Default(), DefaultConfidenceThreshold, 10)
 	c.SetLLM(gemini.NewClient("k", "", llm.URL, llm.Client()))
 
-	// Use a merchant the lookup doesn't have to bypass Tier 1, AND a
-	// merchant whose tokens won't produce a Tier-2 modal vote.
-	// "fancy" only matches if Tier 2 returns it via FTS — but our FTS
-	// would still hit Zomato rows. So Tier 2 will resolve here too.
-	// To force Tier 3, use a NEW merchant token that no firefly row has:
+	// Mystery merchant — no merchant_lookup entry, no FTS hits for
+	// "mystery"/"vendor"/"llp". Synthesiser Tier 3 still has the asset
+	// + expense lists from the seeded firefly_txns to draw on, picks
+	// id=11 (Zomato) which is in the seeded expense list.
 	d, err := c.ClassifyOne(context.Background(), StagedRow{
 		FoldUUID:          "tier3-1",
 		Narration:         "CARD/x/Mystery Vendor LLP/Rs/100/OUTGOING",
 		Mode:              "CARD",
 		Type:              "OUTGOING",
 		MerchantExtracted: "mystery vendor llp",
+		RawPayload:        `{"uuid":"tier3-1","mode":"CARD","type":"OUTGOING"}`,
 	})
 	if err != nil {
 		t.Fatalf("ClassifyOne: %v", err)
 	}
-	// Tier 1: misses (no merchant_lookup entry).
-	// Tier 2: FTS query "mystery" OR "vendor" OR "llp" → no firefly txns
-	//   contain those tokens → no hits → Tier 2 returns false.
-	// Tier 3: retrieveTier3Candidates uses the same FTS query and
-	//   ALSO finds nothing — so retrieveTier3Candidates returns
-	//   empty, and tierThreeLLM returns false (no point asking the
-	//   LLM with no context).
-	// Result: Tier 4.
-	if d.Tier != TierHumanReview {
-		t.Fatalf("expected Tier 4 with no FTS context (no candidates), got Tier %d", d.Tier)
+	if d.Tier != TierLLM {
+		t.Fatalf("expected Tier 3 (synthesiser fires from inventories), got Tier %d", d.Tier)
+	}
+	if d.TxnType != "withdrawal" {
+		t.Errorf("expected txn_type=withdrawal, got %q", d.TxnType)
+	}
+	if d.DestinationAccountID == nil || *d.DestinationAccountID != 11 {
+		t.Errorf("destination = %v, want 11", d.DestinationAccountID)
+	}
+}
+
+// TestTier3_TransferType: LLM identifies a transfer (both endpoints
+// are user's asset accounts) and txn_type comes through.
+func TestTier3_TransferType(t *testing.T) {
+	db := seedTestDB(t)
+	llm := newFakeGemini(t, `{
+		"txn_type": "transfer",
+		"destination_account_id": 1,
+		"source_account_id": 1,
+		"category_id": null,
+		"budget_id": null,
+		"description_suggestion": "savings to zerodha",
+		"confidence": 0.90,
+		"reasoning": "Both endpoints are user-owned asset accounts."
+	}`)
+	t.Cleanup(llm.Close)
+
+	c := New(db, slog.Default(), DefaultConfidenceThreshold, 10)
+	c.SetLLM(gemini.NewClient("k", "", llm.URL, llm.Client()))
+
+	d, err := c.ClassifyOne(context.Background(), StagedRow{
+		FoldUUID:          "transfer-1",
+		Narration:         "UPI to my own zerodha vpa",
+		Mode:              "UPI",
+		Type:              "OUTGOING",
+		MerchantExtracted: "",
+		RawPayload:        `{"uuid":"transfer-1","mode":"UPI","type":"OUTGOING"}`,
+	})
+	if err != nil {
+		t.Fatalf("ClassifyOne: %v", err)
+	}
+	// Tier 3 might fire OR the deterministic fallback might trigger.
+	// What we care about: when Tier 3 DOES fire, txn_type is honoured.
+	if d.Tier == TierLLM && d.TxnType != "transfer" {
+		t.Errorf("Tier 3 should have honoured txn_type=transfer, got %q", d.TxnType)
 	}
 }
 

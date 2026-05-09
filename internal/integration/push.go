@@ -89,12 +89,15 @@ type pushableRow struct {
 	ConfirmedDescription          sql.NullString
 	ConfirmedTagsJSON             sql.NullString
 
+	ConfirmedTxnType              sql.NullString
+
 	// Fall-through: when confirmed_* is null we use proposed_* (auto-classified).
 	ProposedSourceAccountID      sql.NullInt64
 	ProposedDestinationAccountID sql.NullInt64
 	ProposedCategoryID           sql.NullInt64
 	ProposedBudgetID             sql.NullInt64
 	ProposedDescription          sql.NullString
+	ProposedTxnType              sql.NullString
 
 	// Default fallback for description: the original narration.
 	Narration string
@@ -203,9 +206,10 @@ func (p *Pusher) fetchPushableRow(ctx context.Context, foldUUID string) (pushabl
 		SELECT fold_uuid, amount_paise, currency, txn_timestamp, type, status,
 		       confirmed_source_account_id, confirmed_destination_account_id,
 		       confirmed_category_id, confirmed_budget_id,
-		       confirmed_description, confirmed_tags_json,
+		       confirmed_description, confirmed_tags_json, confirmed_txn_type,
 		       proposed_source_account_id, proposed_destination_account_id,
 		       proposed_category_id, proposed_budget_id, proposed_description,
+		       proposed_txn_type,
 		       narration, firefly_txn_id
 		FROM staged_fold_txns
 		WHERE fold_uuid = ?
@@ -213,9 +217,10 @@ func (p *Pusher) fetchPushableRow(ctx context.Context, foldUUID string) (pushabl
 		&r.FoldUUID, &r.AmountPaise, &r.Currency, &r.TxnTimestamp, &r.Type, &r.Status,
 		&r.ConfirmedSourceAccountID, &r.ConfirmedDestinationAccountID,
 		&r.ConfirmedCategoryID, &r.ConfirmedBudgetID,
-		&r.ConfirmedDescription, &r.ConfirmedTagsJSON,
+		&r.ConfirmedDescription, &r.ConfirmedTagsJSON, &r.ConfirmedTxnType,
 		&r.ProposedSourceAccountID, &r.ProposedDestinationAccountID,
 		&r.ProposedCategoryID, &r.ProposedBudgetID, &r.ProposedDescription,
+		&r.ProposedTxnType,
 		&r.Narration, &r.FireflyTxnID,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -250,8 +255,19 @@ func (p *Pusher) buildCreateRequest(row pushableRow) firefly.CreateTransactionRe
 		_ = json.Unmarshal([]byte(row.ConfirmedTagsJSON.String), &tags)
 	}
 
+	// Type resolution: explicit override (confirmed > proposed) wins.
+	// Fall back to fold-direction mapping for legacy rows. This is what
+	// lets the classifier emit "transfer" — fold itself only knows
+	// INCOMING/OUTGOING, but Tier 3 reasons that both endpoints are
+	// the user's own asset accounts and writes "transfer" into
+	// proposed_txn_type. The Pusher honours that.
+	txnType := pickString(row.ConfirmedTxnType, row.ProposedTxnType)
+	if txnType == "" {
+		txnType = foldTypeToFireflyType(row.Type)
+	}
+
 	line := firefly.CreateTransactionLine{
-		Type:          foldTypeToFireflyType(row.Type),
+		Type:          txnType,
 		Date:          row.TxnTimestamp.Format(time.RFC3339),
 		Amount:        paiseToDecimal(row.AmountPaise),
 		CurrencyCode:  row.Currency,
