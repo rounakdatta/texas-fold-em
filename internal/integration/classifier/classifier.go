@@ -611,7 +611,7 @@ type ClassifyReport struct {
 // staged_fold_txns and applies a Decision. Idempotent — terminal
 // statuses (pushed, skipped) are never touched.
 func (c *Classifier) ClassifyPending(ctx context.Context) (ClassifyReport, error) {
-	return c.classifyMatching(ctx, false)
+	return c.classifyMatching(ctx, scopePendingOnly)
 }
 
 // ReclassifyPendingAndReview also re-runs classification on existing
@@ -620,24 +620,50 @@ func (c *Classifier) ClassifyPending(ctx context.Context) (ClassifyReport, error
 // "I improved the classifier; re-run it on rows it previously punted
 // to human review". Rows the human has touched are left alone.
 func (c *Classifier) ReclassifyPendingAndReview(ctx context.Context) (ClassifyReport, error) {
-	return c.classifyMatching(ctx, true)
+	return c.classifyMatching(ctx, scopeIncludeReview)
 }
 
-func (c *Classifier) classifyMatching(ctx context.Context, includeNeedsReview bool) (ClassifyReport, error) {
+// ReclassifyAllUnconfirmed extends ReclassifyPendingAndReview to also
+// re-run classification on `ready_to_push` rows where the human
+// hasn't yet edited any fields. The intended use is "I shipped a
+// significant classifier upgrade and need every row that hasn't been
+// human-touched to be re-evaluated against the new prompt" — for
+// example, after wiring up the fold-accounts mirror so the LLM can
+// finally ground source-account inference. Pushed/skipped rows
+// (terminal) and any row where confirmed_* is non-NULL are skipped.
+func (c *Classifier) ReclassifyAllUnconfirmed(ctx context.Context) (ClassifyReport, error) {
+	return c.classifyMatching(ctx, scopeAllUnconfirmed)
+}
+
+type classifyScope int
+
+const (
+	scopePendingOnly classifyScope = iota
+	scopeIncludeReview
+	scopeAllUnconfirmed
+)
+
+func (c *Classifier) classifyMatching(ctx context.Context, scope classifyScope) (ClassifyReport, error) {
 	start := time.Now()
 	report := ClassifyReport{}
 
-	// The needs_review side has the extra "no human edits" guard so we
+	// "no human edits" guard, applied to any non-pending row so we
 	// never overwrite something the user has manually adjusted.
-	statusFilter := `status = 'pending'`
-	if includeNeedsReview {
+	const noHumanEdits = `confirmed_destination_account_id IS NULL
+		                  AND confirmed_source_account_id      IS NULL
+		                  AND confirmed_category_id            IS NULL
+		                  AND confirmed_budget_id              IS NULL
+		                  AND confirmed_description            IS NULL`
+	var statusFilter string
+	switch scope {
+	case scopeIncludeReview:
 		statusFilter = `(status = 'pending'
-		                 OR (status = 'needs_review'
-		                     AND confirmed_destination_account_id IS NULL
-		                     AND confirmed_source_account_id      IS NULL
-		                     AND confirmed_category_id            IS NULL
-		                     AND confirmed_budget_id              IS NULL
-		                     AND confirmed_description            IS NULL))`
+		                 OR (status = 'needs_review' AND ` + noHumanEdits + `))`
+	case scopeAllUnconfirmed:
+		statusFilter = `(status = 'pending'
+		                 OR (status IN ('needs_review','ready_to_push') AND ` + noHumanEdits + `))`
+	default:
+		statusFilter = `status = 'pending'`
 	}
 
 	rows, err := c.db.QueryContext(ctx, `
