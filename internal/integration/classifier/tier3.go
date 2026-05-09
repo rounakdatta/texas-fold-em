@@ -6,65 +6,102 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
 
-// tier3SystemPrompt is the standing instruction we give Gemini.
-// Designed to:
-//  1. Constrain the output shape (we parse JSON afterwards).
-//  2. Force ID hallucination defence ("pick from the historical
-//     examples ONLY"). Even with this, we re-validate IDs in code.
-//  3. Encourage low-confidence self-reports rather than overconfident
-//     guesses, since 'needs_review' is cheap and a wrong push isn't.
-const tier3SystemPrompt = `You are a personal-finance classifier. Map a fold.money transaction onto a firefly-iii transaction by choosing the closest match from a small set of historical firefly transactions.
+// tier3SystemPrompt frames Gemini as a final-stage synthesiser, not a
+// last-resort fallback. The prompt explicitly tells the model:
+//   - It will receive deterministic-tier hints (Tier 1 lookup + Tier 2
+//     FTS vote) AND the user's full asset/expense/category inventories
+//     AND the verbatim fold-side raw_payload.
+//   - It must pick IDs only from the inventories shown to it. Any
+//     non-listed ID will be rejected by our hallucination guard.
+//   - It is responsible for type-direction: if fold says INCOMING, the
+//     firefly source is a revenue-side payer and the destination is one
+//     of the user's asset accounts; OUTGOING is the inverse. The
+//     deterministic tiers don't reason about this — Tier 3 must.
+//   - Source-account inference is its primary value-add. The hints from
+//     Tiers 1+2 should be treated as "known-good destination + category"
+//     but the source pick is the LLM's responsibility — we trust the
+//     LLM to read mode/account_id/narration and pick the right card.
+const tier3SystemPrompt = `You are a personal-finance synthesiser mapping a fold.money transaction onto a firefly-iii transaction.
 
-You MUST reply with a single JSON object with these fields (any field may be null if no good match):
+You will be given:
+  - the raw fold transaction (full JSON, including fold's own account_id, mode, type, merchant, narration)
+  - lists of the user's available firefly accounts, categories, budgets, and tags
+  - examples of similar past firefly transactions (RAG retrieval)
+  - hints from deterministic tiers, when available (these are GUIDANCE, not commands)
+
+Your job: produce the cleanest possible firefly proposal.
+
+Output exactly this JSON shape (any nullable field may be null):
 {
+  "txn_type":               "withdrawal" | "deposit" | "transfer",
   "destination_account_id": <int|null>,
   "source_account_id":      <int|null>,
   "category_id":            <int|null>,
   "budget_id":              <int|null>,
+  "tags":                   [<string>...],
   "description_suggestion": <string|null>,
   "confidence":             <number 0..1>,
   "reasoning":              <string>
 }
 
-Rules:
-- All IDs MUST be drawn from the historical examples shown to you. Never invent an ID.
-- If you cannot find a clear match, return confidence < 0.5 and explain why in 'reasoning'.
-- 'description_suggestion' is a short human-readable description (e.g. "Lunch at Zomato, May 8").
-- Output the JSON object only. No prose, no markdown fences.`
+Hard rules:
+1. EVERY id MUST appear in the inventories you were shown. Inventing an id is a critical failure.
+2. Firefly has THREE transaction types — pick the right one and report it as txn_type:
+   - "withdrawal" — fold OUTGOING; source is a user ASSET account, destination is an EXPENSE account (merchant)
+   - "deposit"    — fold INCOMING; source is a REVENUE account (payer), destination is a user ASSET account
+   - "transfer"   — both source AND destination are the user's own ASSET accounts (e.g. savings → zerodha, credit-card-bill payment from savings to credit-card-account). Fold sees this as OUTGOING/INCOMING but it's a transfer if and only if BOTH endpoints are in the asset list.
+3. Pick the source account using fold's mode + account_id + narration signals — don't blindly copy a "modal source" hint if fold's signals point elsewhere (different card, different bank).
+4. Use the historical examples to pick category, budget, and tags. If the user has previously tagged this merchant, mirror those tags.
+5. If the signals genuinely conflict, return confidence < 0.5 and explain in 'reasoning'.
+6. Output the JSON object only. No prose, no markdown fences.
 
-// llmResponse is the structured shape we expect from Gemini. Pointer
-// fields so we can distinguish "not provided" from "explicitly null".
+The output JSON MUST include a "txn_type" field set to "withdrawal", "deposit", or "transfer".`
+
+// llmResponse is the structured shape we expect from Gemini.
+// Pointer fields distinguish "not provided" from "explicitly null".
 type llmResponse struct {
+	TxnType               string   `json:"txn_type"` // "withdrawal" | "deposit" | "transfer"
 	DestinationAccountID  *int64   `json:"destination_account_id"`
 	SourceAccountID       *int64   `json:"source_account_id"`
 	CategoryID            *int64   `json:"category_id"`
 	BudgetID              *int64   `json:"budget_id"`
+	Tags                  []string `json:"tags"`
 	DescriptionSuggestion *string  `json:"description_suggestion"`
 	Confidence            float64  `json:"confidence"`
 	Reasoning             string   `json:"reasoning"`
 }
 
-// tierThreeLLM retrieves broader RAG context (FTS5 top-K with looser
-// query, plus narration tokens), asks Gemini to classify, parses the
-// JSON response, and validates that the LLM's IDs actually exist in
-// the retrieved candidates. Anything off → return false so the caller
-// falls through to Tier 4.
-func (c *Classifier) tierThreeLLM(ctx context.Context, staged StagedRow) (Decision, bool, error) {
-	hits, err := c.retrieveTier3Candidates(ctx, staged)
+// tier3Inputs bundles everything the synthesiser sees. Built by
+// gatherTier3Inputs.
+type tier3Inputs struct {
+	hits             []tier3Hit
+	assetAccounts    []AccountRef
+	expenseAccounts  []AccountRef
+	revenueAccounts  []AccountRef
+	categories       []AccountRef
+	budgets          []AccountRef
+	tagLibrary       []string
+	tier1            *Decision // nil if Tier 1 missed
+	tier2            *Decision // nil if Tier 2 missed
+}
+
+// tierThreeLLM gathers context, builds the prompt, calls Gemini,
+// parses + validates the response. Returns (decision, ok, err) like
+// the other tiers; err is non-nil only on transport / parse failure
+// (the caller in ClassifyOne logs+drops it). ok=false means the LLM
+// declined to commit (low confidence or missing destination).
+func (c *Classifier) tierThreeLLM(ctx context.Context, staged StagedRow, tier1Hint, tier2Hint *Decision) (Decision, bool, error) {
+	inputs, err := c.gatherTier3Inputs(ctx, staged, tier1Hint, tier2Hint)
 	if err != nil {
-		return Decision{}, false, fmt.Errorf("retrieve candidates: %w", err)
-	}
-	if len(hits) == 0 {
-		// No examples to anchor the LLM. Without a corpus, asking it
-		// would be pure guess; better to escalate to human review.
-		return Decision{}, false, nil
+		return Decision{}, false, fmt.Errorf("gather inputs: %w", err)
 	}
 
-	prompt := buildTier3Prompt(staged, hits)
+	prompt := buildTier3Prompt(staged, inputs)
 	jsonText, err := c.llm.GenerateJSON(ctx, tier3SystemPrompt, prompt)
 	if err != nil {
 		return Decision{}, false, fmt.Errorf("gemini call: %w", err)
@@ -76,33 +113,34 @@ func (c *Classifier) tierThreeLLM(ctx context.Context, staged StagedRow) (Decisi
 		return Decision{}, false, fmt.Errorf("parse llm response: %w (raw: %s)", err, truncate(jsonText, 256))
 	}
 
-	// Validate: every non-null ID must appear in the retrieved hits.
-	// This is the hallucination guard. If the LLM invented an ID, we
-	// drop it and fall through to Tier 4.
-	if !idsAreFromCandidates(llm, hits) {
-		return Decision{}, false, errors.New("llm produced ids not present in candidates (hallucination guard)")
+	// Hallucination guard: every non-null ID must appear in the
+	// inventories we showed the LLM. Expanded from the old
+	// "must be in FTS hits" to also accept asset/expense/revenue
+	// account ids and full category/budget lists.
+	if !idsAreFromInventories(llm, inputs) {
+		return Decision{}, false, errors.New("llm produced ids not present in inventories (hallucination guard)")
 	}
 
-	// Build a Decision. We accept Tier-3 only if the LLM expressed
-	// reasonable confidence AND we have a destination_account_id —
-	// without a destination, there's no firefly target.
-	if llm.Confidence < 0.5 || llm.DestinationAccountID == nil {
+	// Accept only when the LLM is reasonably confident AND has at
+	// least pinned destination + source. Without those two, the
+	// firefly POST will 422.
+	if llm.Confidence < 0.5 || llm.DestinationAccountID == nil || llm.SourceAccountID == nil {
 		return Decision{}, false, nil
 	}
 
-	// Resolve the human-readable names for display from the hit set.
-	destName := lookupHitName(hits, "destination", *llm.DestinationAccountID)
-	srcName := ""
-	if llm.SourceAccountID != nil {
-		srcName = lookupHitName(hits, "source", *llm.SourceAccountID)
-	}
+	// Resolve human-readable names for the UI's display from any of
+	// the ID inventories (FTS hits first, then the broader account
+	// lists). lookupName falls through silently if the ID is somehow
+	// missing — already guaranteed valid by the guard above.
+	destName := lookupName(inputs, "destination", *llm.DestinationAccountID)
+	srcName := lookupName(inputs, "source", *llm.SourceAccountID)
 	catName := ""
 	if llm.CategoryID != nil {
-		catName = lookupHitName(hits, "category", *llm.CategoryID)
+		catName = lookupName(inputs, "category", *llm.CategoryID)
 	}
 	budName := ""
 	if llm.BudgetID != nil {
-		budName = lookupHitName(hits, "budget", *llm.BudgetID)
+		budName = lookupName(inputs, "budget", *llm.BudgetID)
 	}
 
 	desc := ""
@@ -110,8 +148,19 @@ func (c *Classifier) tierThreeLLM(ctx context.Context, staged StagedRow) (Decisi
 		desc = *llm.DescriptionSuggestion
 	}
 
-	ftsView := make([]FTSHitView, 0, len(hits))
-	for _, h := range hits {
+	// Validate the txn_type field. The LLM is asked to set it; default
+	// to the fold-direction mapping if it didn't (or returned garbage)
+	// so the Pusher always has a usable value downstream.
+	txnType := strings.ToLower(strings.TrimSpace(llm.TxnType))
+	switch txnType {
+	case "withdrawal", "deposit", "transfer":
+		// ok
+	default:
+		txnType = fireflyTxnTypeFor(staged.Type)
+	}
+
+	ftsView := make([]FTSHitView, 0, len(inputs.hits))
+	for _, h := range inputs.hits {
 		ftsView = append(ftsView, FTSHitView{
 			FireflyID:              h.FireflyID,
 			Score:                  h.Score,
@@ -125,6 +174,7 @@ func (c *Classifier) tierThreeLLM(ctx context.Context, staged StagedRow) (Decisi
 	return Decision{
 		Tier:                   TierLLM,
 		Confidence:             llm.Confidence,
+		TxnType:                txnType,
 		DestinationAccountID:   llm.DestinationAccountID,
 		DestinationAccountName: destName,
 		SourceAccountID:        llm.SourceAccountID,
@@ -134,11 +184,13 @@ func (c *Classifier) tierThreeLLM(ctx context.Context, staged StagedRow) (Decisi
 		BudgetID:               llm.BudgetID,
 		BudgetName:             budName,
 		Description:            desc,
+		Tags:                   llm.Tags,
 		Evidence: Evidence{
 			Tier:               TierLLM,
 			MerchantNormalized: staged.MerchantExtracted,
 			FTSHits:            ftsView,
 			Note:               llm.Reasoning,
+			Tags:               llm.Tags,
 		},
 	}, true, nil
 }
@@ -158,18 +210,49 @@ type tier3Hit struct {
 	Description            string
 	Date                   time.Time
 	Score                  float64
+	TagsJSON               string
+}
+
+// gatherTier3Inputs assembles every slice of context the prompt needs.
+// Cheap: 5 small lookups against firefly_txns. Heavy lifting (the FTS
+// retrieval) is the only part bounded by query work.
+func (c *Classifier) gatherTier3Inputs(ctx context.Context, staged StagedRow, tier1, tier2 *Decision) (tier3Inputs, error) {
+	hits, err := c.retrieveTier3Candidates(ctx, staged)
+	if err != nil {
+		return tier3Inputs{}, err
+	}
+	asset, _ := listAssetAccounts(ctx, c.db)
+	expense, _ := listExpenseAccounts(ctx, c.db)
+	revenue, _ := listRevenueAccounts(ctx, c.db)
+	cats, _ := listCategories(ctx, c.db)
+	buds, _ := listBudgets(ctx, c.db)
+	tags, _ := allTagsFromMirror(ctx, c.db)
+	return tier3Inputs{
+		hits:            hits,
+		assetAccounts:   asset,
+		expenseAccounts: expense,
+		revenueAccounts: revenue,
+		categories:      cats,
+		budgets:         buds,
+		tagLibrary:      tags,
+		tier1:           tier1,
+		tier2:           tier2,
+	}, nil
 }
 
 // retrieveTier3Candidates pulls top-K firefly transactions for the LLM
-// to reason about. Strategy:
+// to reason about. Filtered by txn_type matching the fold direction —
+// for OUTGOING fold, withdrawals; for INCOMING, deposits.
+//
+// Strategy:
 //  1. If the staged row has an extracted merchant, use it as the FTS
 //     query (same as Tier 2).
-//  2. If not, fall back to the 5 longest tokens from the narration —
-//     fold's narrations contain useful tokens (currency, descriptors,
-//     occasionally fragments of a merchant name).
-//  3. If even that yields nothing, return empty.
+//  2. If not, fall back to long tokens from the narration.
+//  3. If still nothing, return empty — the LLM gets prompted with no
+//     RAG examples but still has the full inventories, mode, account_id
+//     etc. to reason from.
 //
-// We pull more rows than Tier 2 (15 vs 10) because the LLM benefits
+// Pull more rows than Tier 2 (15 vs 10) because the LLM benefits
 // from broader context.
 func (c *Classifier) retrieveTier3Candidates(ctx context.Context, staged StagedRow) ([]tier3Hit, error) {
 	const k = 15
@@ -186,15 +269,15 @@ func (c *Classifier) retrieveTier3Candidates(ctx context.Context, staged StagedR
 		       t.source_account_id,      t.source_account_name,
 		       t.category_id,            t.category_name,
 		       t.budget_id,              t.budget_name,
-		       t.description,            t.date,
+		       t.description,            t.date, t.tags_json,
 		       bm25(firefly_txns_fts)    AS score
 		FROM firefly_txns_fts
 		JOIN firefly_txns t ON t.firefly_id = firefly_txns_fts.rowid
 		WHERE firefly_txns_fts MATCH ?
-		  AND t.txn_type = 'withdrawal'
+		  AND t.txn_type = ?
 		ORDER BY score
 		LIMIT ?
-	`, query, k)
+	`, query, fireflyTxnTypeFor(staged.Type), k)
 	if err != nil {
 		return nil, err
 	}
@@ -206,6 +289,7 @@ func (c *Classifier) retrieveTier3Candidates(ctx context.Context, staged StagedR
 			h       tier3Hit
 			dn, sn  sql.NullString
 			cn, bn  sql.NullString
+			tagsJS  sql.NullString
 			dateStr string
 		)
 		if err := rows.Scan(
@@ -214,7 +298,7 @@ func (c *Classifier) retrieveTier3Candidates(ctx context.Context, staged StagedR
 			&h.SourceAccountID, &sn,
 			&h.CategoryID, &cn,
 			&h.BudgetID, &bn,
-			&h.Description, &dateStr, &h.Score,
+			&h.Description, &dateStr, &tagsJS, &h.Score,
 		); err != nil {
 			return nil, err
 		}
@@ -230,6 +314,9 @@ func (c *Classifier) retrieveTier3Candidates(ctx context.Context, staged StagedR
 		if bn.Valid {
 			h.BudgetName = bn.String
 		}
+		if tagsJS.Valid {
+			h.TagsJSON = tagsJS.String
+		}
 		if t, err := time.Parse(time.RFC3339, dateStr); err == nil {
 			h.Date = t
 		} else if t, err := time.Parse("2006-01-02 15:04:05+00:00", dateStr); err == nil {
@@ -242,53 +329,189 @@ func (c *Classifier) retrieveTier3Candidates(ctx context.Context, staged StagedR
 	return out, rows.Err()
 }
 
-// buildTier3Prompt formats the staged transaction + retrieved hits
-// into the user-prompt text. We keep it terse — Gemini is good at
-// extracting structure from short, structured prose.
-func buildTier3Prompt(staged StagedRow, hits []tier3Hit) string {
-	var b strings.Builder
-	b.WriteString("Historical firefly transactions (recent matches):\n")
-	for i, h := range hits {
-		b.WriteString(fmt.Sprintf("[%d] firefly_id=%d  amount-currency-historical\n", i+1, h.FireflyID))
-		b.WriteString(fmt.Sprintf("    destination=%q (id=%s)\n", h.DestinationAccountName, formatNullID(h.DestinationAccountID)))
-		b.WriteString(fmt.Sprintf("    source=%q (id=%s)\n", h.SourceAccountName, formatNullID(h.SourceAccountID)))
-		b.WriteString(fmt.Sprintf("    category=%q (id=%s)\n", h.CategoryName, formatNullID(h.CategoryID)))
-		if h.BudgetName != "" {
-			b.WriteString(fmt.Sprintf("    budget=%q (id=%s)\n", h.BudgetName, formatNullID(h.BudgetID)))
+// allTagsFromMirror flattens firefly_txns.tags_json into a deduped
+// list. Cheap (~7k rows on this corpus) and lets the prompt include
+// the user's tag vocabulary so the LLM uses existing tags rather than
+// inventing new ones.
+func allTagsFromMirror(ctx context.Context, db *sql.DB) ([]string, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT tags_json FROM firefly_txns
+		WHERE tags_json IS NOT NULL AND tags_json <> '' AND tags_json <> '[]'
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	seen := map[string]struct{}{}
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
 		}
-		b.WriteString(fmt.Sprintf("    description=%q\n", h.Description))
-		b.WriteString(fmt.Sprintf("    date=%s\n", h.Date.Format("2006-01-02")))
+		var arr []string
+		if json.Unmarshal([]byte(raw), &arr) != nil {
+			continue
+		}
+		for _, t := range arr {
+			t = strings.TrimSpace(t)
+			if t != "" {
+				seen[t] = struct{}{}
+			}
+		}
 	}
-	b.WriteString("\nNew fold transaction to classify:\n")
-	b.WriteString(fmt.Sprintf("  fold_uuid: %s\n", staged.FoldUUID))
-	b.WriteString(fmt.Sprintf("  mode:      %s\n", staged.Mode))
-	b.WriteString(fmt.Sprintf("  type:      %s\n", staged.Type))
-	if staged.MerchantExtracted != "" {
-		b.WriteString(fmt.Sprintf("  merchant_extracted: %q\n", staged.MerchantExtracted))
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
-	b.WriteString(fmt.Sprintf("  narration: %q\n", staged.Narration))
+	out := make([]string, 0, len(seen))
+	for t := range seen {
+		out = append(out, t)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// buildTier3Prompt formats inputs into the user-prompt text. Compact
+// tabular form — Gemini handles structured prose well.
+func buildTier3Prompt(staged StagedRow, in tier3Inputs) string {
+	var b strings.Builder
+
+	// Block 1: the fold transaction itself, full JSON. The LLM has
+	// access to ALL the fields fold returns (account_id, merchant,
+	// kind, current_balance, etc.), not just our typed subset.
+	b.WriteString("== FOLD TRANSACTION (raw payload from fold's API) ==\n")
+	b.WriteString(staged.RawPayload)
+	b.WriteString("\n\n")
+	b.WriteString(fmt.Sprintf("== FOLD TYPE: %s   MODE: %s ==\n", staged.Type, staged.Mode))
+	b.WriteString(fmt.Sprintf("(Firefly side will be: %s)\n\n", fireflyTxnTypeFor(staged.Type)))
+
+	// Block 2: hints from the deterministic tiers.
+	b.WriteString("== DETERMINISTIC HINTS ==\n")
+	if in.tier1 != nil {
+		b.WriteString(fmt.Sprintf("Tier 1 (merchant_lookup, conf=%.2f):\n", in.tier1.Confidence))
+		writeDecisionHint(&b, in.tier1)
+	} else {
+		b.WriteString("Tier 1: no merchant_lookup match.\n")
+	}
+	if in.tier2 != nil {
+		b.WriteString(fmt.Sprintf("Tier 2 (FTS5 vote, conf=%.2f):\n", in.tier2.Confidence))
+		writeDecisionHint(&b, in.tier2)
+	} else {
+		b.WriteString("Tier 2: no FTS5 modal vote.\n")
+	}
+	b.WriteString("\n")
+
+	// Block 3: user's account inventories, scoped by what the LLM
+	// will need given the fold direction.
+	b.WriteString("== USER'S ACCOUNT INVENTORIES ==\n")
+	if staged.Type == "OUTGOING" {
+		b.WriteString("\nasset accounts (pick SOURCE from these):\n")
+		writeAccountList(&b, in.assetAccounts)
+		b.WriteString("\nexpense accounts (pick DESTINATION from these — or any from the FTS examples below):\n")
+		writeAccountList(&b, capList(in.expenseAccounts, 200))
+	} else {
+		b.WriteString("\nasset accounts (pick DESTINATION from these):\n")
+		writeAccountList(&b, in.assetAccounts)
+		b.WriteString("\nrevenue accounts (pick SOURCE from these):\n")
+		writeAccountList(&b, capList(in.revenueAccounts, 200))
+	}
+	b.WriteString("\ncategories:\n")
+	writeAccountList(&b, in.categories)
+	if len(in.budgets) > 0 {
+		b.WriteString("\nbudgets:\n")
+		writeAccountList(&b, in.budgets)
+	}
+	if len(in.tagLibrary) > 0 {
+		b.WriteString("\nexisting tag vocabulary (use these when applicable):\n")
+		b.WriteString("  ")
+		b.WriteString(strings.Join(in.tagLibrary, ", "))
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
+
+	// Block 4: the FTS retrieval examples.
+	if len(in.hits) > 0 {
+		b.WriteString("== HISTORICAL EXAMPLES (BM25 nearest) ==\n")
+		for i, h := range in.hits {
+			b.WriteString(fmt.Sprintf("[%d] firefly_id=%d  date=%s\n", i+1, h.FireflyID, h.Date.Format("2006-01-02")))
+			b.WriteString(fmt.Sprintf("    destination=%q (id=%s)\n", h.DestinationAccountName, formatNullID(h.DestinationAccountID)))
+			b.WriteString(fmt.Sprintf("    source=%q (id=%s)\n", h.SourceAccountName, formatNullID(h.SourceAccountID)))
+			b.WriteString(fmt.Sprintf("    category=%q (id=%s)\n", h.CategoryName, formatNullID(h.CategoryID)))
+			if h.BudgetName != "" {
+				b.WriteString(fmt.Sprintf("    budget=%q (id=%s)\n", h.BudgetName, formatNullID(h.BudgetID)))
+			}
+			b.WriteString(fmt.Sprintf("    description=%q\n", h.Description))
+			if h.TagsJSON != "" && h.TagsJSON != "[]" {
+				b.WriteString(fmt.Sprintf("    tags=%s\n", h.TagsJSON))
+			}
+		}
+	} else {
+		b.WriteString("== HISTORICAL EXAMPLES ==\n(none — first time seeing this kind of transaction; rely on inventories.)\n")
+	}
+
 	b.WriteString("\nReturn the JSON object now.")
 	return b.String()
 }
 
-// idsAreFromCandidates checks every non-null ID in the LLM response
-// against the retrieved hit set. If the LLM hallucinated an ID, we
-// fail this check and bail.
-func idsAreFromCandidates(r llmResponse, hits []tier3Hit) bool {
-	dest := map[int64]bool{}
-	src := map[int64]bool{}
-	cat := map[int64]bool{}
-	bud := map[int64]bool{}
-	for _, h := range hits {
+// writeDecisionHint dumps a tier 1/2 hint compactly. Intentionally
+// terse — the LLM doesn't need a manifesto.
+func writeDecisionHint(b *strings.Builder, d *Decision) {
+	if d.DestinationAccountID != nil {
+		b.WriteString(fmt.Sprintf("  destination_account_id = %d (%q)\n", *d.DestinationAccountID, d.DestinationAccountName))
+	}
+	if d.SourceAccountID != nil {
+		b.WriteString(fmt.Sprintf("  source_account_id      = %d (%q)\n", *d.SourceAccountID, d.SourceAccountName))
+	}
+	if d.CategoryID != nil {
+		b.WriteString(fmt.Sprintf("  category_id            = %d (%q)\n", *d.CategoryID, d.CategoryName))
+	}
+	if d.BudgetID != nil {
+		b.WriteString(fmt.Sprintf("  budget_id              = %d (%q)\n", *d.BudgetID, d.BudgetName))
+	}
+}
+
+func writeAccountList(b *strings.Builder, list []AccountRef) {
+	for _, a := range list {
+		b.WriteString(fmt.Sprintf("  - id=%d  %q\n", a.ID, a.Name))
+	}
+	if len(list) == 0 {
+		b.WriteString("  (none)\n")
+	}
+}
+
+func capList(list []AccountRef, n int) []AccountRef {
+	if len(list) > n {
+		return list[:n]
+	}
+	return list
+}
+
+// idsAreFromInventories generalises the old idsAreFromCandidates to
+// validate against the union of every ID universe in the prompt. The
+// LLM might pick a category id from `inputs.categories` that doesn't
+// happen to appear in the FTS hits — that's still legal.
+func idsAreFromInventories(r llmResponse, in tier3Inputs) bool {
+	dest := idSet(in.expenseAccounts)
+	addAssets(dest, in.assetAccounts)
+	for _, h := range in.hits {
 		if h.DestinationAccountID.Valid {
 			dest[h.DestinationAccountID.Int64] = true
 		}
+	}
+	src := idSet(in.assetAccounts)
+	addAssets(src, in.revenueAccounts)
+	for _, h := range in.hits {
 		if h.SourceAccountID.Valid {
 			src[h.SourceAccountID.Int64] = true
 		}
+	}
+	cat := idSet(in.categories)
+	for _, h := range in.hits {
 		if h.CategoryID.Valid {
 			cat[h.CategoryID.Int64] = true
 		}
+	}
+	bud := idSet(in.budgets)
+	for _, h := range in.hits {
 		if h.BudgetID.Valid {
 			bud[h.BudgetID.Int64] = true
 		}
@@ -308,10 +531,49 @@ func idsAreFromCandidates(r llmResponse, hits []tier3Hit) bool {
 	return true
 }
 
-// lookupHitName scans hits for the first record matching id and
-// returns the corresponding name field. Used for UI display.
-func lookupHitName(hits []tier3Hit, kind string, id int64) string {
-	for _, h := range hits {
+func idSet(refs []AccountRef) map[int64]bool {
+	m := make(map[int64]bool, len(refs))
+	for _, r := range refs {
+		m[r.ID] = true
+	}
+	return m
+}
+
+func addAssets(m map[int64]bool, refs []AccountRef) {
+	for _, r := range refs {
+		m[r.ID] = true
+	}
+}
+
+// lookupName resolves an ID to its display name across every inventory
+// the LLM saw. Used purely for UI display; the ID itself is the
+// authoritative reference once it's passed the hallucination guard.
+func lookupName(in tier3Inputs, kind string, id int64) string {
+	switch kind {
+	case "destination":
+		if n := nameFromRefs(in.expenseAccounts, id); n != "" {
+			return n
+		}
+		if n := nameFromRefs(in.assetAccounts, id); n != "" {
+			return n
+		}
+	case "source":
+		if n := nameFromRefs(in.assetAccounts, id); n != "" {
+			return n
+		}
+		if n := nameFromRefs(in.revenueAccounts, id); n != "" {
+			return n
+		}
+	case "category":
+		if n := nameFromRefs(in.categories, id); n != "" {
+			return n
+		}
+	case "budget":
+		if n := nameFromRefs(in.budgets, id); n != "" {
+			return n
+		}
+	}
+	for _, h := range in.hits {
 		switch kind {
 		case "destination":
 			if h.DestinationAccountID.Valid && h.DestinationAccountID.Int64 == id {
@@ -334,9 +596,17 @@ func lookupHitName(hits []tier3Hit, kind string, id int64) string {
 	return ""
 }
 
+func nameFromRefs(refs []AccountRef, id int64) string {
+	for _, r := range refs {
+		if r.ID == id {
+			return r.Name
+		}
+	}
+	return ""
+}
+
 // stripJSONFences removes ``` fences if Gemini wraps the JSON despite
-// our system prompt asking it not to. Defensive — current behaviour
-// is clean, but model updates can regress.
+// our system prompt asking it not to. Defensive.
 func stripJSONFences(s string) string {
 	s = strings.TrimSpace(s)
 	if strings.HasPrefix(s, "```") {
@@ -366,10 +636,7 @@ func formatNullID(n sql.NullInt64) string {
 // Used as the fallback FTS query when no merchant is extractable.
 func longTokens(s string, n int) []string {
 	tokens := strings.Fields(s)
-	// Drop tokens that look like UPI handles / hex blobs / pure numbers.
-	type kept struct {
-		tok string
-	}
+	type kept struct{ tok string }
 	scored := make([]kept, 0, len(tokens))
 	for _, t := range tokens {
 		t = strings.Trim(t, "/.,:;-_+()")
@@ -381,8 +648,6 @@ func longTokens(s string, n int) []string {
 		}
 		scored = append(scored, kept{tok: t})
 	}
-	// Sort by length desc, stable so the same input produces the same
-	// FTS query across runs (cache friendly, debugging friendly).
 	for i := 1; i < len(scored); i++ {
 		for j := i; j > 0 && len(scored[j].tok) > len(scored[j-1].tok); j-- {
 			scored[j], scored[j-1] = scored[j-1], scored[j]

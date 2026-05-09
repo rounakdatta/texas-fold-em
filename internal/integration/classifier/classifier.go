@@ -64,6 +64,11 @@ const (
 type Decision struct {
 	Tier                   Tier
 	Confidence             float64
+	// TxnType overrides the default fold-direction → firefly mapping.
+	// Empty string defers to Pusher's foldTypeToFireflyType (which only
+	// produces "withdrawal" or "deposit"); set to "transfer" by Tier 3
+	// when both endpoints are user-owned asset accounts.
+	TxnType                string
 	DestinationAccountID   *int64
 	DestinationAccountName string
 	SourceAccountID        *int64
@@ -73,6 +78,7 @@ type Decision struct {
 	BudgetID               *int64
 	BudgetName             string
 	Description            string
+	Tags                   []string
 	Evidence               Evidence
 }
 
@@ -85,6 +91,7 @@ type Evidence struct {
 	LookupHit          *LookupHitView    `json:"lookup_hit,omitempty"`
 	FTSHits            []FTSHitView      `json:"fts_hits,omitempty"`
 	Note               string            `json:"note,omitempty"`
+	Tags               []string          `json:"tags,omitempty"`
 }
 
 // LookupHitView is a denormalised view of merchant_lookup for the UI.
@@ -113,12 +120,21 @@ type FTSHitView struct {
 // Defined here (rather than re-using a package-integration type) so
 // the classifier subpackage compiles without dragging in the storage
 // layer's full schema.
+//
+// RawPayload is the verbatim JSON fold returned for this transaction —
+// it's passed through to Tier 3's LLM prompt so the model can use ALL
+// the fields fold provides (account_id, merchant, kind, etc.), not
+// just the subset our typed Go struct captures.
 type StagedRow struct {
 	FoldUUID          string
 	Narration         string
 	Mode              string
 	Type              string
 	MerchantExtracted string
+	AmountPaise       int64
+	Currency          string
+	TxnTimestamp      string
+	RawPayload        string
 }
 
 // Classifier runs the deterministic tiers (and optionally Tier-3 LLM
@@ -160,31 +176,55 @@ func (c *Classifier) SetLLM(llm *gemini.Client) { c.llm = llm }
 // function — does not touch staged_fold_txns. Caller (Apply or the
 // orchestrator endpoint) is responsible for persisting.
 //
-// Order: Tier 1 (lookup) → Tier 2 (FTS) → Tier 4 (needs_review).
-// Tier 3 (LLM RAG) lands in PR E and slots in between.
+// Order, post LLM-synthesiser refactor:
+//   Tier 1 (merchant_lookup) and Tier 2 (FTS5 vote) run as candidate
+//   gatherers. Their results become HINTS for Tier 3 — they no
+//   longer terminate the pipeline early.
+//   Tier 3 (LLM synthesiser) is then ALWAYS invoked when a Gemini
+//   client is configured. It sees the raw fold payload, the user's
+//   full account / category / budget / tag inventories, the FTS hits,
+//   and the deterministic hints. It produces the final decision —
+//   including type direction (withdrawal / deposit / transfer) and
+//   source-account inference, both of which are too nuanced for the
+//   deterministic tiers.
+//
+// Fallbacks:
+//   - LLM not configured → use Tier 1, else Tier 2, else Tier 4.
+//   - LLM configured but errored / declined → use Tier 1, else Tier 2,
+//     else Tier 4. (Same priority — Tier 3 enriches, never breaks.)
 func (c *Classifier) ClassifyOne(ctx context.Context, staged StagedRow) (Decision, error) {
+	var tier1Hint, tier2Hint *Decision
+
 	if d, ok, err := c.tierOneMerchantLookup(ctx, staged); err != nil {
 		return Decision{}, fmt.Errorf("tier 1: %w", err)
 	} else if ok {
-		return d, nil
+		dCopy := d
+		tier1Hint = &dCopy
 	}
+
 	if d, ok, err := c.tierTwoFTSVote(ctx, staged); err != nil {
 		return Decision{}, fmt.Errorf("tier 2: %w", err)
 	} else if ok {
-		return d, nil
+		dCopy := d
+		tier2Hint = &dCopy
 	}
-	// Tier 3 — LLM RAG. Only fires when a Gemini client is attached.
-	// On any error (network, parse, hallucinated IDs) we silently fall
-	// through to Tier 4 — Tier-3 is best-effort, never load-bearing.
+
 	if c.llm != nil {
-		if d, ok, err := c.tierThreeLLM(ctx, staged); err != nil {
-			c.log.Warn("tier 3 LLM error; falling through to human review",
+		if d, ok, err := c.tierThreeLLM(ctx, staged, tier1Hint, tier2Hint); err != nil {
+			c.log.Warn("tier 3 LLM error; using deterministic fallback",
 				"fold_uuid", staged.FoldUUID, "err", err)
 		} else if ok {
 			return d, nil
 		}
 	}
-	// Nothing matched; queue for human review.
+
+	// Fallback ladder: prefer the more confident deterministic tier.
+	if tier1Hint != nil {
+		return *tier1Hint, nil
+	}
+	if tier2Hint != nil {
+		return *tier2Hint, nil
+	}
 	return Decision{
 		Tier:       TierHumanReview,
 		Confidence: 0,
@@ -330,10 +370,10 @@ func (c *Classifier) tierTwoFTSVote(ctx context.Context, staged StagedRow) (Deci
 		FROM firefly_txns_fts
 		JOIN firefly_txns t ON t.firefly_id = firefly_txns_fts.rowid
 		WHERE firefly_txns_fts MATCH ?
-		  AND t.txn_type = 'withdrawal'
+		  AND t.txn_type = ?
 		ORDER BY score
 		LIMIT ?
-	`, query, c.ftsTopK)
+	`, query, fireflyTxnTypeFor(staged.Type), c.ftsTopK)
 	if err != nil {
 		return Decision{}, false, fmt.Errorf("fts query: %w", err)
 	}
@@ -513,6 +553,13 @@ func (c *Classifier) ApplyDecision(ctx context.Context, foldUUID string, d Decis
 	if err != nil {
 		return fmt.Errorf("marshal evidence: %w", err)
 	}
+	tagsJSON := ""
+	if len(d.Tags) > 0 {
+		if b, err := json.Marshal(d.Tags); err == nil {
+			tagsJSON = string(b)
+		}
+	}
+
 	_, err = c.db.ExecContext(ctx, `
 		UPDATE staged_fold_txns
 		SET status                            = ?,
@@ -524,6 +571,8 @@ func (c *Classifier) ApplyDecision(ctx context.Context, foldUUID string, d Decis
 		    proposed_category_id              = ?,
 		    proposed_budget_id                = ?,
 		    proposed_description              = ?,
+		    proposed_tags_json                = COALESCE(NULLIF(?, ''), proposed_tags_json),
+		    proposed_txn_type                 = ?,
 		    classified_at                     = CURRENT_TIMESTAMP,
 		    updated_at                        = CURRENT_TIMESTAMP
 		WHERE fold_uuid = ?
@@ -537,6 +586,8 @@ func (c *Classifier) ApplyDecision(ctx context.Context, foldUUID string, d Decis
 		nullableInt64(d.CategoryID),
 		nullableInt64(d.BudgetID),
 		nullableString(d.Description),
+		tagsJSON,                       // proposed_tags_json (COALESCE preserves existing on empty)
+		nullableString(d.TxnType),      // proposed_txn_type
 		foldUUID,
 	)
 	if err != nil {
@@ -566,7 +617,8 @@ func (c *Classifier) ClassifyPending(ctx context.Context) (ClassifyReport, error
 	report := ClassifyReport{}
 
 	rows, err := c.db.QueryContext(ctx, `
-		SELECT fold_uuid, narration, mode, type, COALESCE(merchant_extracted,'')
+		SELECT fold_uuid, narration, mode, type, COALESCE(merchant_extracted,''),
+		       amount_paise, currency, txn_timestamp, raw_payload
 		FROM staged_fold_txns
 		WHERE status = 'pending'
 		ORDER BY txn_timestamp DESC
@@ -579,7 +631,8 @@ func (c *Classifier) ClassifyPending(ctx context.Context) (ClassifyReport, error
 	var staged []StagedRow
 	for rows.Next() {
 		var r StagedRow
-		if err := rows.Scan(&r.FoldUUID, &r.Narration, &r.Mode, &r.Type, &r.MerchantExtracted); err != nil {
+		if err := rows.Scan(&r.FoldUUID, &r.Narration, &r.Mode, &r.Type, &r.MerchantExtracted,
+			&r.AmountPaise, &r.Currency, &r.TxnTimestamp, &r.RawPayload); err != nil {
 			return report, fmt.Errorf("scan: %w", err)
 		}
 		staged = append(staged, r)
