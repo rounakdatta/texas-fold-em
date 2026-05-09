@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/rounakdatta/texas-fold-em/internal/integration"
+	"github.com/rounakdatta/texas-fold-em/internal/integration/classifier"
 )
 
 // handleFireflySync is the admin-gated handler for
@@ -92,14 +93,39 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleClassify(w http.ResponseWriter, r *http.Request) {
 	// Allow the LLM synthesiser to spend more time when re-classifying
 	// a backlog — Tier 3 fires per row and adds ~1-2s each.
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
 	defer cancel()
 
-	retryReview := r.URL.Query().Get("retry_review") == "true"
+	q := r.URL.Query()
+	retryReview := q.Get("retry_review") == "true"
+	scope := q.Get("scope") // "" | "pending" | "review" | "all"
+	if scope == "" {
+		// Backwards-compat: ?retry_review=true used to be the only widening flag.
+		switch {
+		case retryReview:
+			scope = "review"
+		default:
+			scope = "pending"
+		}
+	}
 
-	report, err := s.classifier.ClassifyPending(ctx)
-	if retryReview {
+	var (
+		report classifier.ClassifyReport
+		err    error
+	)
+	switch scope {
+	case "pending":
+		report, err = s.classifier.ClassifyPending(ctx)
+	case "review":
 		report, err = s.classifier.ReclassifyPendingAndReview(ctx)
+	case "all":
+		// All non-terminal rows where the human hasn't edited
+		// confirmed_*. Use after a classifier upgrade to refresh
+		// auto-confirmed rows that may now be wrong.
+		report, err = s.classifier.ReclassifyAllUnconfirmed(ctx)
+	default:
+		writeErr(w, http.StatusBadRequest, "invalid scope", "scope must be one of: pending, review, all")
+		return
 	}
 	if err != nil {
 		s.log.Error("classify failed", "err", err)
