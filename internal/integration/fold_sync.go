@@ -14,11 +14,12 @@ import (
 
 // FoldSyncReport is the structured outcome of a fold staging sync.
 type FoldSyncReport struct {
-	Fetched   int           `json:"fetched"`    // total returned by the fold API
-	Inserted  int           `json:"inserted"`   // newly staged
-	Skipped   int           `json:"skipped"`    // already present (idempotent re-run)
-	Duration  time.Duration `json:"duration"`
-	NewestUUID string       `json:"newest_uuid,omitempty"`
+	Fetched       int           `json:"fetched"`                  // total returned by the fold API
+	Inserted      int           `json:"inserted"`                 // newly staged
+	Skipped       int           `json:"skipped"`                  // already present (idempotent re-run)
+	RawRefreshed  int           `json:"raw_refreshed"`            // already-staged rows whose raw_payload we updated to the verbatim wire bytes
+	Duration      time.Duration `json:"duration"`
+	NewestUUID    string        `json:"newest_uuid,omitempty"`
 }
 
 // FoldSyncer pulls recent fold transactions and stages them in
@@ -72,8 +73,18 @@ func (s *FoldSyncer) SyncRecent(ctx context.Context, limit int) (FoldSyncReport,
 	}
 	defer stmt.Close()
 
+	refreshStmt, err := tx.PrepareContext(ctx, refreshRawPayloadSQL)
+	if err != nil {
+		return report, fmt.Errorf("prepare refresh: %w", err)
+	}
+	defer refreshStmt.Close()
+
 	for i, t := range resp.Data.Transactions {
-		ok, err := s.insertStaged(ctx, stmt, t)
+		var raw json.RawMessage
+		if i < len(resp.Data.RawTransactions) {
+			raw = resp.Data.RawTransactions[i]
+		}
+		ok, err := s.insertStaged(ctx, stmt, t, raw)
 		if err != nil {
 			return report, fmt.Errorf("insert %s: %w", t.UUID, err)
 		}
@@ -81,6 +92,13 @@ func (s *FoldSyncer) SyncRecent(ctx context.Context, limit int) (FoldSyncReport,
 			report.Inserted++
 		} else {
 			report.Skipped++
+			refreshed, err := s.refreshRawPayload(ctx, refreshStmt, t.UUID, raw)
+			if err != nil {
+				return report, fmt.Errorf("refresh raw_payload for %s: %w", t.UUID, err)
+			}
+			if refreshed {
+				report.RawRefreshed++
+			}
 		}
 		if i == 0 {
 			// Response is newest-first.
@@ -98,6 +116,7 @@ func (s *FoldSyncer) SyncRecent(ctx context.Context, limit int) (FoldSyncReport,
 		"fetched", report.Fetched,
 		"inserted", report.Inserted,
 		"skipped", report.Skipped,
+		"raw_refreshed", report.RawRefreshed,
 		"duration_ms", report.Duration.Milliseconds(),
 	)
 	return report, nil
@@ -113,12 +132,36 @@ INSERT OR IGNORE INTO staged_fold_txns (
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
 `
 
+// refreshRawPayloadSQL refreshes only raw_payload on an existing row.
+// Touches no classifier-owned columns (status, proposed_*, confirmed_*).
+// The WHERE raw_payload <> ? guard means it's a no-op when the wire
+// bytes are byte-identical to what we have on disk — so re-running
+// fold/sync against unchanged upstream data won't churn rows or thrash
+// the audit trail.
+//
+// Why this exists: prior to PR-Q the raw_payload column was filled by
+// json.Marshal-ing our typed fold.Transaction (9 fields). Fold actually
+// returns ~16 fields, including account_id and merchant — both of which
+// the classifier's LLM uses for source-account inference. Older rows
+// have a thin payload; this refresh path gets them up to the verbatim
+// wire shape on the next sync without disturbing classifier state.
+const refreshRawPayloadSQL = `
+UPDATE staged_fold_txns
+   SET raw_payload = ?
+ WHERE fold_uuid = ?
+   AND raw_payload <> ?
+`
+
 // insertStaged returns (inserted, err). Inserted is false when the
 // row already existed — i.e. the INSERT OR IGNORE was a no-op.
-func (s *FoldSyncer) insertStaged(ctx context.Context, stmt *sql.Stmt, t fold.Transaction) (bool, error) {
-	raw, err := json.Marshal(t)
+//
+// rawPayload is the verbatim per-transaction JSON bytes from fold's
+// response. Falls back to a minimal envelope if the caller couldn't
+// supply it (defensive — should not occur with the current client).
+func (s *FoldSyncer) insertStaged(ctx context.Context, stmt *sql.Stmt, t fold.Transaction, rawPayload json.RawMessage) (bool, error) {
+	rawStr, err := rawPayloadString(t, rawPayload)
 	if err != nil {
-		return false, fmt.Errorf("marshal raw payload: %w", err)
+		return false, err
 	}
 	ts, err := parseFoldTimestamp(t.TxnTimestamp)
 	if err != nil {
@@ -128,7 +171,7 @@ func (s *FoldSyncer) insertStaged(ctx context.Context, stmt *sql.Stmt, t fold.Tr
 
 	res, err := stmt.ExecContext(ctx,
 		t.UUID,
-		string(raw),
+		rawStr,
 		amountToPaise(t.SourceAmount),
 		nullIfEmpty(t.SourceCurrency),
 		ts,
@@ -145,6 +188,41 @@ func (s *FoldSyncer) insertStaged(ctx context.Context, stmt *sql.Stmt, t fold.Tr
 		return false, fmt.Errorf("rows affected: %w", err)
 	}
 	return n == 1, nil
+}
+
+// refreshRawPayload updates only raw_payload on an already-staged row,
+// when the wire bytes differ from what we have. Returns true when the
+// row was actually updated.
+func (s *FoldSyncer) refreshRawPayload(ctx context.Context, stmt *sql.Stmt, foldUUID string, rawPayload json.RawMessage) (bool, error) {
+	rawStr, err := rawPayloadString(fold.Transaction{UUID: foldUUID}, rawPayload)
+	if err != nil {
+		return false, err
+	}
+	res, err := stmt.ExecContext(ctx, rawStr, foldUUID, rawStr)
+	if err != nil {
+		return false, fmt.Errorf("exec refresh: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("rows affected: %w", err)
+	}
+	return n == 1, nil
+}
+
+// rawPayloadString returns the verbatim wire bytes when available, or
+// falls back to marshalling the typed struct. The fallback exists for
+// callers (mainly tests) that construct a ListTransactionsResponse
+// without going through UnmarshalJSON; in production the client always
+// goes through UnmarshalJSON and rawPayload is non-empty.
+func rawPayloadString(t fold.Transaction, rawPayload json.RawMessage) (string, error) {
+	if len(rawPayload) > 0 {
+		return string(rawPayload), nil
+	}
+	b, err := json.Marshal(t)
+	if err != nil {
+		return "", fmt.Errorf("marshal raw payload fallback: %w", err)
+	}
+	return string(b), nil
 }
 
 // amountToPaise converts a fold-side float-amount to integer paise.
