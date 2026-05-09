@@ -327,34 +327,6 @@ you haven't touched the confirmed fields.
 - **Idempotent everywhere** — every fold sync, firefly mirror, push,
   and classify can be re-run safely.
 
-## Configuration reference
-
-All knobs are env vars prefixed `TEXAS_FOLDEM_`. The chart's `extraEnv`
-is the place to add the integration-mode ones; the broker-mode ones
-have sensible defaults.
-
-| Env | Default | What it does |
-|---|---|---|
-| `BROKER_KEY` | (required) | bearer for `/token` |
-| `ADMIN_KEY`  | (required) | bearer for `/init` and every `/admin/*` |
-| `LISTEN_ADDR` | `:8080` | HTTP listen address |
-| `STATE_PATH` | `~/.texas-fold-em/state.json` | refresh-chain on disk |
-| `API_BASE` | `https://api.fold.money/api` | fold base URL |
-| `REFRESH_LEAD` | `2m` | refresh access token this long before expiry |
-| `KEEPWARM_EVERY` | `1m` | background keepwarm cadence (0 to disable) |
-| `HTTP_TIMEOUT` | `15s` | upstream call timeout |
-| `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
-| `INTEGRATION_ENABLED` | `false` | turn on integration mode |
-| `STAGING_DB_PATH` | `~/.texas-fold-em/staging.db` | classification SQLite |
-| `FIREFLY_BASE` | `http://firefly.apps.svc.cluster.local:8080` | firefly base URL |
-| `FIREFLY_PAT` | (required when integration on) | firefly Personal Access Token |
-| `GEMINI_API_KEY` | (optional) | Google AI Studio key for the LLM tier |
-| `GEMINI_MODEL` | `gemini-3.1-flash-lite` | model name |
-| `FIREFLY_READONLY` | `false` | kill-switch for all firefly writes |
-| `UI_COOKIE_AUTH` | `false` | gate the UI behind its own cookie (otherwise relies on upstream proxy auth) |
-| `PERIODIC_SYNC_EVERY` | `0` | run the cron pipeline this often (0 = off) |
-| `PERIODIC_SYNC_LIMIT` | `50` | rows per fold sync tick |
-
 ## Develop
 
 ```bash
