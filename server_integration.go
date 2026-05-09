@@ -155,30 +155,73 @@ func (s *Server) handleFoldAccountsSync(w http.ResponseWriter, r *http.Request) 
 }
 
 // handleFoldSync is the admin-gated handler for POST /admin/fold/sync.
-// Pulls recent fold transactions and stages them in staged_fold_txns
-// (idempotent on fold_uuid). Optional ?limit=N override; defaults to 50.
+// Pulls fold transactions into staged_fold_txns (idempotent on
+// fold_uuid). Stage-only: this endpoint never classifies, never pushes
+// to firefly.
 //
-// Stage-only: this endpoint never classifies, never pushes to firefly.
-// Those happen in subsequent admin endpoints (PR D's classifier and PR
-// F's push) so each step is independently gated and auditable.
+// Two modes:
+//
+//   - default ("recent"): pull the most recent ?limit=N transactions
+//     (default 50, max 100). Cheap; suited to the steady-state cron.
+//   - "since_firefly": walk fold backwards from "now" until we cross
+//     the cutoff date already mirrored in firefly_txns, capped at
+//     ?max=N (default 2000). The self-healing primitive — re-running
+//     it after any outage catches up automatically. Use it both for
+//     manual bulk catch-up and as the cron's fold-sync step once
+//     you're hands-off.
 func (s *Server) handleFoldSync(w http.ResponseWriter, r *http.Request) {
-	limit := 50
-	if v := r.URL.Query().Get("limit"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n <= 0 || n > 100 {
-			writeErr(w, http.StatusBadRequest, "invalid limit", "must be 1..100")
+	q := r.URL.Query()
+	mode := q.Get("mode")
+	if mode == "" {
+		mode = "recent"
+	}
+
+	switch mode {
+	case "recent":
+		limit := 50
+		if v := q.Get("limit"); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil || n <= 0 || n > 100 {
+				writeErr(w, http.StatusBadRequest, "invalid limit", "must be 1..100")
+				return
+			}
+			limit = n
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+		defer cancel()
+		report, err := s.foldSyncer.SyncRecent(ctx, limit)
+		if err != nil {
+			s.log.Error("fold sync failed", "err", err)
+			writeErr(w, http.StatusBadGateway, "fold sync failed", err.Error())
 			return
 		}
-		limit = n
+		writeJSON(w, http.StatusOK, report)
+	case "since_firefly":
+		// 2000 is comfortably above a year of typical activity at
+		// observed densities (~150 txns/month), and the call returns
+		// in seconds even at that ceiling. A bigger value ought to
+		// be a deliberate operator choice.
+		maxTotal := 2000
+		if v := q.Get("max"); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil || n <= 0 || n > 10000 {
+				writeErr(w, http.StatusBadRequest, "invalid max", "must be 1..10000")
+				return
+			}
+			maxTotal = n
+		}
+		// 5-minute deadline is overkill for the fold side (sub-second
+		// even at 2000 txns) but leaves headroom for SQLite contention.
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+		defer cancel()
+		report, err := s.foldSyncer.SyncSinceFirefly(ctx, maxTotal)
+		if err != nil {
+			s.log.Error("fold sync since firefly failed", "err", err)
+			writeErr(w, http.StatusBadGateway, "fold sync since firefly failed", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, report)
+	default:
+		writeErr(w, http.StatusBadRequest, "invalid mode", "must be one of: recent, since_firefly")
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
-	defer cancel()
-
-	report, err := s.foldSyncer.SyncRecent(ctx, limit)
-	if err != nil {
-		s.log.Error("fold sync failed", "err", err)
-		writeErr(w, http.StatusBadGateway, "fold sync failed", err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, report)
 }

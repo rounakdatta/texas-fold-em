@@ -17,6 +17,7 @@ package fold
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -27,6 +28,20 @@ import (
 	"strings"
 	"time"
 )
+
+// AfterCursorFromTime builds a fold pagination cursor anchored at t.
+// Pass to ListTransactionsAfter to fetch transactions strictly older
+// than t. Empty time → empty cursor → unpaginated newest-first.
+//
+// Format observed against the live API (also documented in fold.md):
+// base64("DESC:::time:::<rfc3339-utc>").
+func AfterCursorFromTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	raw := "DESC:::time:::" + t.UTC().Format(time.RFC3339)
+	return base64.StdEncoding.EncodeToString([]byte(raw))
+}
 
 // DefaultTimeout is what NewClient uses when given a nil http.Client.
 const DefaultTimeout = 30 * time.Second
@@ -62,6 +77,21 @@ func NewClient(base string, tokens TokenFunc, httpClient *http.Client) *Client {
 // the upstream — empirically the API accepts up to 100; values higher
 // than that have been observed to 422.
 func (c *Client) ListTransactions(ctx context.Context, limit int) (ListTransactionsResponse, error) {
+	return c.ListTransactionsAfter(ctx, limit, "")
+}
+
+// ListTransactionsAfter is the cursor-aware variant. When `after` is
+// empty it behaves identically to ListTransactions (returns the latest
+// page). When `after` is set, it returns the page strictly older than
+// the cursor — fold's transaction list is newest-first and the cursor
+// is its built-in pagination anchor.
+//
+// Cursor format (per fold.md, observed empirically): base64(
+// "DESC:::time:::<rfc3339-utc>") — sort direction, sort field, value.
+// Use AfterCursorFromTime to build one for a known timestamp; that's
+// what the gap-fill syncer does to walk back from "now" until it
+// crosses the firefly cutoff.
+func (c *Client) ListTransactionsAfter(ctx context.Context, limit int, after string) (ListTransactionsResponse, error) {
 	if limit <= 0 {
 		return ListTransactionsResponse{}, errors.New("fold: limit must be positive")
 	}
@@ -76,6 +106,9 @@ func (c *Client) ListTransactions(ctx context.Context, limit int) (ListTransacti
 	path := fmt.Sprintf("/v3/users/%s/transactions", url.PathEscape(tok.UserUUID))
 	q := url.Values{}
 	q.Set("limit", fmt.Sprintf("%d", limit))
+	if after != "" {
+		q.Set("after", after)
+	}
 
 	var resp ListTransactionsResponse
 	if err := c.get(ctx, path, q, tok, &resp); err != nil {

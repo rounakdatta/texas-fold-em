@@ -3,6 +3,7 @@ package integration
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -297,6 +298,157 @@ func TestFoldSync_RefreshesStaleRawPayload(t *testing.T) {
 	}
 	if report2.RawRefreshed != 0 {
 		t.Errorf("expected raw_refreshed=0 on no-op rerun, got %d", report2.RawRefreshed)
+	}
+}
+
+// TestSyncSinceFirefly_StopsAtCutoff: the gap-fill walks backward
+// page-by-page and halts the moment a transaction at-or-before the
+// firefly cutoff appears. Anything older than cutoff must NOT land in
+// staged_fold_txns.
+func TestSyncSinceFirefly_StopsAtCutoff(t *testing.T) {
+	ctx := context.Background()
+
+	// Build a deterministic timeline: 5 transactions newest-first,
+	// txn3 sits on the cutoff itself. txn1+txn2 should be staged;
+	// txn3+txn4+txn5 must not.
+	txns := []fold.Transaction{
+		{UUID: "newest-1", Amount: 100, SourceAmount: 100, Currency: "INR", SourceCurrency: "INR",
+			TxnTimestamp: "2026-05-09T12:00:00Z", Mode: "CARD", Type: "OUTGOING", Narration: "n1"},
+		{UUID: "newest-2", Amount: 100, SourceAmount: 100, Currency: "INR", SourceCurrency: "INR",
+			TxnTimestamp: "2026-05-08T12:00:00Z", Mode: "CARD", Type: "OUTGOING", Narration: "n2"},
+		{UUID: "at-cutoff", Amount: 100, SourceAmount: 100, Currency: "INR", SourceCurrency: "INR",
+			TxnTimestamp: "2026-05-07T12:00:00Z", Mode: "CARD", Type: "OUTGOING", Narration: "n3"},
+		{UUID: "older-1", Amount: 100, SourceAmount: 100, Currency: "INR", SourceCurrency: "INR",
+			TxnTimestamp: "2026-05-06T12:00:00Z", Mode: "CARD", Type: "OUTGOING", Narration: "n4"},
+		{UUID: "older-2", Amount: 100, SourceAmount: 100, Currency: "INR", SourceCurrency: "INR",
+			TxnTimestamp: "2026-05-05T12:00:00Z", Mode: "CARD", Type: "OUTGOING", Narration: "n5"},
+	}
+	srv := newFakeFoldAPI(t, "user-1", txns)
+	t.Cleanup(srv.Close)
+
+	dbPath := filepath.Join(t.TempDir(), "staging.db")
+	db, err := Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	// Seed firefly_txns with one row whose date == cutoff. The gap-fill
+	// reads MAX(date) from this table.
+	if _, err := db.DB.ExecContext(ctx, `
+		INSERT INTO firefly_txns (firefly_id, group_id, txn_type, amount_paise, currency, date,
+		    source_account_id, source_account_name,
+		    destination_account_id, destination_account_name, destination_account_name_normalized,
+		    category_id, category_name, description, tags_json)
+		VALUES (1, 1, 'withdrawal', 100, 'INR', '2026-05-07T12:00:00Z',
+		    1, 'HDFC', 11, 'Zomato', 'zomato', 5, 'Eating outside', 'lunch', '[]')
+	`); err != nil {
+		t.Fatalf("seed firefly: %v", err)
+	}
+
+	tokens := func(_ context.Context) (fold.AccessToken, error) {
+		return fold.AccessToken{
+			AccessToken: "ats", DeviceHash: "dh", UserUUID: "user-1",
+			ExpiresAt: time.Now().Add(15 * time.Minute),
+		}, nil
+	}
+	syncer := NewFoldSyncer(db, fold.NewClient(srv.URL, tokens, srv.Client()), slog.Default())
+
+	report, err := syncer.SyncSinceFirefly(ctx, 1000)
+	if err != nil {
+		t.Fatalf("SyncSinceFirefly: %v", err)
+	}
+	if report.Inserted != 2 {
+		t.Errorf("inserted=%d, want 2 (newest-1 + newest-2)", report.Inserted)
+	}
+	if report.StoppedAt != "cutoff_reached" {
+		t.Errorf("stopped_at=%q, want cutoff_reached", report.StoppedAt)
+	}
+
+	// The two staged uuids should be the two newer than cutoff.
+	for _, want := range []string{"newest-1", "newest-2"} {
+		var n int
+		if err := db.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM staged_fold_txns WHERE fold_uuid=?`, want).Scan(&n); err != nil {
+			t.Fatalf("count %s: %v", want, err)
+		}
+		if n != 1 {
+			t.Errorf("expected %s to be staged, got count=%d", want, n)
+		}
+	}
+	// The cutoff and older rows must NOT be staged.
+	for _, blocked := range []string{"at-cutoff", "older-1", "older-2"} {
+		var n int
+		if err := db.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM staged_fold_txns WHERE fold_uuid=?`, blocked).Scan(&n); err != nil {
+			t.Fatalf("count %s: %v", blocked, err)
+		}
+		if n != 0 {
+			t.Errorf("expected %s to NOT be staged, got count=%d", blocked, n)
+		}
+	}
+}
+
+// TestSyncSinceFirefly_HardCap: with a small maxTotal the walk halts
+// at the cap even when more transactions remain newer than cutoff.
+// The report carries stopped_at=hard_cap so an operator notices.
+func TestSyncSinceFirefly_HardCap(t *testing.T) {
+	ctx := context.Background()
+
+	txns := []fold.Transaction{
+		{UUID: "a", Amount: 100, SourceAmount: 100, Currency: "INR", SourceCurrency: "INR",
+			TxnTimestamp: "2026-05-09T12:00:00Z", Mode: "CARD", Type: "OUTGOING", Narration: "a"},
+		{UUID: "b", Amount: 100, SourceAmount: 100, Currency: "INR", SourceCurrency: "INR",
+			TxnTimestamp: "2026-05-08T12:00:00Z", Mode: "CARD", Type: "OUTGOING", Narration: "b"},
+		{UUID: "c", Amount: 100, SourceAmount: 100, Currency: "INR", SourceCurrency: "INR",
+			TxnTimestamp: "2026-05-07T12:00:00Z", Mode: "CARD", Type: "OUTGOING", Narration: "c"},
+	}
+	srv := newFakeFoldAPI(t, "user-1", txns)
+	t.Cleanup(srv.Close)
+
+	dbPath := filepath.Join(t.TempDir(), "staging.db")
+	db, err := Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	tokens := func(_ context.Context) (fold.AccessToken, error) {
+		return fold.AccessToken{
+			AccessToken: "ats", DeviceHash: "dh", UserUUID: "user-1",
+			ExpiresAt: time.Now().Add(15 * time.Minute),
+		}, nil
+	}
+	syncer := NewFoldSyncer(db, fold.NewClient(srv.URL, tokens, srv.Client()), slog.Default())
+
+	// No firefly seed → cutoff is zero time → the cap is the only halt.
+	report, err := syncer.SyncSinceFirefly(ctx, 2)
+	if err != nil {
+		t.Fatalf("SyncSinceFirefly: %v", err)
+	}
+	if report.Inserted != 2 {
+		t.Errorf("inserted=%d, want 2 (cap)", report.Inserted)
+	}
+	if report.StoppedAt != "hard_cap" {
+		t.Errorf("stopped_at=%q, want hard_cap", report.StoppedAt)
+	}
+}
+
+// TestAfterCursorFromTime checks the cursor format matches what fold's
+// API expects: base64("DESC:::time:::<rfc3339>").
+func TestAfterCursorFromTime(t *testing.T) {
+	ts, _ := time.Parse(time.RFC3339, "2026-05-08T07:00:00Z")
+	got := fold.AfterCursorFromTime(ts)
+
+	decoded, err := base64.StdEncoding.DecodeString(got)
+	if err != nil {
+		t.Fatalf("not valid base64: %v", err)
+	}
+	want := "DESC:::time:::2026-05-08T07:00:00Z"
+	if string(decoded) != want {
+		t.Errorf("decoded cursor = %q, want %q", string(decoded), want)
+	}
+
+	if fold.AfterCursorFromTime(time.Time{}) != "" {
+		t.Errorf("zero time should give empty cursor")
 	}
 }
 
