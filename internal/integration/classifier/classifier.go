@@ -553,6 +553,33 @@ func buildFTSQuery(merchantNorm string) string {
 	return strings.Join(quoted, " OR ")
 }
 
+// resetToPending wipes the classifier-owned fields on a staged row
+// and sets status back to 'pending'. Called when the LLM is
+// unavailable and the row is currently sitting in a non-pending state
+// from a previous (potentially low-quality) classify run — the next
+// cycle will re-evaluate it cleanly. Never touches confirmed_*
+// columns; those are the operator's source of truth.
+func (c *Classifier) resetToPending(ctx context.Context, foldUUID string) error {
+	_, err := c.db.ExecContext(ctx, `
+		UPDATE staged_fold_txns
+		SET status                          = 'pending',
+		    classifier_tier                 = NULL,
+		    classifier_confidence           = NULL,
+		    classifier_evidence_json        = NULL,
+		    proposed_source_account_id      = NULL,
+		    proposed_destination_account_id = NULL,
+		    proposed_category_id            = NULL,
+		    proposed_budget_id              = NULL,
+		    proposed_description            = NULL,
+		    proposed_tags_json              = NULL,
+		    proposed_txn_type               = NULL,
+		    classified_at                   = NULL,
+		    updated_at                      = CURRENT_TIMESTAMP
+		WHERE fold_uuid = ?
+	`, foldUUID)
+	return err
+}
+
 // ApplyDecision writes the decision back to staged_fold_txns. It also
 // records classified_at, the chosen tier, and JSON-serialises the
 // evidence for UI display. Status is set to 'ready_to_push' for
@@ -722,9 +749,15 @@ func (c *Classifier) classifyMatching(ctx context.Context, scope classifyScope) 
 		d, err := c.ClassifyOne(ctx, s)
 		if err != nil {
 			if errors.Is(err, ErrLLMDeferred) {
-				// LLM unavailable; the row stays pending for the next
-				// cycle to pick up. Log at info — this is expected
-				// behaviour during transient LLM outages, not a fault.
+				// LLM unavailable. A previous (worse) run may have
+				// already saved a low-quality decision to this row;
+				// reset to pending so the next classify cycle treats
+				// it as fresh. The "no human edits" guard upstream
+				// protects anything the user has manually adjusted.
+				if resetErr := c.resetToPending(ctx, s.FoldUUID); resetErr != nil {
+					c.log.Warn("classify deferred; reset to pending failed",
+						"fold_uuid", s.FoldUUID, "err", resetErr)
+				}
 				report.Deferred++
 				c.log.Info("classify deferred; LLM unavailable",
 					"fold_uuid", s.FoldUUID, "reason", err)
