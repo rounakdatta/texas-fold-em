@@ -6,7 +6,7 @@
   <div class="grid">
     <div>
       <strong>uuid:</strong> <span class="tier">{{.Row.FoldUUID}}</span><br>
-      <strong>when:</strong> {{.Row.TxnTimestamp}}<br>
+      <strong>when:</strong> <time datetime="{{.Row.TxnTimestampUTC}}">{{.Row.TxnTimestamp}}</time><br>
       <strong>mode:</strong> <span class="pill pill-{{.Row.Mode}}">{{.Row.Mode}}</span><br>
       <strong>type:</strong> {{.Row.Type}}<br>
       <strong>amount:</strong> <span class="amount {{if eq .Row.Type "OUTGOING"}}amount-out{{else}}amount-in{{end}}">{{if eq .Row.Type "OUTGOING"}}-{{else}}+{{end}}{{.Row.Currency}} {{.Row.AmountDisplay}}</span>
@@ -32,30 +32,36 @@
     <h2>review &amp; edit</h2>
     <div class="grid">
       <div>
-        <label>destination account id</label>
-        <input type="number" name="destination_account_id" value="{{.Edit.DestinationAccountID}}" placeholder="firefly account id">
-        <small style="color:var(--muted)">{{.Edit.DestinationAccountName}}</small>
+        <label>destination account</label>
+        <input type="text" name="destination_name" value="{{.Edit.DestinationAccountName}}" list="dest-options" autocomplete="off" placeholder="merchant name (autocompletes)">
+        <small class="hint">where the money went — pick from your firefly expense accounts</small>
       </div>
       <div>
-        <label>source account id</label>
-        <input type="number" name="source_account_id" value="{{.Edit.SourceAccountID}}" placeholder="firefly account id">
-        <small style="color:var(--muted)">{{.Edit.SourceAccountName}}</small>
+        <label>source account</label>
+        <input type="text" name="source_name" value="{{.Edit.SourceAccountName}}" list="src-options" autocomplete="off" placeholder="card/bank account">
+        <small class="hint">which of your accounts paid</small>
       </div>
       <div>
-        <label>category id</label>
-        <input type="number" name="category_id" value="{{.Edit.CategoryID}}">
-        <small style="color:var(--muted)">{{.Edit.CategoryName}}</small>
+        <label>category</label>
+        <input type="text" name="category_name" value="{{.Edit.CategoryName}}" list="cat-options" autocomplete="off">
       </div>
       <div>
-        <label>budget id</label>
-        <input type="number" name="budget_id" value="{{.Edit.BudgetID}}">
-        <small style="color:var(--muted)">{{.Edit.BudgetName}}</small>
+        <label>budget</label>
+        <input type="text" name="budget_name" value="{{.Edit.BudgetName}}" list="bud-options" autocomplete="off">
       </div>
     </div>
+
     <label>description</label>
     <textarea name="description">{{.Edit.Description}}</textarea>
+
     <label>tags (comma-separated)</label>
-    <input type="text" name="tags" value="{{.Edit.Tags}}">
+    <input type="text" name="tags" value="{{.Edit.Tags}}" list="tag-options" autocomplete="off" placeholder="lunch, friends">
+    {{if .SuggestedTags}}
+      <small class="hint">used previously at this merchant — click to add:</small>
+      <div class="chips">
+        {{range .SuggestedTags}}<span class="chip" data-tag-chip="{{.}}">{{.}}</span>{{end}}
+      </div>
+    {{end}}
 
     <div class="actions">
       <button type="submit" class="btn">save edits</button>
@@ -63,5 +69,21 @@
       <button type="submit" formaction="/admin/ui/staged/{{.Row.FoldUUID}}/skip" class="btn btn-err" formnovalidate>skip (don't push)</button>
     </div>
   </div>
+
+  <datalist id="dest-options">
+    {{range .DestOptions}}<option value="{{.Name}}">{{end}}
+  </datalist>
+  <datalist id="src-options">
+    {{range .SourceOptions}}<option value="{{.Name}}">{{end}}
+  </datalist>
+  <datalist id="cat-options">
+    {{range .CategoryOptions}}<option value="{{.Name}}">{{end}}
+  </datalist>
+  <datalist id="bud-options">
+    {{range .BudgetOptions}}<option value="{{.Name}}">{{end}}
+  </datalist>
+  <datalist id="tag-options">
+    {{range .TagLibrary}}<option value="{{.}}">{{end}}
+  </datalist>
 </form>
 {{end}}

@@ -150,9 +150,16 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 // indexRow is the shape rendered by index.html. Slim view of
 // staged_fold_txns plus a few derived fields.
+//
+// TxnTimestampUTC is the canonical RFC3339 string that goes into a
+// <time datetime="..."> attribute. The browser-side script in
+// layout.html replaces the textContent with the device's local-time
+// rendering. TxnTimestamp keeps a server-side fallback for clients
+// without JS (still UTC, but readable).
 type indexRow struct {
 	FoldUUID             string
 	TxnTimestamp         string
+	TxnTimestampUTC      string
 	AmountDisplay        string
 	Currency             string
 	Mode                 string
@@ -213,11 +220,15 @@ func (h *Handler) listRows(ctx context.Context, status string) ([]indexRow, erro
 			&r.MerchantExtracted, &r.Status, &tier, &conf, &catName); err != nil {
 			return nil, err
 		}
-		// Format timestamp friendly.
+		// Two views of the timestamp: a server-rendered fallback for
+		// no-JS clients, and a canonical RFC3339 UTC string for the
+		// client-side <time datetime="..."> conversion to local zone.
 		if t, err := time.Parse(time.RFC3339, tsStr); err == nil {
-			r.TxnTimestamp = t.Format("Jan 02 15:04")
+			r.TxnTimestamp = t.Format("Jan 02 15:04 UTC")
+			r.TxnTimestampUTC = t.UTC().Format(time.RFC3339)
 		} else if t, err := time.Parse("2006-01-02 15:04:05+00:00", tsStr); err == nil {
-			r.TxnTimestamp = t.Format("Jan 02 15:04")
+			r.TxnTimestamp = t.Format("Jan 02 15:04 UTC")
+			r.TxnTimestampUTC = t.UTC().Format(time.RFC3339)
 		} else {
 			r.TxnTimestamp = tsStr
 		}
@@ -242,6 +253,7 @@ type detailRow struct {
 	FoldUUID          string
 	Narration         string
 	TxnTimestamp      string
+	TxnTimestampUTC   string
 	AmountDisplay     string
 	Currency          string
 	Mode              string
@@ -278,12 +290,38 @@ func (h *Handler) handleDetail(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+
+	// Datalists for the form's name-with-autocomplete inputs. Cheap
+	// queries — runs on every detail page load. If this becomes a hot
+	// path we'll cache, but for personal-scale traffic it's fine.
+	destAccounts, _ := h.listAccountsByKind(r.Context(), "destination")
+	srcAccounts, _ := h.listAccountsByKind(r.Context(), "source")
+	categories, _ := h.listCategories(r.Context())
+	budgets, _ := h.listBudgets(r.Context())
+	allTags, _ := h.listAllTags(r.Context())
+
+	// Per-merchant tag suggestions (clickable chips). Resolves the
+	// destination_account_id from the edit form's preferred ID
+	// (confirmed > proposed) so we suggest tags that actually fit
+	// THIS merchant rather than from the whole library.
+	var merchantID int64
+	if id, ok := parseInt(edit.DestinationAccountID); ok {
+		merchantID = id
+	}
+	suggested, _ := h.suggestedTagsForMerchant(r.Context(), merchantID)
+
 	h.render(w, h.detailTmpl, map[string]any{
 		"Title":          uuid,
 		"Row":            row,
 		"Edit":           edit,
 		"EvidencePretty": prettyJSON(evidence),
 		"Flash":          flashFromCookie(r, w),
+		"DestOptions":    destAccounts,
+		"SourceOptions":  srcAccounts,
+		"CategoryOptions": categories,
+		"BudgetOptions":  budgets,
+		"TagLibrary":     allTags,
+		"SuggestedTags":  suggested,
 	})
 }
 
@@ -323,9 +361,11 @@ func (h *Handler) fetchDetail(ctx context.Context, uuid string) (detailRow, edit
 	}
 
 	if t, err := time.Parse(time.RFC3339, tsStr); err == nil {
-		r.TxnTimestamp = t.Format("Jan 02, 2006 15:04 MST")
+		r.TxnTimestamp = t.Format("Jan 02, 2006 15:04 UTC")
+		r.TxnTimestampUTC = t.UTC().Format(time.RFC3339)
 	} else if t, err := time.Parse("2006-01-02 15:04:05+00:00", tsStr); err == nil {
-		r.TxnTimestamp = t.Format("Jan 02, 2006 15:04 MST")
+		r.TxnTimestamp = t.Format("Jan 02, 2006 15:04 UTC")
+		r.TxnTimestampUTC = t.UTC().Format(time.RFC3339)
 	} else {
 		r.TxnTimestamp = tsStr
 	}
@@ -373,31 +413,47 @@ func (h *Handler) fetchDetail(ctx context.Context, uuid string) (detailRow, edit
 }
 
 // handleSave writes the edited fields to the confirmed_* columns. No
-// firefly call.
+// firefly call. Surfaces any unresolved names as a flash warning so
+// the user knows which fields were dropped to NULL.
 func (h *Handler) handleSave(w http.ResponseWriter, r *http.Request) {
 	uuid := r.PathValue("fold_uuid")
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad form", http.StatusBadRequest)
 		return
 	}
-	if err := h.saveEdits(r.Context(), uuid, r.Form); err != nil {
+	unresolved, err := h.saveEdits(r.Context(), uuid, r.Form)
+	if err != nil {
 		h.flashErr(w, "save failed: "+err.Error())
 		http.Redirect(w, r, "/admin/ui/staged/"+uuid, http.StatusSeeOther)
 		return
 	}
-	h.flashOk(w, "edits saved")
+	if len(unresolved) > 0 {
+		h.flashErr(w, "saved, but couldn't resolve: "+strings.Join(unresolved, "; ")+
+			" — pick from the autocomplete suggestions or create the account in firefly first")
+	} else {
+		h.flashOk(w, "edits saved")
+	}
 	http.Redirect(w, r, "/admin/ui/staged/"+uuid, http.StatusSeeOther)
 }
 
-// handlePush saves edits AND pushes the row to firefly.
+// handlePush saves edits AND pushes the row to firefly. If any name
+// failed to resolve, we DON'T push (would send NULL fields to firefly
+// and 422). User is sent back to the form with a flash explaining.
 func (h *Handler) handlePush(w http.ResponseWriter, r *http.Request) {
 	uuid := r.PathValue("fold_uuid")
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad form", http.StatusBadRequest)
 		return
 	}
-	if err := h.saveEdits(r.Context(), uuid, r.Form); err != nil {
+	unresolved, err := h.saveEdits(r.Context(), uuid, r.Form)
+	if err != nil {
 		h.flashErr(w, "save failed before push: "+err.Error())
+		http.Redirect(w, r, "/admin/ui/staged/"+uuid, http.StatusSeeOther)
+		return
+	}
+	if len(unresolved) > 0 {
+		h.flashErr(w, "push aborted — couldn't resolve: "+strings.Join(unresolved, "; ")+
+			". Edits were saved; fix the unresolved names and try again.")
 		http.Redirect(w, r, "/admin/ui/staged/"+uuid, http.StatusSeeOther)
 		return
 	}
@@ -430,17 +486,52 @@ func (h *Handler) handleSkip(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/admin/ui/?status=needs_review", http.StatusSeeOther)
 }
 
-// saveEdits writes form values to the confirmed_* columns. Empty
-// fields are written as NULL so the push fall-through to proposed_*
-// still works as designed. Status is bumped to ready_to_push if it
-// was needs_review.
-func (h *Handler) saveEdits(ctx context.Context, uuid string, form url.Values) error {
-	dst := nullableFromForm(form.Get("destination_account_id"))
-	src := nullableFromForm(form.Get("source_account_id"))
-	cat := nullableFromForm(form.Get("category_id"))
-	bud := nullableFromForm(form.Get("budget_id"))
+// saveEdits writes form values to the confirmed_* columns. Names from
+// the form (destination_name, source_name, category_name, budget_name)
+// are resolved to IDs against firefly_txns. Unresolved names produce
+// a NULL in the corresponding column AND an UnresolvedNames slice
+// returned to the caller for surfacing as a flash warning.
+//
+// Empty fields are written as NULL so the eventual push falls through
+// to proposed_* (or fails firefly validation cleanly). Status is
+// bumped to ready_to_push if it was needs_review.
+func (h *Handler) saveEdits(ctx context.Context, uuid string, form url.Values) (unresolved []string, err error) {
+	destName := strings.TrimSpace(form.Get("destination_name"))
+	srcName := strings.TrimSpace(form.Get("source_name"))
+	catName := strings.TrimSpace(form.Get("category_name"))
+	budName := strings.TrimSpace(form.Get("budget_name"))
 	desc := strings.TrimSpace(form.Get("description"))
 	tagsStr := strings.TrimSpace(form.Get("tags"))
+
+	var dstID, srcID, catID, budID any
+	if destName != "" {
+		if id := h.resolveAccountID(ctx, "destination", destName); id != 0 {
+			dstID = id
+		} else {
+			unresolved = append(unresolved, fmt.Sprintf("destination %q", destName))
+		}
+	}
+	if srcName != "" {
+		if id := h.resolveAccountID(ctx, "source", srcName); id != 0 {
+			srcID = id
+		} else {
+			unresolved = append(unresolved, fmt.Sprintf("source %q", srcName))
+		}
+	}
+	if catName != "" {
+		if id := h.resolveCategoryID(ctx, catName); id != 0 {
+			catID = id
+		} else {
+			unresolved = append(unresolved, fmt.Sprintf("category %q", catName))
+		}
+	}
+	if budName != "" {
+		if id := h.resolveBudgetID(ctx, budName); id != 0 {
+			budID = id
+		} else {
+			unresolved = append(unresolved, fmt.Sprintf("budget %q", budName))
+		}
+	}
 
 	var tagsJSON any
 	if tagsStr != "" {
@@ -456,7 +547,7 @@ func (h *Handler) saveEdits(ctx context.Context, uuid string, form url.Values) e
 		tagsJSON = string(b)
 	}
 
-	_, err := h.db.ExecContext(ctx, `
+	_, err = h.db.ExecContext(ctx, `
 		UPDATE staged_fold_txns
 		SET confirmed_source_account_id      = ?,
 		    confirmed_destination_account_id = ?,
@@ -468,8 +559,8 @@ func (h *Handler) saveEdits(ctx context.Context, uuid string, form url.Values) e
 		    updated_at                       = CURRENT_TIMESTAMP,
 		    status = CASE WHEN status='needs_review' THEN 'ready_to_push' ELSE status END
 		WHERE fold_uuid = ?
-	`, src, dst, cat, bud, nullableStrFromForm(desc), tagsJSON, uuid)
-	return err
+	`, srcID, dstID, catID, budID, nullableStrFromForm(desc), tagsJSON, uuid)
+	return unresolved, err
 }
 
 // helpers ////////////////////////////////////////////////////////////////

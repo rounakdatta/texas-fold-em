@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"database/sql"
 	"io"
 	"log/slog"
 	"net/http"
@@ -31,6 +32,26 @@ func newUITestHarness(t *testing.T, auth AuthMode) *uiTestHarness {
 		t.Fatalf("open: %v", err)
 	}
 	t.Cleanup(func() { _ = idb.Close() })
+
+	// Seed firefly_txns rows so the UI's name→id resolver has names
+	// to look up. The integration in production gets these from the
+	// /admin/firefly/sync endpoint; tests seed directly.
+	if _, err := idb.DB.Exec(`
+		INSERT INTO firefly_txns (firefly_id, group_id, txn_type, amount_paise, currency, date,
+		    source_account_id, source_account_name,
+		    destination_account_id, destination_account_name, destination_account_name_normalized,
+		    category_id, category_name, budget_id, budget_name, description, tags_json)
+		VALUES (901, 9001, 'withdrawal', 5000, 'INR', '2026-04-01',
+		        1,  'HDFC Card',
+		        12, 'Cake Palace', 'cake palace',
+		        6,  'Snacks',  NULL, NULL, 'sample 1', '["snacks","evening"]'),
+		       (902, 9002, 'withdrawal', 4000, 'INR', '2026-04-15',
+		        1,  'HDFC Card',
+		        12, 'Cake Palace', 'cake palace',
+		        6,  'Snacks',  NULL, NULL, 'sample 2', '["snacks"]')
+	`); err != nil {
+		t.Fatalf("seed firefly_txns: %v", err)
+	}
 
 	// Seed one needs_review row.
 	if _, err := idb.DB.Exec(`
@@ -161,7 +182,8 @@ func TestUI_CookieAuth_AllowsAfterLogin(t *testing.T) {
 }
 
 // TestUI_Detail_Renders verifies the detail page loads and contains
-// the editable form fields populated from proposed_*.
+// the editable form fields populated from proposed_* (post name-based
+// rewrite — fields are now name inputs with datalist autocomplete).
 func TestUI_Detail_Renders(t *testing.T) {
 	u := newUITestHarness(t, AuthModeBypass)
 	resp := u.do(t, "GET", "/admin/ui/staged/rev-1", nil)
@@ -171,27 +193,45 @@ func TestUI_Detail_Renders(t *testing.T) {
 	}
 	body, _ := io.ReadAll(resp.Body)
 	s := string(body)
-	if !strings.Contains(s, `name="destination_account_id"`) {
-		t.Errorf("expected destination_account_id input field")
+	if !strings.Contains(s, `name="destination_name"`) {
+		t.Errorf("expected destination_name input field")
 	}
-	// Proposed value 12 should pre-fill.
-	if !strings.Contains(s, `value="12"`) {
-		t.Errorf("expected proposed destination 12 to pre-fill")
+	// Resolved name "Cake Palace" (from firefly_txns destination_account_id=12)
+	// should pre-fill the form.
+	if !strings.Contains(s, `value="Cake Palace"`) {
+		t.Errorf("expected destination name 'Cake Palace' to pre-fill")
 	}
 	if !strings.Contains(s, "Snack at cake palace") {
 		t.Errorf("expected proposed description in textarea")
 	}
+	// Datalists for the autocomplete should be present.
+	if !strings.Contains(s, `<datalist id="dest-options">`) {
+		t.Errorf("expected dest-options datalist")
+	}
+	if !strings.Contains(s, `<datalist id="tag-options">`) {
+		t.Errorf("expected tag-options datalist")
+	}
+	// Per-merchant tag suggestions: the seeded firefly_txns for
+	// destination_account_id=12 carry tags ["snacks","evening"], so the
+	// chip section should render with both.
+	if !strings.Contains(s, `data-tag-chip="snacks"`) {
+		t.Errorf("expected snacks chip from per-merchant suggestions")
+	}
+	// Local-time conversion: <time datetime="..."> elements present.
+	if !strings.Contains(s, `<time datetime="2026-05-08T12:59:18Z">`) {
+		t.Errorf("expected <time> element with datetime attribute")
+	}
 }
 
-// TestUI_Save_PersistsAndBumpsStatus verifies the save handler updates
-// confirmed_* and transitions status from needs_review → ready_to_push.
+// TestUI_Save_PersistsAndBumpsStatus verifies the save handler resolves
+// names → IDs and transitions status from needs_review → ready_to_push.
 func TestUI_Save_PersistsAndBumpsStatus(t *testing.T) {
 	u := newUITestHarness(t, AuthModeBypass)
 	form := url.Values{}
-	form.Set("destination_account_id", "12")
-	form.Set("source_account_id", "1")
-	form.Set("category_id", "6")
-	form.Set("budget_id", "")
+	form.Set("destination_name", "Cake Palace") // → resolves to id 12
+	form.Set("source_name", "HDFC Card")        // → resolves to id 1
+	form.Set("category_name", "Snacks")         // → resolves to id 6
+	form.Set("budget_name", "")                 // empty → NULL
 	form.Set("description", "edited description")
 	form.Set("tags", "food, evening")
 
@@ -201,30 +241,84 @@ func TestUI_Save_PersistsAndBumpsStatus(t *testing.T) {
 		t.Fatalf("expected 303, got %d", resp.StatusCode)
 	}
 
-	// Verify state.
+	// Verify state. confirmed_* IDs should have been resolved.
 	var (
 		status     string
-		confDestID int64
+		confDestID sql.NullInt64
+		confSrcID  sql.NullInt64
+		confCatID  sql.NullInt64
+		confBudID  sql.NullInt64
 		confDesc   string
 		confTags   string
 	)
 	if err := u.db.DB.QueryRow(`
-		SELECT status, confirmed_destination_account_id, confirmed_description, COALESCE(confirmed_tags_json,'')
+		SELECT status,
+		       confirmed_destination_account_id, confirmed_source_account_id,
+		       confirmed_category_id, confirmed_budget_id,
+		       confirmed_description, COALESCE(confirmed_tags_json,'')
 		FROM staged_fold_txns WHERE fold_uuid='rev-1'
-	`).Scan(&status, &confDestID, &confDesc, &confTags); err != nil {
+	`).Scan(&status, &confDestID, &confSrcID, &confCatID, &confBudID, &confDesc, &confTags); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
 	if status != "ready_to_push" {
 		t.Errorf("status=%q, want ready_to_push", status)
 	}
-	if confDestID != 12 {
-		t.Errorf("confirmed_destination_account_id=%d, want 12", confDestID)
+	if !confDestID.Valid || confDestID.Int64 != 12 {
+		t.Errorf("destination resolved=%v, want 12", confDestID)
+	}
+	if !confSrcID.Valid || confSrcID.Int64 != 1 {
+		t.Errorf("source resolved=%v, want 1", confSrcID)
+	}
+	if !confCatID.Valid || confCatID.Int64 != 6 {
+		t.Errorf("category resolved=%v, want 6", confCatID)
+	}
+	if confBudID.Valid {
+		t.Errorf("budget should be NULL when name is empty, got %v", confBudID)
 	}
 	if confDesc != "edited description" {
 		t.Errorf("confirmed_description=%q", confDesc)
 	}
 	if !strings.Contains(confTags, "food") || !strings.Contains(confTags, "evening") {
 		t.Errorf("confirmed_tags_json=%q", confTags)
+	}
+}
+
+// TestUI_Save_UnresolvedNamesFlag confirms that an unknown name lands
+// as NULL in the corresponding column AND that the user gets a flash
+// warning listing the unresolved fields.
+func TestUI_Save_UnresolvedNamesFlag(t *testing.T) {
+	u := newUITestHarness(t, AuthModeBypass)
+	form := url.Values{}
+	form.Set("destination_name", "Brand New Merchant That Doesn't Exist")
+	form.Set("source_name", "HDFC Card") // resolvable
+	form.Set("description", "x")
+
+	resp := u.do(t, "POST", "/admin/ui/staged/rev-1/save", form)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("expected 303, got %d", resp.StatusCode)
+	}
+	// The destination resolution should have failed → column NULL.
+	var dest sql.NullInt64
+	if err := u.db.DB.QueryRow(`SELECT confirmed_destination_account_id FROM staged_fold_txns WHERE fold_uuid='rev-1'`).Scan(&dest); err != nil {
+		t.Fatal(err)
+	}
+	if dest.Valid {
+		t.Errorf("destination should be NULL for unresolvable name, got %v", dest)
+	}
+
+	// Flash cookie should carry the unresolved name in its message.
+	var flash *http.Cookie
+	for _, c := range resp.Cookies() {
+		if c.Name == "tfe-flash" {
+			flash = c
+		}
+	}
+	if flash == nil {
+		t.Fatal("expected tfe-flash cookie on unresolved name")
+	}
+	if !strings.Contains(flash.Value, "couldn") {
+		t.Errorf("expected flash to mention unresolved names, got: %s", flash.Value)
 	}
 }
 
@@ -251,10 +345,10 @@ func TestUI_Push_HappyPath(t *testing.T) {
 	u := newUITestHarness(t, AuthModeBypass)
 
 	form := url.Values{}
-	form.Set("destination_account_id", "12")
-	form.Set("source_account_id", "1")
-	form.Set("category_id", "6")
-	form.Set("budget_id", "")
+	form.Set("destination_name", "Cake Palace")
+	form.Set("source_name", "HDFC Card")
+	form.Set("category_name", "Snacks")
+	form.Set("budget_name", "")
 	form.Set("description", "snack")
 	form.Set("tags", "")
 
