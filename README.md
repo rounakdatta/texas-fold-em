@@ -1,80 +1,181 @@
 # texas-fold-em
 
-A long-running Go broker that holds a [fold.money](https://fold.money) refresh
-token and issues short-lived access tokens to consumers on demand. Runs as a
-single-replica Deployment in Kubernetes.
+A long-running broker that holds a [fold.money](https://fold.money) refresh
+token and turns it into something useful.
 
-Reverse-engineering notes on the underlying Fold API live in [`fold.md`](./fold.md) — the full endpoint catalog, response shapes, auth flow, known error codes, and operational guidance for running the broker.
+## What this is
 
-## API
+Two things, and you can use either or both.
 
-| Method | Path | Auth | Purpose |
-|---|---|---|---|
-| `POST` | `/init` | admin key | seed / re-seed the refresh chain |
-| `GET` | `/token` | broker key | return a usable access token |
-| `GET` | `/livez` | none | liveness probe (always `200` while running) |
-| `GET` | `/health` | none | rich status JSON; `503` until seeded |
+**A token broker.** Fold's API gives you 15-minute access tokens that you
+have to keep refreshing with a longer-lived refresh token. Doing that
+correctly — handling races, persistence, retries, the moment when fold
+revokes your chain — is fiddly. This service does it for you. Anything
+on your network that needs to call fold's API can ask the broker for a
+fresh access token and stop worrying about token lifecycle.
 
-## Install
+**An auto-classifier into firefly-iii.** If you also keep your books in
+[firefly-iii](https://www.firefly-iii.org), there's a tedious manual
+job: every few days, look at fold, type each transaction into firefly,
+pick the right account, the right category, the right tags. Built on top
+of the broker, this is a small pipeline that does that copy step for
+you, intelligently, while keeping a human in the loop for anything
+ambiguous.
 
-The Helm chart is published as an OCI artifact to GHCR alongside the Docker image.
+## The problem this solves
+
+Fold is great at *seeing* your money — every card, every account, every
+UPI flow lands there. Firefly is great at *organising* it — the source
+of truth for "what did I spend on, when, and why".
+
+The gap between them is you, sat at a keyboard, retyping transactions.
+And it's not even mechanical retyping: the same restaurant on different
+days might map to different firefly categories; the same UPI receiver
+might be a personal transfer in one context and an expense in another;
+fold doesn't know which of your three credit cards or two bank accounts
+paid for any given thing — well, it does, but only as an opaque
+identifier that means nothing to firefly. So you're not just typing,
+you're making small judgement calls all the way down.
+
+This project automates the typing and the easy judgements, and surfaces
+the genuinely hard ones for you to confirm in a small review UI.
+
+## How the classifier thinks
+
+A four-step ladder, fastest to most expensive. Each transaction tries
+the steps in order and stops at the first one with enough confidence.
+
+1. **Look it up.** "I've already seen this merchant 50 times in your
+   firefly history; you always file it under category X with destination
+   Y from card Z. Done." This is the cheap path; no AI needed, and it
+   only gets cheaper over time as your firefly history grows.
+2. **Vote on it.** If the merchant is unfamiliar, search firefly-side
+   transactions whose narration shares words with this fold one and let
+   the top-scoring matches vote on category and destination.
+3. **Reason about it.** If the deterministic steps can't agree, hand the
+   transaction to an LLM with a tightly-scoped prompt: the verbatim
+   fold payload, your full firefly account / category / budget / tag
+   inventory, the resolved fold-side card or bank that paid (so the LLM
+   can tell that "Tata Neu Plus ****8943" matches your firefly asset
+   "Tata Neu HDFC Bank Credit Card"), and the hints from the previous
+   steps. Ask for a structured answer; reject any id the LLM didn't see
+   on the menu.
+4. **Punt to the human.** When even step 3 isn't confident, the row
+   lands in the review UI for a one-click confirmation.
+
+Three things that fall out of this design and are worth knowing:
+
+- **It learns from you.** Every time you confirm or push a transaction,
+  the merchant lookup table — the data behind step 1 — gets reinforced.
+  The same merchant next time skips the LLM entirely.
+- **It handles transfers.** Most categorisers only know
+  spend-vs-income. This one explicitly picks between firefly's three
+  transaction types — withdrawal, deposit, **and transfer** — so a
+  savings → brokerage move gets recorded as a transfer rather than
+  miscategorised as an expense.
+- **It picks the right card.** Even if you've never used a particular
+  merchant before, the LLM grounds source-account inference on fold's
+  own knowledge of which card or account actually paid — so an
+  unfamiliar restaurant on your travel card doesn't end up assigned to
+  whichever card you happen to use most often.
+
+## The review UI
+
+`/admin/ui/` is a small server-rendered page for the rows the classifier
+flagged for confirmation. Filters across pending / needs-review /
+ready-to-push / pushed; account, category, budget and tag fields are
+name autocompletes backed by your real firefly history; per-merchant
+suggested tags appear as one-click chips; timestamps render in your
+device's local timezone. Push, skip, save edits — all one click.
+
+## Safety
+
+Three properties worth calling out:
+
+- **Read-only kill switch.** A single env flag halts every write to
+  firefly without redeploying. Reads, classification, and the review UI
+  keep working — you can always look without writing.
+- **Idempotent everywhere.** Every fold sync, firefly mirror, push, and
+  classify can be re-run. Pushes are deduplicated against firefly using
+  fold's own UUID, so retries can't create doubles.
+- **Audit log.** Every push to firefly — preview or confirmed — is
+  appended to a local log, alongside the request body that was sent.
+
+## Getting started
+
+Published as a Helm chart on GHCR. Install:
 
 ```bash
 helm install tfe oci://ghcr.io/rounakdatta/charts/texas-fold-em \
-  --version 0.1.0 \
+  --version 0.3.0 \
   -n fold --create-namespace \
   --set secret.brokerKey="$(openssl rand -base64 32)" \
   --set secret.adminKey="$(openssl rand -base64 32)"
 ```
 
-Or bring your own Secret: `--set secret.create=false --set secret.existingSecret=<name>`.
-
-## Bootstrap (one-time, and after a `410`)
-
-Log in to [fold.money](https://fold.money), copy `refresh_token` and
-`device_hash` from `localStorage`, then:
+Seed the refresh chain (one-time; do it again only if fold revokes the
+chain — the broker will return `410 Gone` and stop trying when that
+happens). Log in to fold.money in a browser, copy `refresh_token` and
+`device_hash` from local storage, then:
 
 ```bash
 kubectl -n fold port-forward svc/tfe 8080:8080 &
 ADMIN=$(kubectl -n fold get secret tfe -o jsonpath='{.data.admin-key}' | base64 -d)
 
-curl -sS -X POST http://localhost:8080/init \
+curl -X POST http://localhost:8080/init \
   -H "Authorization: Bearer $ADMIN" \
   -H "Content-Type: application/json" \
-  -d '{"refresh_token":"eyJ…","device_hash":"d051a97c-…"}'
+  -d '{"refresh_token":"…","device_hash":"…"}'
 ```
 
-## Consume
+You're now in broker mode. Anything in your network can call `/token`
+with the broker key and use the result against fold's API.
+
+To enable integration mode, point the broker at your firefly-iii
+instance and (optionally) give it a Google AI Studio key:
+
+```yaml
+# values.yaml
+extraEnv:
+  - name: TEXAS_FOLDEM_INTEGRATION_ENABLED
+    value: "true"
+  - name: TEXAS_FOLDEM_FIREFLY_BASE
+    value: "http://firefly.<namespace>.svc.cluster.local:8080"
+  - name: TEXAS_FOLDEM_FIREFLY_PAT
+    valueFrom: { secretKeyRef: { name: tfe, key: firefly-pat } }
+  - name: TEXAS_FOLDEM_GEMINI_API_KEY        # optional but recommended
+    valueFrom: { secretKeyRef: { name: tfe, key: gemini-api-key } }
+  - name: TEXAS_FOLDEM_PERIODIC_SYNC_EVERY   # set to 1h to run the pipeline hands-off
+    value: "0"
+```
+
+Then prime the pipeline (admin-key endpoints) — once, in this order:
 
 ```bash
-curl -sS -H "Authorization: Bearer $BROKER_KEY" \
-  http://tfe.fold.svc.cluster.local:8080/token
-# { "access_token": "...", "device_hash": "...", "user_uuid": "...", "expires_at": "..." }
+curl -X POST -H "Authorization: Bearer $ADMIN" \
+  http://localhost:8080/admin/firefly/sync         # mirror firefly history
+curl -X POST -H "Authorization: Bearer $ADMIN" \
+  http://localhost:8080/admin/fold/accounts/sync   # mirror your fold cards/accounts
+curl -X POST -H "Authorization: Bearer $ADMIN" \
+  "http://localhost:8080/admin/fold/sync?limit=50" # stage recent fold transactions
+curl -X POST -H "Authorization: Bearer $ADMIN" \
+  http://localhost:8080/admin/classify             # classify the staged rows
 ```
 
-From there, hit Fold's API directly with the returned access token:
+Open `/admin/ui/` to review and push. With `PERIODIC_SYNC_EVERY` set,
+those four steps happen automatically on a tick.
 
-```bash
-curl "https://api.fold.money/api/v3/users/$UID/transactions?limit=10" \
-  -H "Authorization: Bearer $AT" \
-  -H "X-Device-Hash: $DH" -H "X-Device-Type: Web" \
-  -H "X-Device-Location: India" -H "X-Request-ID: $(uuidgen)"
-```
-
-## Reliability summary
-
-- Atomic state writes (`tmpfile + fsync + rename`) — power cut cannot corrupt.
-- Refresh coalescing — N concurrent `/token` calls → 1 upstream refresh.
-- Validate-before-persist on `/init` — a bad seed never overwrites good state.
-- Rejection tombstone — after Fold revokes the chain, the broker refuses to
-  retry until `/init` provides a fresh seed. No bombardment.
-- Rotate-before-return — a new refresh token is persisted before the new
-  access token is handed out.
+Reverse-engineering notes on the underlying fold API live in
+[`fold.md`](./fold.md). Reliability internals (atomic state writes,
+refresh coalescing, validate-before-persist on `/init`, the rejection
+tombstone, rotate-before-return) live in the code; the short version
+is: a power cut, a concurrent `/token` storm, or a bad seed cannot
+corrupt the refresh chain.
 
 ## Develop
 
 ```bash
-make test         # go test -race
+make test         # go test -race ./...
 make build        # native binary
 ```
 
