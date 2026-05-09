@@ -109,6 +109,25 @@ func (s *Server) handleClassify(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, report)
 }
 
+// handleFoldAccountsSync is the admin-gated handler for
+// POST /admin/fold/accounts/sync. It mirrors the user's fold-side
+// asset registry (credit cards + bank accounts) into fold_accounts.
+//
+// Cheap: ~3 GETs to fold's API, the user has at most a handful of
+// cards and bank accounts. 30-second deadline is generous.
+func (s *Server) handleFoldAccountsSync(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	report, err := s.foldAccountsSyncer.Sync(ctx)
+	if err != nil {
+		s.log.Error("fold accounts sync failed", "err", err)
+		writeErr(w, http.StatusBadGateway, "fold accounts sync failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
+}
+
 // handleFoldSync is the admin-gated handler for POST /admin/fold/sync.
 // Pulls recent fold transactions and stages them in staged_fold_txns
 // (idempotent on fold_uuid). Optional ?limit=N override; defaults to 50.

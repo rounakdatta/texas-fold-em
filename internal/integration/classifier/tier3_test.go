@@ -236,6 +236,120 @@ func TestTier3_GeminiError(t *testing.T) {
 	}
 }
 
+// TestTier3_FoldAccountHintAppearsInPrompt: when staging row's
+// raw_payload carries an account_id that matches a fold_accounts row,
+// the prompt receives a "FOLD-SIDE PAYING ACCOUNT" block. This is the
+// keystone fix for the c3c79fef KARAN BAHADUR misclassification —
+// the LLM previously saw only an opaque UUID, which it ignored.
+func TestTier3_FoldAccountHintAppearsInPrompt(t *testing.T) {
+	db := seedTestDB(t)
+
+	// Seed a fold_accounts row for the account_id that will appear in
+	// raw_payload below.
+	if _, err := db.Exec(`
+		INSERT INTO fold_accounts (fold_account_id, kind, name, provider, network, last_four, raw_payload, is_closed)
+		VALUES ('8582f77b-fdcc-449c-9d1a-86d9ad349325', 'CREDIT_CARD',
+		        'HDFC Tata Neu Plus ****8943', 'HDFC', 'RuPay', '8943', '{}', 0)
+	`); err != nil {
+		t.Fatalf("seed fold_accounts: %v", err)
+	}
+
+	// Capture the prompt by spying on the fake gemini server.
+	var capturedReqBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buf := make([]byte, 1<<16)
+		n, _ := r.Body.Read(buf)
+		capturedReqBody = string(buf[:n])
+		w.Header().Set("Content-Type", "application/json")
+		envelope := map[string]any{
+			"candidates": []map[string]any{{
+				"content": map[string]any{
+					"parts": []map[string]any{{"text": `{
+						"txn_type":"withdrawal",
+						"destination_account_id":11,"source_account_id":1,
+						"category_id":5,"budget_id":null,"tags":[],
+						"description_suggestion":"x","confidence":0.9,
+						"reasoning":"matched fold-side card to firefly asset"
+					}`}},
+				},
+			}},
+		}
+		_ = json.NewEncoder(w).Encode(envelope)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := New(db, slog.Default(), DefaultConfidenceThreshold, 10)
+	c.SetLLM(gemini.NewClient("k", "", srv.URL, srv.Client()))
+
+	rawPayload := `{"uuid":"c3c79fef","account_id":"8582f77b-fdcc-449c-9d1a-86d9ad349325","mode":"CARD","type":"OUTGOING","narration":"CARD/x/KARAN BAHADUR SAUD/Rs/70/OUTGOING"}`
+	_, err := c.ClassifyOne(context.Background(), StagedRow{
+		FoldUUID:          "c3c79fef",
+		Narration:         "CARD/x/KARAN BAHADUR SAUD/Rs/70/OUTGOING",
+		Mode:              "CARD",
+		Type:              "OUTGOING",
+		MerchantExtracted: "karan bahadur saud",
+		RawPayload:        rawPayload,
+	})
+	if err != nil {
+		t.Fatalf("ClassifyOne: %v", err)
+	}
+	if !strings.Contains(capturedReqBody, "FOLD-SIDE PAYING ACCOUNT") {
+		t.Errorf("prompt missing fold-account block:\n%s", capturedReqBody)
+	}
+	for _, want := range []string{"HDFC Tata Neu Plus", "8943", "HDFC", "RuPay"} {
+		if !strings.Contains(capturedReqBody, want) {
+			t.Errorf("prompt missing %q in fold-account block", want)
+		}
+	}
+}
+
+// TestTier3_NoFoldAccountHintWhenUnmirrored: when raw_payload carries
+// an account_id that is not yet in fold_accounts, the prompt OMITS
+// the fold-account block (we don't fabricate). LLM still classifies
+// using whatever else it has.
+func TestTier3_NoFoldAccountHintWhenUnmirrored(t *testing.T) {
+	db := seedTestDB(t)
+
+	var captured string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buf := make([]byte, 1<<16)
+		n, _ := r.Body.Read(buf)
+		captured = string(buf[:n])
+		w.Header().Set("Content-Type", "application/json")
+		envelope := map[string]any{
+			"candidates": []map[string]any{{
+				"content": map[string]any{
+					"parts": []map[string]any{{"text": `{
+						"txn_type":"withdrawal",
+						"destination_account_id":11,"source_account_id":1,
+						"confidence":0.85,"reasoning":"x"}`}},
+				},
+			}},
+		}
+		_ = json.NewEncoder(w).Encode(envelope)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := New(db, slog.Default(), DefaultConfidenceThreshold, 10)
+	c.SetLLM(gemini.NewClient("k", "", srv.URL, srv.Client()))
+
+	rawPayload := `{"uuid":"unseen-1","account_id":"never-mirrored-uuid","mode":"CARD","type":"OUTGOING"}`
+	_, err := c.ClassifyOne(context.Background(), StagedRow{
+		FoldUUID:          "unseen-1",
+		Narration:         "CARD/x/zomato/Rs/100/OUTGOING",
+		Mode:              "CARD",
+		Type:              "OUTGOING",
+		MerchantExtracted: "zomato",
+		RawPayload:        rawPayload,
+	})
+	if err != nil {
+		t.Fatalf("ClassifyOne: %v", err)
+	}
+	if strings.Contains(captured, "FOLD-SIDE PAYING ACCOUNT") {
+		t.Errorf("prompt should NOT include fold-account block when id is unmirrored:\n%s", captured)
+	}
+}
+
 // TestStripJSONFences accidentally hardens against gemini wrapping
 // JSON despite our system prompt.
 func TestStripJSONFences(t *testing.T) {

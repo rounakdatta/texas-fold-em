@@ -133,6 +133,9 @@ func run() error {
 		foldSyncer := integration.NewFoldSyncer(intDB, foldClient, intLog)
 		srv.SetFoldSyncer(foldSyncer)
 
+		foldAccountsSyncer := integration.NewFoldAccountsSyncer(intDB, foldClient, intLog)
+		srv.SetFoldAccountsSyncer(foldAccountsSyncer)
+
 		// Deterministic classifier (Tiers 1+2). Tier-3 attaches below if
 		// a Gemini API key is configured.
 		cls := classifier.New(intDB.DB, intLog, classifier.DefaultConfidenceThreshold, 10)
@@ -179,6 +182,7 @@ func run() error {
 			"endpoints", []string{
 				"POST /admin/firefly/sync",
 				"POST /admin/fold/sync",
+				"POST /admin/fold/accounts/sync",
 				"POST /admin/classify",
 				"POST /admin/push/{fold_uuid}",
 				"GET  /admin/ui/",
