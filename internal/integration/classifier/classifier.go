@@ -211,7 +211,20 @@ func (c *Classifier) ClassifyOne(ctx context.Context, staged StagedRow) (Decisio
 
 	if c.llm != nil {
 		if d, ok, err := c.tierThreeLLM(ctx, staged, tier1Hint, tier2Hint); err != nil {
-			c.log.Warn("tier 3 LLM error; using deterministic fallback",
+			// Tier-3 transport / parse / hallucination failure. If a
+			// deterministic tier already produced an above-threshold
+			// hint, that's not a mediocre fallback — it's deterministic
+			// ground truth — so use it. Otherwise defer the row: stay
+			// pending, next classify cycle retries when the LLM is
+			// back. We deliberately do NOT route the row to
+			// needs_review with a half-baked proposal: a real human
+			// review should be reserved for cases where the model
+			// genuinely couldn't decide, not for cases where it never
+			// got a chance to try.
+			if tier1Hint == nil && tier2Hint == nil {
+				return Decision{}, fmt.Errorf("%w: %v", ErrLLMDeferred, err)
+			}
+			c.log.Warn("tier 3 LLM error; using deterministic hint",
 				"fold_uuid", staged.FoldUUID, "err", err)
 		} else if ok {
 			return d, nil
@@ -599,13 +612,26 @@ func (c *Classifier) ApplyDecision(ctx context.Context, foldUUID string, d Decis
 // ClassifyReport is what ClassifyPending returns. Counts surface in the
 // /admin/classify HTTP response so an operator can see what changed.
 type ClassifyReport struct {
-	Examined     int           `json:"examined"`     // total pending rows seen
-	AutoClassified int         `json:"auto_classified"` // status moved to ready_to_push
-	NeedsReview  int           `json:"needs_review"`
-	Tier1Hits    int           `json:"tier1_hits"`
-	Tier2Hits    int           `json:"tier2_hits"`
-	Duration     time.Duration `json:"duration"`
+	Examined       int           `json:"examined"`        // total pending rows seen
+	AutoClassified int           `json:"auto_classified"` // status moved to ready_to_push
+	NeedsReview    int           `json:"needs_review"`
+	Deferred       int           `json:"deferred"` // LLM unavailable; row left pending for retry next cycle
+	Tier1Hits      int           `json:"tier1_hits"`
+	Tier2Hits      int           `json:"tier2_hits"`
+	Duration       time.Duration `json:"duration"`
 }
+
+// ErrLLMDeferred is returned by ClassifyOne when the Tier-3 LLM
+// errored AND no high-confidence deterministic tier (1 or 2) had a
+// hit. The caller should leave the row's status untouched (stays
+// `pending`) so the next classify cycle retries with a working LLM.
+//
+// Why defer instead of falling through to TierHumanReview: the user's
+// review queue should be filled with rows where the model genuinely
+// couldn't decide on quality grounds, not rows where the model never
+// got a fair shot. Putting LLM-outage rows into needs_review without
+// any proposal is mediocre output we'd rather avoid.
+var ErrLLMDeferred = errors.New("classifier: llm unavailable; row deferred for retry")
 
 // ClassifyPending iterates every status='pending' row in
 // staged_fold_txns and applies a Decision. Idempotent — terminal
@@ -695,6 +721,15 @@ func (c *Classifier) classifyMatching(ctx context.Context, scope classifyScope) 
 		report.Examined++
 		d, err := c.ClassifyOne(ctx, s)
 		if err != nil {
+			if errors.Is(err, ErrLLMDeferred) {
+				// LLM unavailable; the row stays pending for the next
+				// cycle to pick up. Log at info — this is expected
+				// behaviour during transient LLM outages, not a fault.
+				report.Deferred++
+				c.log.Info("classify deferred; LLM unavailable",
+					"fold_uuid", s.FoldUUID, "reason", err)
+				continue
+			}
 			c.log.Warn("classify one failed; skipping", "fold_uuid", s.FoldUUID, "err", err)
 			continue
 		}
@@ -718,6 +753,7 @@ func (c *Classifier) classifyMatching(ctx context.Context, scope classifyScope) 
 		"examined", report.Examined,
 		"auto", report.AutoClassified,
 		"review", report.NeedsReview,
+		"deferred", report.Deferred,
 		"tier1", report.Tier1Hits,
 		"tier2", report.Tier2Hits,
 		"duration_ms", report.Duration.Milliseconds(),
