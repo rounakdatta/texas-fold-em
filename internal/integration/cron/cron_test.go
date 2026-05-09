@@ -92,9 +92,7 @@ func TestPeriodicSync_RunsCycleEndToEnd(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(fold.ListTransactionsResponse{
-			Data: struct {
-				Transactions []fold.Transaction `json:"transactions"`
-			}{
+			Data: fold.ListTransactionsData{
 				Transactions: []fold.Transaction{{
 					UUID: "cron-1", Amount: 100, SourceAmount: 100,
 					Currency: "INR", SourceCurrency: "INR",
