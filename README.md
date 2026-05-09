@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="./assets/logo.png" alt="texas-fold-em logo" width="280">
+</p>
+
 # texas-fold-em
 
 A long-running broker that holds a [fold.money](https://fold.money) refresh
