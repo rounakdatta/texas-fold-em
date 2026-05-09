@@ -90,10 +90,17 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 // THEN /admin/classify. PR H will wire that into a single periodic
 // goroutine.)
 func (s *Server) handleClassify(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	// Allow the LLM synthesiser to spend more time when re-classifying
+	// a backlog — Tier 3 fires per row and adds ~1-2s each.
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
 	defer cancel()
 
+	retryReview := r.URL.Query().Get("retry_review") == "true"
+
 	report, err := s.classifier.ClassifyPending(ctx)
+	if retryReview {
+		report, err = s.classifier.ReclassifyPendingAndReview(ctx)
+	}
 	if err != nil {
 		s.log.Error("classify failed", "err", err)
 		writeErr(w, http.StatusInternalServerError, "classify failed", err.Error())
