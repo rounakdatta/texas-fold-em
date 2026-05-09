@@ -3,6 +3,7 @@ package classifier
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -147,7 +148,11 @@ func TestTier3_HitsViaNarrationFallback(t *testing.T) {
 }
 
 // TestTier3_HallucinationGuard: if the LLM returns IDs not present in
-// the retrieved candidates, we drop the response and fall through.
+// the retrieved candidates AND no high-confidence deterministic tier
+// fired, the row is deferred (ErrLLMDeferred) — leaves the row pending
+// for the next classify cycle to retry. Putting hallucinated rows
+// into needs_review with no proposal would be the mediocre output we
+// explicitly want to avoid.
 func TestTier3_HallucinationGuard(t *testing.T) {
 	db := seedTestDB(t)
 	// id 9999 is NOT in seeded data — Gemini hallucinated it.
@@ -162,19 +167,15 @@ func TestTier3_HallucinationGuard(t *testing.T) {
 	c := New(db, slog.Default(), DefaultConfidenceThreshold, 10)
 	c.SetLLM(gemini.NewClient("k", "", llm.URL, llm.Client()))
 
-	d, err := c.ClassifyOne(context.Background(), StagedRow{
+	_, err := c.ClassifyOne(context.Background(), StagedRow{
 		FoldUUID:          "tier3-halluc",
 		Narration:         "weird raw blob containing zomato wordmark",
 		Mode:              "OTHERS",
 		Type:              "OUTGOING",
 		MerchantExtracted: "",
 	})
-	if err != nil {
-		t.Fatalf("ClassifyOne: %v", err)
-	}
-	// Hallucination defended → Tier 4.
-	if d.Tier != TierHumanReview {
-		t.Errorf("expected Tier 4 after hallucination defence, got %d", d.Tier)
+	if !errors.Is(err, ErrLLMDeferred) {
+		t.Fatalf("expected ErrLLMDeferred, got %v", err)
 	}
 }
 
@@ -208,8 +209,10 @@ func TestTier3_LowConfidence(t *testing.T) {
 	}
 }
 
-// TestTier3_GeminiError: if Gemini returns 5xx (or any error), we
-// don't error the whole classify — we just skip Tier 3 and go to 4.
+// TestTier3_GeminiError: when Gemini is unavailable AND no
+// high-confidence deterministic tier fired, the row is deferred — we
+// surface ErrLLMDeferred so the caller (classifyMatching) leaves the
+// row's status untouched. The next cycle retries with a working LLM.
 func TestTier3_GeminiError(t *testing.T) {
 	db := seedTestDB(t)
 	llm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -221,18 +224,46 @@ func TestTier3_GeminiError(t *testing.T) {
 	c := New(db, slog.Default(), DefaultConfidenceThreshold, 10)
 	c.SetLLM(gemini.NewClient("k", "", llm.URL, llm.Client()))
 
-	d, err := c.ClassifyOne(context.Background(), StagedRow{
+	_, err := c.ClassifyOne(context.Background(), StagedRow{
 		FoldUUID:          "tier3-error",
 		Narration:         "weird raw blob containing zomato wordmark",
 		Mode:              "OTHERS",
 		Type:              "OUTGOING",
 		MerchantExtracted: "",
 	})
-	if err != nil {
-		t.Fatalf("ClassifyOne should not surface Tier-3 errors: %v", err)
+	if !errors.Is(err, ErrLLMDeferred) {
+		t.Fatalf("expected ErrLLMDeferred, got %v", err)
 	}
-	if d.Tier != TierHumanReview {
-		t.Errorf("expected Tier 4 after gemini failure, got %d", d.Tier)
+}
+
+// TestTier3_GeminiErrorWithTier1Hint: when Gemini fails BUT a
+// high-confidence Tier-1 hint (merchant_lookup) is available, we use
+// the Tier-1 result instead of deferring. Tier-1 above threshold is
+// deterministic ground truth — falling back to it is not "mediocre",
+// it's the right answer at high quality.
+func TestTier3_GeminiErrorWithTier1Hint(t *testing.T) {
+	db := seedTestDB(t)
+	llm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":"upstream is down"}`))
+	}))
+	t.Cleanup(llm.Close)
+
+	c := New(db, slog.Default(), DefaultConfidenceThreshold, 10)
+	c.SetLLM(gemini.NewClient("k", "", llm.URL, llm.Client()))
+
+	d, err := c.ClassifyOne(context.Background(), StagedRow{
+		FoldUUID:          "tier3-err-with-hint",
+		Narration:         "CARD/x/Zomato/Rs/100/OUTGOING",
+		Mode:              "CARD",
+		Type:              "OUTGOING",
+		MerchantExtracted: "zomato",
+	})
+	if err != nil {
+		t.Fatalf("expected Tier-1 fallback, got error: %v", err)
+	}
+	if d.Tier != TierMerchantLookup {
+		t.Errorf("expected TierMerchantLookup, got %d", d.Tier)
 	}
 }
 
