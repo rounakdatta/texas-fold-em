@@ -53,7 +53,8 @@ type ListTransactionsResponse struct {
 }
 
 // ListTransactionsData carries the parsed transactions plus, in
-// parallel, the verbatim JSON bytes for each transaction.
+// parallel, the verbatim JSON bytes for each transaction, plus the
+// opaque pagination cursor fold attaches to every page.
 //
 // RawTransactions is the source of truth for raw_payload persistence:
 // passing the typed Transaction back through json.Marshal would drop
@@ -61,20 +62,30 @@ type ListTransactionsResponse struct {
 // silently starving the classifier's LLM of grounding signals. By
 // holding onto the bytes that came off the wire, we let the classifier
 // see exactly what fold sent.
+//
+// After is fold's own next-page cursor. Pass it as `after=...` on the
+// following request to get the page strictly older than the current
+// one. Empty string means "this was the last page". The format is
+// opaque (currently base64 of `DESC:::time:::<ts>:::NULL:::<uuid>`)
+// — never construct one locally, always echo what fold supplied.
 type ListTransactionsData struct {
 	Transactions    []Transaction     `json:"transactions"`
+	After           string            `json:"after"`
 	RawTransactions []json.RawMessage `json:"-"`
 }
 
-// UnmarshalJSON populates both Transactions (typed) and
-// RawTransactions (verbatim bytes) from the same wire payload.
+// UnmarshalJSON populates Transactions (typed), RawTransactions
+// (verbatim bytes) and After (pagination cursor) from the same wire
+// payload.
 func (d *ListTransactionsData) UnmarshalJSON(b []byte) error {
 	var aux struct {
 		Transactions []json.RawMessage `json:"transactions"`
+		After        string            `json:"after"`
 	}
 	if err := json.Unmarshal(b, &aux); err != nil {
 		return err
 	}
+	d.After = aux.After
 	d.RawTransactions = aux.Transactions
 	d.Transactions = make([]Transaction, len(aux.Transactions))
 	for i, raw := range aux.Transactions {

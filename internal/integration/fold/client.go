@@ -17,7 +17,6 @@ package fold
 import (
 	"context"
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -28,20 +27,6 @@ import (
 	"strings"
 	"time"
 )
-
-// AfterCursorFromTime builds a fold pagination cursor anchored at t.
-// Pass to ListTransactionsAfter to fetch transactions strictly older
-// than t. Empty time → empty cursor → unpaginated newest-first.
-//
-// Format observed against the live API (also documented in fold.md):
-// base64("DESC:::time:::<rfc3339-utc>").
-func AfterCursorFromTime(t time.Time) string {
-	if t.IsZero() {
-		return ""
-	}
-	raw := "DESC:::time:::" + t.UTC().Format(time.RFC3339)
-	return base64.StdEncoding.EncodeToString([]byte(raw))
-}
 
 // DefaultTimeout is what NewClient uses when given a nil http.Client.
 const DefaultTimeout = 30 * time.Second

@@ -3,7 +3,6 @@ package integration
 import (
 	"context"
 	"database/sql"
-	"encoding/base64"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -429,26 +428,6 @@ func TestSyncSinceFirefly_HardCap(t *testing.T) {
 	}
 	if report.StoppedAt != "hard_cap" {
 		t.Errorf("stopped_at=%q, want hard_cap", report.StoppedAt)
-	}
-}
-
-// TestAfterCursorFromTime checks the cursor format matches what fold's
-// API expects: base64("DESC:::time:::<rfc3339>").
-func TestAfterCursorFromTime(t *testing.T) {
-	ts, _ := time.Parse(time.RFC3339, "2026-05-08T07:00:00Z")
-	got := fold.AfterCursorFromTime(ts)
-
-	decoded, err := base64.StdEncoding.DecodeString(got)
-	if err != nil {
-		t.Fatalf("not valid base64: %v", err)
-	}
-	want := "DESC:::time:::2026-05-08T07:00:00Z"
-	if string(decoded) != want {
-		t.Errorf("decoded cursor = %q, want %q", string(decoded), want)
-	}
-
-	if fold.AfterCursorFromTime(time.Time{}) != "" {
-		t.Errorf("zero time should give empty cursor")
 	}
 }
 
