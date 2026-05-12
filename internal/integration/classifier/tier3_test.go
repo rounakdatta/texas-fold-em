@@ -4,13 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
-	"github.com/rounakdatta/texas-fold-em/internal/integration/gemini"
+	"github.com/rounakdatta/texas-fold-em/internal/integration/llm"
 )
 
 // TestTier3_HappyPath: even with NO FTS hits for an unseen merchant,
@@ -20,7 +21,7 @@ import (
 // confident decision.
 func TestTier3_HappyPath(t *testing.T) {
 	db := seedTestDB(t)
-	llm := newFakeGemini(t, `{
+	fakeLLM := newFakeLLM(t, `{
 		"txn_type": "withdrawal",
 		"destination_account_id": 11,
 		"source_account_id": 1,
@@ -30,10 +31,10 @@ func TestTier3_HappyPath(t *testing.T) {
 		"confidence": 0.92,
 		"reasoning": "Most similar historical txns are Zomato food orders, all categorised as Eating outside on the HDFC Card."
 	}`)
-	t.Cleanup(llm.Close)
+	t.Cleanup(fakeLLM.Close)
 
 	c := New(db, slog.Default(), DefaultConfidenceThreshold, 10)
-	c.SetLLM(gemini.NewClient("k", "", llm.URL, llm.Client()))
+	c.SetLLM(llm.NewClient("k", "", fakeLLM.URL, fakeLLM.Client()))
 
 	// Mystery merchant — no merchant_lookup entry, no FTS hits for
 	// "mystery"/"vendor"/"llp". Synthesiser Tier 3 still has the asset
@@ -65,7 +66,7 @@ func TestTier3_HappyPath(t *testing.T) {
 // are user's asset accounts) and txn_type comes through.
 func TestTier3_TransferType(t *testing.T) {
 	db := seedTestDB(t)
-	llm := newFakeGemini(t, `{
+	fakeLLM := newFakeLLM(t, `{
 		"txn_type": "transfer",
 		"destination_account_id": 1,
 		"source_account_id": 1,
@@ -75,10 +76,10 @@ func TestTier3_TransferType(t *testing.T) {
 		"confidence": 0.90,
 		"reasoning": "Both endpoints are user-owned asset accounts."
 	}`)
-	t.Cleanup(llm.Close)
+	t.Cleanup(fakeLLM.Close)
 
 	c := New(db, slog.Default(), DefaultConfidenceThreshold, 10)
-	c.SetLLM(gemini.NewClient("k", "", llm.URL, llm.Client()))
+	c.SetLLM(llm.NewClient("k", "", fakeLLM.URL, fakeLLM.Client()))
 
 	d, err := c.ClassifyOne(context.Background(), StagedRow{
 		FoldUUID:          "transfer-1",
@@ -103,7 +104,7 @@ func TestTier3_TransferType(t *testing.T) {
 // candidates to feed the LLM and returns a Tier-3 decision.
 func TestTier3_HitsViaNarrationFallback(t *testing.T) {
 	db := seedTestDB(t)
-	llm := newFakeGemini(t, `{
+	fakeLLM := newFakeLLM(t, `{
 		"destination_account_id": 11,
 		"source_account_id": 1,
 		"category_id": 5,
@@ -112,10 +113,10 @@ func TestTier3_HitsViaNarrationFallback(t *testing.T) {
 		"confidence": 0.85,
 		"reasoning": "Narration mentions Zomato"
 	}`)
-	t.Cleanup(llm.Close)
+	t.Cleanup(fakeLLM.Close)
 
 	c := New(db, slog.Default(), DefaultConfidenceThreshold, 10)
-	c.SetLLM(gemini.NewClient("k", "", llm.URL, llm.Client()))
+	c.SetLLM(llm.NewClient("k", "", fakeLLM.URL, fakeLLM.Client()))
 
 	// Empty merchant, but narration contains "zomato" — Tier 2's
 	// FTS query won't fire (it needs MerchantExtracted), Tier 3's
@@ -155,17 +156,17 @@ func TestTier3_HitsViaNarrationFallback(t *testing.T) {
 // explicitly want to avoid.
 func TestTier3_HallucinationGuard(t *testing.T) {
 	db := seedTestDB(t)
-	// id 9999 is NOT in seeded data — Gemini hallucinated it.
-	llm := newFakeGemini(t, `{
+	// id 9999 is NOT in seeded data — the LLM hallucinated it.
+	fakeLLM := newFakeLLM(t, `{
 		"destination_account_id": 9999,
 		"category_id": 5,
 		"confidence": 0.95,
 		"reasoning": "I made up an id"
 	}`)
-	t.Cleanup(llm.Close)
+	t.Cleanup(fakeLLM.Close)
 
 	c := New(db, slog.Default(), DefaultConfidenceThreshold, 10)
-	c.SetLLM(gemini.NewClient("k", "", llm.URL, llm.Client()))
+	c.SetLLM(llm.NewClient("k", "", fakeLLM.URL, fakeLLM.Client()))
 
 	_, err := c.ClassifyOne(context.Background(), StagedRow{
 		FoldUUID:          "tier3-halluc",
@@ -183,16 +184,16 @@ func TestTier3_HallucinationGuard(t *testing.T) {
 // we don't take it. Falls through to Tier 4.
 func TestTier3_LowConfidence(t *testing.T) {
 	db := seedTestDB(t)
-	llm := newFakeGemini(t, `{
+	fakeLLM := newFakeLLM(t, `{
 		"destination_account_id": 11,
 		"category_id": 5,
 		"confidence": 0.3,
 		"reasoning": "I'm guessing"
 	}`)
-	t.Cleanup(llm.Close)
+	t.Cleanup(fakeLLM.Close)
 
 	c := New(db, slog.Default(), DefaultConfidenceThreshold, 10)
-	c.SetLLM(gemini.NewClient("k", "", llm.URL, llm.Client()))
+	c.SetLLM(llm.NewClient("k", "", fakeLLM.URL, fakeLLM.Client()))
 
 	d, err := c.ClassifyOne(context.Background(), StagedRow{
 		FoldUUID:          "tier3-low",
@@ -209,20 +210,24 @@ func TestTier3_LowConfidence(t *testing.T) {
 	}
 }
 
-// TestTier3_GeminiError: when Gemini is unavailable AND no
+// TestTier3_LLMError: when the LLM is unavailable AND no
 // high-confidence deterministic tier fired, the row is deferred — we
 // surface ErrLLMDeferred so the caller (classifyMatching) leaves the
 // row's status untouched. The next cycle retries with a working LLM.
-func TestTier3_GeminiError(t *testing.T) {
+//
+// We use 401 (terminal — not retried) rather than 503 so the test
+// runs in milliseconds. Retry semantics for transient codes are
+// exhaustively covered in the llm package's own client_test.go.
+func TestTier3_LLMError(t *testing.T) {
 	db := seedTestDB(t)
-	llm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = w.Write([]byte(`{"error":"upstream is down"}`))
+	fakeLLM := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"bad api key"}`))
 	}))
-	t.Cleanup(llm.Close)
+	t.Cleanup(fakeLLM.Close)
 
 	c := New(db, slog.Default(), DefaultConfidenceThreshold, 10)
-	c.SetLLM(gemini.NewClient("k", "", llm.URL, llm.Client()))
+	c.SetLLM(llm.NewClient("k", "", fakeLLM.URL, fakeLLM.Client()))
 
 	_, err := c.ClassifyOne(context.Background(), StagedRow{
 		FoldUUID:          "tier3-error",
@@ -236,21 +241,22 @@ func TestTier3_GeminiError(t *testing.T) {
 	}
 }
 
-// TestTier3_GeminiErrorWithTier1Hint: when Gemini fails BUT a
+// TestTier3_LLMErrorWithTier1Hint: when the LLM fails BUT a
 // high-confidence Tier-1 hint (merchant_lookup) is available, we use
 // the Tier-1 result instead of deferring. Tier-1 above threshold is
 // deterministic ground truth — falling back to it is not "mediocre",
 // it's the right answer at high quality.
-func TestTier3_GeminiErrorWithTier1Hint(t *testing.T) {
+func TestTier3_LLMErrorWithTier1Hint(t *testing.T) {
 	db := seedTestDB(t)
-	llm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = w.Write([]byte(`{"error":"upstream is down"}`))
+	// Terminal 401 to skip the retry budget — see TestTier3_LLMError.
+	fakeLLM := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"bad api key"}`))
 	}))
-	t.Cleanup(llm.Close)
+	t.Cleanup(fakeLLM.Close)
 
 	c := New(db, slog.Default(), DefaultConfidenceThreshold, 10)
-	c.SetLLM(gemini.NewClient("k", "", llm.URL, llm.Client()))
+	c.SetLLM(llm.NewClient("k", "", fakeLLM.URL, fakeLLM.Client()))
 
 	d, err := c.ClassifyOne(context.Background(), StagedRow{
 		FoldUUID:          "tier3-err-with-hint",
@@ -285,32 +291,35 @@ func TestTier3_FoldAccountHintAppearsInPrompt(t *testing.T) {
 		t.Fatalf("seed fold_accounts: %v", err)
 	}
 
-	// Capture the prompt by spying on the fake gemini server.
+	// Capture the prompt by spying on the fake LLM server.
 	var capturedReqBody string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		buf := make([]byte, 1<<16)
-		n, _ := r.Body.Read(buf)
-		capturedReqBody = string(buf[:n])
+		body, _ := io.ReadAll(r.Body)
+		capturedReqBody = string(body)
 		w.Header().Set("Content-Type", "application/json")
 		envelope := map[string]any{
-			"candidates": []map[string]any{{
-				"content": map[string]any{
-					"parts": []map[string]any{{"text": `{
+			"choices": []map[string]any{{
+				"index": 0,
+				"message": map[string]any{
+					"role": "assistant",
+					"content": `{
 						"txn_type":"withdrawal",
 						"destination_account_id":11,"source_account_id":1,
 						"category_id":5,"budget_id":null,"tags":[],
 						"description_suggestion":"x","confidence":0.9,
 						"reasoning":"matched fold-side card to firefly asset"
-					}`}},
+					}`,
 				},
+				"finish_reason": "stop",
 			}},
+			"usage": map[string]any{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
 		}
 		_ = json.NewEncoder(w).Encode(envelope)
 	}))
 	t.Cleanup(srv.Close)
 
 	c := New(db, slog.Default(), DefaultConfidenceThreshold, 10)
-	c.SetLLM(gemini.NewClient("k", "", srv.URL, srv.Client()))
+	c.SetLLM(llm.NewClient("k", "", srv.URL, srv.Client()))
 
 	rawPayload := `{"uuid":"c3c79fef","account_id":"8582f77b-fdcc-449c-9d1a-86d9ad349325","mode":"CARD","type":"OUTGOING","narration":"CARD/x/KARAN BAHADUR SAUD/Rs/70/OUTGOING"}`
 	_, err := c.ClassifyOne(context.Background(), StagedRow{
@@ -343,26 +352,29 @@ func TestTier3_NoFoldAccountHintWhenUnmirrored(t *testing.T) {
 
 	var captured string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		buf := make([]byte, 1<<16)
-		n, _ := r.Body.Read(buf)
-		captured = string(buf[:n])
+		body, _ := io.ReadAll(r.Body)
+		captured = string(body)
 		w.Header().Set("Content-Type", "application/json")
 		envelope := map[string]any{
-			"candidates": []map[string]any{{
-				"content": map[string]any{
-					"parts": []map[string]any{{"text": `{
+			"choices": []map[string]any{{
+				"index": 0,
+				"message": map[string]any{
+					"role": "assistant",
+					"content": `{
 						"txn_type":"withdrawal",
 						"destination_account_id":11,"source_account_id":1,
-						"confidence":0.85,"reasoning":"x"}`}},
+						"confidence":0.85,"reasoning":"x"}`,
 				},
+				"finish_reason": "stop",
 			}},
+			"usage": map[string]any{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
 		}
 		_ = json.NewEncoder(w).Encode(envelope)
 	}))
 	t.Cleanup(srv.Close)
 
 	c := New(db, slog.Default(), DefaultConfidenceThreshold, 10)
-	c.SetLLM(gemini.NewClient("k", "", srv.URL, srv.Client()))
+	c.SetLLM(llm.NewClient("k", "", srv.URL, srv.Client()))
 
 	rawPayload := `{"uuid":"unseen-1","account_id":"never-mirrored-uuid","mode":"CARD","type":"OUTGOING"}`
 	_, err := c.ClassifyOne(context.Background(), StagedRow{
@@ -381,8 +393,8 @@ func TestTier3_NoFoldAccountHintWhenUnmirrored(t *testing.T) {
 	}
 }
 
-// TestStripJSONFences accidentally hardens against gemini wrapping
-// JSON despite our system prompt.
+// TestStripJSONFences hardens against an LLM wrapping its JSON in
+// ``` fences despite the system prompt asking for plain JSON.
 func TestStripJSONFences(t *testing.T) {
 	cases := map[string]string{
 		`{"a":1}`:               `{"a":1}`,
@@ -424,22 +436,30 @@ func TestLongTokens(t *testing.T) {
 	}
 }
 
-// newFakeGemini returns an httptest server that always responds with
-// the same envelope wrapping the supplied JSON string as the candidate
-// text.
-func newFakeGemini(t *testing.T, candidateJSON string) *httptest.Server {
+// newFakeLLM returns an httptest server that always responds with the
+// OpenAI chat-completions envelope wrapping the supplied JSON string
+// as the assistant message content. Used by the Tier-3 test suite to
+// stand in for DeepSeek (or any OpenAI-compatible host).
+func newFakeLLM(t *testing.T, contentJSON string) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		envelope := map[string]any{
-			"candidates": []map[string]any{
+			"id": "chatcmpl-test",
+			"choices": []map[string]any{
 				{
-					"content": map[string]any{
-						"parts": []map[string]any{
-							{"text": candidateJSON},
-						},
+					"index": 0,
+					"message": map[string]any{
+						"role":    "assistant",
+						"content": contentJSON,
 					},
+					"finish_reason": "stop",
 				},
+			},
+			"usage": map[string]any{
+				"prompt_tokens":     1,
+				"completion_tokens": 1,
+				"total_tokens":      2,
 			},
 		}
 		_ = json.NewEncoder(w).Encode(envelope)

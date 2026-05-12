@@ -44,16 +44,23 @@ type Config struct {
 	// production. Required when the integration is enabled.
 	FireflyPAT string // TEXAS_FOLDEM_FIREFLY_PAT           required when integration enabled
 
-	// GeminiAPIKey is a Google AI Studio API key. Optional — when set,
-	// the classifier's Tier-3 (LLM RAG) fires for cases where Tier 1+2
-	// miss. When unset, Tier 3 is skipped and unmatched fold txns go
-	// straight to needs_review for human disposition.
-	GeminiAPIKey string // TEXAS_FOLDEM_GEMINI_API_KEY        optional
+	// LLMAPIKey is an OpenAI-compatible API key — DeepSeek by default,
+	// but any host speaking the OpenAI chat-completions protocol works
+	// (OpenAI itself, Groq, a local vLLM, etc.). Optional: when unset,
+	// Tier 3 is skipped and unmatched fold txns go straight to
+	// needs_review for human disposition.
+	LLMAPIKey string // TEXAS_FOLDEM_LLM_API_KEY          optional
 
-	// GeminiModel selects the model. Defaults to gemini-3.1-flash-lite —
-	// the most cost-efficient model in the gemini-3 family at the time
-	// of writing.
-	GeminiModel string // TEXAS_FOLDEM_GEMINI_MODEL          default gemini-3.1-flash-lite
+	// LLMModel selects the model. Defaults to deepseek-v4-flash — the
+	// cost-efficient flagship in the DeepSeek-V4 family. Override to
+	// deepseek-v4-pro for higher accuracy at higher cost, or to any
+	// model name supported by your LLMBaseURL provider.
+	LLMModel string // TEXAS_FOLDEM_LLM_MODEL            default deepseek-v4-flash
+
+	// LLMBaseURL is the OpenAI-compatible v1 base URL. Defaults to
+	// DeepSeek; set to https://api.openai.com/v1 (or similar) to use
+	// a different provider without code changes.
+	LLMBaseURL string // TEXAS_FOLDEM_LLM_BASE_URL         default https://api.deepseek.com/v1
 
 	// FireflyReadOnly is the operator-facing kill-switch for the push
 	// endpoint. When true, /admin/push will refuse confirmed writes
@@ -108,8 +115,9 @@ func LoadConfig() (Config, error) {
 		StagingDBPath:      envStr("TEXAS_FOLDEM_STAGING_DB_PATH", filepath.Join(home, ".texas-fold-em", "staging.db")),
 		FireflyBase:        strings.TrimRight(envStr("TEXAS_FOLDEM_FIREFLY_BASE", "http://firefly.apps.svc.cluster.local:8080"), "/"),
 		FireflyPAT:         os.Getenv("TEXAS_FOLDEM_FIREFLY_PAT"),
-		GeminiAPIKey:       os.Getenv("TEXAS_FOLDEM_GEMINI_API_KEY"),
-		GeminiModel:        envStr("TEXAS_FOLDEM_GEMINI_MODEL", "gemini-3.1-flash-lite"),
+		LLMAPIKey:          os.Getenv("TEXAS_FOLDEM_LLM_API_KEY"),
+		LLMModel:           envStr("TEXAS_FOLDEM_LLM_MODEL", "deepseek-v4-flash"),
+		LLMBaseURL:         strings.TrimRight(envStr("TEXAS_FOLDEM_LLM_BASE_URL", "https://api.deepseek.com/v1"), "/"),
 		FireflyReadOnly:    envBool("TEXAS_FOLDEM_FIREFLY_READONLY", false),
 		UICookieAuth:       envBool("TEXAS_FOLDEM_UI_COOKIE_AUTH", false),
 		PeriodicSyncEvery:  envDur("TEXAS_FOLDEM_PERIODIC_SYNC_EVERY", 0),

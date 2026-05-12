@@ -11,8 +11,8 @@ import (
 	"time"
 )
 
-// tier3SystemPrompt frames Gemini as a final-stage synthesiser, not a
-// last-resort fallback. The prompt explicitly tells the model:
+// tier3SystemPrompt frames the LLM as a final-stage synthesiser, not
+// a last-resort fallback. The prompt explicitly tells the model:
 //   - It will receive deterministic-tier hints (Tier 1 lookup + Tier 2
 //     FTS vote) AND the user's full asset/expense/category inventories
 //     AND the verbatim fold-side raw_payload.
@@ -62,7 +62,7 @@ Hard rules:
 
 The output JSON MUST include a "txn_type" field set to "withdrawal", "deposit", or "transfer".`
 
-// llmResponse is the structured shape we expect from Gemini.
+// llmResponse is the structured shape we expect back from the LLM.
 // Pointer fields distinguish "not provided" from "explicitly null".
 type llmResponse struct {
 	TxnType               string   `json:"txn_type"` // "withdrawal" | "deposit" | "transfer"
@@ -91,7 +91,7 @@ type tier3Inputs struct {
 	foldAccount      *FoldAccountRef // nil when raw_payload has no account_id, or it's not mirrored
 }
 
-// tierThreeLLM gathers context, builds the prompt, calls Gemini,
+// tierThreeLLM gathers context, builds the prompt, calls the LLM,
 // parses + validates the response. Returns (decision, ok, err) like
 // the other tiers; err is non-nil only on transport / parse failure
 // (the caller in ClassifyOne logs+drops it). ok=false means the LLM
@@ -105,7 +105,7 @@ func (c *Classifier) tierThreeLLM(ctx context.Context, staged StagedRow, tier1Hi
 	prompt := buildTier3Prompt(staged, inputs)
 	jsonText, err := c.llm.GenerateJSON(ctx, tier3SystemPrompt, prompt)
 	if err != nil {
-		return Decision{}, false, fmt.Errorf("gemini call: %w", err)
+		return Decision{}, false, fmt.Errorf("llm call: %w", err)
 	}
 	jsonText = stripJSONFences(jsonText)
 
@@ -374,7 +374,7 @@ func allTagsFromMirror(ctx context.Context, db *sql.DB) ([]string, error) {
 }
 
 // buildTier3Prompt formats inputs into the user-prompt text. Compact
-// tabular form — Gemini handles structured prose well.
+// tabular form — modern chat models handle structured prose well.
 func buildTier3Prompt(staged StagedRow, in tier3Inputs) string {
 	var b strings.Builder
 
@@ -640,8 +640,10 @@ func nameFromRefs(refs []AccountRef, id int64) string {
 	return ""
 }
 
-// stripJSONFences removes ``` fences if Gemini wraps the JSON despite
-// our system prompt asking it not to. Defensive.
+// stripJSONFences removes ``` fences if the LLM wraps the JSON
+// despite our system prompt asking it not to (and despite the
+// response_format=json_object flag, which most providers respect).
+// Defensive — cheap to keep, cuts off a class of preventable errors.
 func stripJSONFences(s string) string {
 	s = strings.TrimSpace(s)
 	if strings.HasPrefix(s, "```") {

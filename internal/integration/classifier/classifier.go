@@ -34,7 +34,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rounakdatta/texas-fold-em/internal/integration/gemini"
+	"github.com/rounakdatta/texas-fold-em/internal/integration/llm"
 )
 
 // DefaultConfidenceThreshold is the cut-off above which a Tier-1 or
@@ -146,7 +146,7 @@ type Classifier struct {
 	log       *slog.Logger
 	threshold float64
 	ftsTopK   int
-	llm       *gemini.Client // nil → Tier-3 skipped
+	llm       *llm.Client // nil → Tier-3 skipped
 }
 
 // New constructs a Classifier with Tier-3 disabled. Use SetLLM to
@@ -168,9 +168,10 @@ func New(db *sql.DB, log *slog.Logger, threshold float64, ftsTopK int) *Classifi
 	}
 }
 
-// SetLLM attaches a Gemini client. When set, ClassifyOne will fall
-// through to Tier-3 if Tiers 1 and 2 miss. Pass nil to disable.
-func (c *Classifier) SetLLM(llm *gemini.Client) { c.llm = llm }
+// SetLLM attaches an OpenAI-compatible LLM client (DeepSeek by
+// default). When set, ClassifyOne invokes Tier-3 synthesis after
+// gathering deterministic hints from Tiers 1+2. Pass nil to disable.
+func (c *Classifier) SetLLM(client *llm.Client) { c.llm = client }
 
 // ClassifyOne runs the tiered pipeline against one staged row. Pure
 // function — does not touch staged_fold_txns. Caller (Apply or the
@@ -180,7 +181,7 @@ func (c *Classifier) SetLLM(llm *gemini.Client) { c.llm = llm }
 //   Tier 1 (merchant_lookup) and Tier 2 (FTS5 vote) run as candidate
 //   gatherers. Their results become HINTS for Tier 3 — they no
 //   longer terminate the pipeline early.
-//   Tier 3 (LLM synthesiser) is then ALWAYS invoked when a Gemini
+//   Tier 3 (LLM synthesiser) is then ALWAYS invoked when an LLM
 //   client is configured. It sees the raw fold payload, the user's
 //   full account / category / budget / tag inventories, the FTS hits,
 //   and the deterministic hints. It produces the final decision —
