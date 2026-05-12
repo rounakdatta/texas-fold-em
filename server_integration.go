@@ -91,10 +91,25 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 // THEN /admin/classify. PR H will wire that into a single periodic
 // goroutine.)
 func (s *Server) handleClassify(w http.ResponseWriter, r *http.Request) {
-	// Allow the LLM synthesiser to spend more time when re-classifying
-	// a backlog — Tier 3 fires per row and adds ~1-2s each.
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
+	// Per-row Tier-3 latency with a reasoning-capable model + 5–15kB
+	// prompts runs ~3–5s. A backlog catch-up after a multi-day outage
+	// (or a re-evaluate-everything after a model swap) routinely
+	// touches 150+ rows in one call. 10m budget was hitting the wall
+	// at row ~35-40 and leaving the rest in pending; 60m comfortably
+	// covers up to ~700 rows at the observed rate. Idempotent, so
+	// shorter calls are still safe.
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Minute)
 	defer cancel()
+
+	// The HTTP server's WriteTimeout is 30s (suitable for /token);
+	// extend it per-request here so the response after 10–60 minutes
+	// can actually reach the caller. Without this, the handler keeps
+	// running and updating the DB, but the connection is long dead
+	// and curl sees an "empty reply from server".
+	if rc := http.NewResponseController(w); rc != nil {
+		_ = rc.SetWriteDeadline(time.Now().Add(65 * time.Minute))
+		_ = rc.SetReadDeadline(time.Now().Add(65 * time.Minute))
+	}
 
 	q := r.URL.Query()
 	retryReview := q.Get("retry_review") == "true"
