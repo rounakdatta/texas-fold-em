@@ -136,7 +136,11 @@ You're now in broker mode. Anything in your network can call `/token`
 with the broker key and use the result against fold's API.
 
 To enable integration mode, point the broker at your firefly-iii
-instance and (optionally) give it a Google AI Studio key:
+instance and (optionally) give it an LLM API key. The default model
+is `deepseek-v4-flash` (cost-efficient, JSON-mode-native), targeting
+DeepSeek's OpenAI-compatible endpoint — swap `LLM_BASE_URL` and
+`LLM_MODEL` to use OpenAI, Groq, or any other OpenAI-API-compatible
+host without code changes.
 
 ```yaml
 # values.yaml
@@ -147,8 +151,12 @@ extraEnv:
     value: "http://firefly.<namespace>.svc.cluster.local:8080"
   - name: TEXAS_FOLDEM_FIREFLY_PAT
     valueFrom: { secretKeyRef: { name: tfe, key: firefly-pat } }
-  - name: TEXAS_FOLDEM_GEMINI_API_KEY        # optional but recommended
-    valueFrom: { secretKeyRef: { name: tfe, key: gemini-api-key } }
+  - name: TEXAS_FOLDEM_LLM_API_KEY           # optional but recommended
+    valueFrom: { secretKeyRef: { name: tfe, key: llm-api-key } }
+  # - name: TEXAS_FOLDEM_LLM_MODEL           # default deepseek-v4-flash; override for deepseek-v4-pro / gpt-4.1-mini / etc.
+  #   value: "deepseek-v4-pro"
+  # - name: TEXAS_FOLDEM_LLM_BASE_URL        # default https://api.deepseek.com/v1
+  #   value: "https://api.openai.com/v1"
   - name: TEXAS_FOLDEM_PERIODIC_SYNC_EVERY   # set to 1h to run the pipeline hands-off
     value: "0"
 ```

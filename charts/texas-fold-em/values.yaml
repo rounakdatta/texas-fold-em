@@ -37,7 +37,7 @@ env:
 
 # extraEnv lets callers append arbitrary env entries to the container
 # spec — including ones using valueFrom (secretKeyRef etc.). Used by the
-# fold→firefly integration to plumb FIREFLY_PAT and GEMINI_API_KEY from
+# fold→firefly integration to plumb FIREFLY_PAT and LLM_API_KEY from
 # a Secret. Empty by default.
 #
 # Example:

@@ -34,7 +34,7 @@ import (
 	"github.com/rounakdatta/texas-fold-em/internal/integration/cron"
 	"github.com/rounakdatta/texas-fold-em/internal/integration/firefly"
 	"github.com/rounakdatta/texas-fold-em/internal/integration/fold"
-	"github.com/rounakdatta/texas-fold-em/internal/integration/gemini"
+	"github.com/rounakdatta/texas-fold-em/internal/integration/llm"
 	"github.com/rounakdatta/texas-fold-em/internal/integration/ui"
 )
 
@@ -137,12 +137,13 @@ func run() error {
 		srv.SetFoldAccountsSyncer(foldAccountsSyncer)
 
 		// Deterministic classifier (Tiers 1+2). Tier-3 attaches below if
-		// a Gemini API key is configured.
+		// an LLM API key is configured.
 		cls := classifier.New(intDB.DB, intLog, classifier.DefaultConfidenceThreshold, 10)
 
 		llmEnabled := false
-		if cfg.GeminiAPIKey != "" {
-			llmClient := gemini.NewClient(cfg.GeminiAPIKey, cfg.GeminiModel, "", nil)
+		if cfg.LLMAPIKey != "" {
+			llmClient := llm.NewClient(cfg.LLMAPIKey, cfg.LLMModel, cfg.LLMBaseURL, nil)
+			llmClient.SetLogger(intLog.With("component", "llm"))
 			cls.SetLLM(llmClient)
 			llmEnabled = true
 		}
@@ -175,7 +176,8 @@ func run() error {
 			"firefly_base", cfg.FireflyBase,
 			"fold_base", cfg.APIBase,
 			"tier3_llm", llmEnabled,
-			"gemini_model", cfg.GeminiModel,
+			"llm_model", cfg.LLMModel,
+			"llm_base_url", cfg.LLMBaseURL,
 			"firefly_readonly", cfg.FireflyReadOnly,
 			"ui_auth", uiAuthLabel(uiAuth),
 			"periodic_sync_every", cfg.PeriodicSyncEvery,
