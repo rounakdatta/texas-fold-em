@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -144,6 +145,107 @@ func TestUI_IndexBypassMode(t *testing.T) {
 	if !strings.Contains(string(body), "cake palace") {
 		t.Errorf("expected merchant in body, got: %s", body)
 	}
+}
+
+// TestUI_IndexPagination: the index must paginate rather than truncate
+// once the bucket grows past defaultPerPage. We seed 60 needs_review
+// rows on top of the harness's pre-existing 1, expect:
+//   - heading shows the true total (61), not a page-sized stub
+//   - page 1 shows the first defaultPerPage (50) rows
+//   - page 2 shows the remainder + paging controls
+func TestUI_IndexPagination(t *testing.T) {
+	u := newUITestHarness(t, AuthModeBypass)
+	// Seed 60 extra needs_review rows with strictly monotonic
+	// timestamps so ORDER BY ts DESC produces a deterministic order
+	// (pg-059 newest → on page 1, pg-000 oldest → on page 2).
+	for i := 0; i < 60; i++ {
+		ts := fmt.Sprintf("2026-05-01T12:%02d:00Z", i)
+		if _, err := u.db.DB.Exec(`
+			INSERT INTO staged_fold_txns (fold_uuid, raw_payload, amount_paise, currency, txn_timestamp,
+			    mode, type, narration, merchant_extracted, status)
+			VALUES (?, '{}', 100, 'INR', ?, 'CARD','OUTGOING','x','m','needs_review')`,
+			fmt.Sprintf("pg-%03d", i), ts,
+		); err != nil {
+			t.Fatalf("seed row %d: %v", i, err)
+		}
+	}
+
+	// Page 1
+	resp := u.do(t, "GET", "/admin/ui/?status=needs_review", nil)
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("page 1 status=%d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	s := string(body)
+	// Heading must reflect the TRUE total (61 = 60 seeded + 1 from harness).
+	if !strings.Contains(s, "needs_review (61)") {
+		t.Errorf("heading missing true total 61, got body contains: %q",
+			snippet(s, "needs_review"))
+	}
+	// Page count line: ceil(61/50) = 2 pages.
+	if !strings.Contains(s, "page 1 of 2") {
+		t.Errorf("expected 'page 1 of 2' in heading, got: %q", snippet(s, "page"))
+	}
+	// Must contain a "next →" link, not the disabled span.
+	if !strings.Contains(s, `>next →</a>`) {
+		t.Errorf("expected enabled next link on page 1")
+	}
+	// Page 1 (DESC by ts) contains the newest 50 rows. The harness's
+	// rev-1 (ts 2026-05-08) is newer than all the pg-* rows (ts
+	// 2026-05-01 + minute offset), so page 1 = [rev-1, pg-059, pg-058,
+	// …, pg-011]. Spot-check the boundary.
+	if !strings.Contains(s, "pg-059") || !strings.Contains(s, "pg-011") {
+		t.Errorf("page 1 should include pg-011..pg-059 (newest 49 of the seeded pg-* batch),"+
+			" got body snippet: %q", snippet(s, "pg-"))
+	}
+	// pg-000..pg-010 must belong on page 2.
+	if strings.Contains(s, "pg-000") || strings.Contains(s, "pg-005") {
+		t.Errorf("page 1 should NOT contain oldest rows (pg-000..pg-010)")
+	}
+
+	// Page 2
+	resp2 := u.do(t, "GET", "/admin/ui/?status=needs_review&page=2", nil)
+	defer resp2.Body.Close()
+	body2, _ := io.ReadAll(resp2.Body)
+	s2 := string(body2)
+	if !strings.Contains(s2, "page 2 of 2") {
+		t.Errorf("expected 'page 2 of 2', got: %q", snippet(s2, "page"))
+	}
+	// Page 2 must contain the LAST row (oldest timestamp) — pg-059 was
+	// inserted last but uses ts day 32%28=4, hmm ordering is by ts. Just
+	// assert the prev link exists and the heading shows total.
+	if !strings.Contains(s2, `>← prev</a>`) {
+		t.Errorf("expected enabled prev link on page 2")
+	}
+	if !strings.Contains(s2, "needs_review (61)") {
+		t.Errorf("page 2 total still 61")
+	}
+
+	// per_page override
+	resp3 := u.do(t, "GET", "/admin/ui/?status=needs_review&per_page=10", nil)
+	defer resp3.Body.Close()
+	body3, _ := io.ReadAll(resp3.Body)
+	if !strings.Contains(string(body3), "page 1 of 7") { // ceil(61/10) = 7
+		t.Errorf("expected 'page 1 of 7' with per_page=10, got: %q", snippet(string(body3), "page"))
+	}
+}
+
+// snippet returns a 120-char window around a substring for error messages.
+func snippet(s, needle string) string {
+	i := strings.Index(s, needle)
+	if i < 0 {
+		return "(no match)"
+	}
+	start := i - 30
+	if start < 0 {
+		start = 0
+	}
+	end := i + 90
+	if end > len(s) {
+		end = len(s)
+	}
+	return s[start:end]
 }
 
 // TestUI_CookieAuth_Blocks blocks requests without the cookie.

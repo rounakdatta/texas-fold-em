@@ -1,6 +1,13 @@
 {{define "content"}}
-<h2>{{.Status}} ({{len .Rows}})</h2>
-{{if eq (len .Rows) 0}}
+<h2>
+  {{.Status}} ({{.TotalCount}})
+  {{if gt .NumPages 1}}
+    <span style="color:var(--muted);font-weight:normal;font-size:0.7em">
+      page {{.Page}} of {{.NumPages}} · {{.PerPage}}/page
+    </span>
+  {{end}}
+</h2>
+{{if eq .TotalCount 0}}
   <p style="color:var(--muted)">No rows in this state. {{if eq .Status "needs_review"}}If everything's auto-classified, this is the goal — the active-learning loop is doing its job.{{end}}</p>
 {{else}}
   <table>
@@ -33,5 +40,25 @@
       {{end}}
     </tbody>
   </table>
+  {{if gt .NumPages 1}}
+    <nav style="margin-top:16px;display:flex;gap:12px;align-items:center;color:var(--muted)">
+      {{if .HasPrev}}
+        <a href="/admin/ui/?status={{.Status}}&amp;page={{.PrevPage}}&amp;per_page={{.PerPage}}">← prev</a>
+      {{else}}
+        <span style="opacity:0.4">← prev</span>
+      {{end}}
+      <span>page {{.Page}} / {{.NumPages}}</span>
+      {{if .HasNext}}
+        <a href="/admin/ui/?status={{.Status}}&amp;page={{.NextPage}}&amp;per_page={{.PerPage}}">next →</a>
+      {{else}}
+        <span style="opacity:0.4">next →</span>
+      {{end}}
+      <span style="margin-left:auto;font-size:0.85em">
+        showing {{.PerPage}} per page · jump:
+        <a href="/admin/ui/?status={{.Status}}&amp;page=1&amp;per_page={{.PerPage}}">first</a> ·
+        <a href="/admin/ui/?status={{.Status}}&amp;page={{.NumPages}}&amp;per_page={{.PerPage}}">last</a>
+      </span>
+    </nav>
+  {{end}}
 {{end}}
 {{end}}

@@ -171,26 +171,89 @@ type indexRow struct {
 	ProposedCategoryName string
 }
 
+// defaultPerPage / maxPerPage bound the list query. 50 keeps the
+// review UI scroll-friendly; the operator can override per-request
+// via ?per_page=N up to maxPerPage when they want a wider view.
+const (
+	defaultPerPage = 50
+	maxPerPage     = 500
+)
+
 func (h *Handler) handleIndex(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
 	if status == "" {
 		status = "needs_review"
 	}
-	rows, err := h.listRows(r.Context(), status)
+	page := parsePositiveInt(r.URL.Query().Get("page"), 1)
+	perPage := parsePositiveInt(r.URL.Query().Get("per_page"), defaultPerPage)
+	if perPage > maxPerPage {
+		perPage = maxPerPage
+	}
+
+	total, err := h.countRows(r.Context(), status)
+	if err != nil {
+		h.log.Error("count rows", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	// Clamp page to the available range so a stale ?page=99 link
+	// after rows have been pushed/skipped lands somewhere sane.
+	numPages := (total + perPage - 1) / perPage
+	if numPages == 0 {
+		numPages = 1
+	}
+	if page > numPages {
+		page = numPages
+	}
+
+	rows, err := h.listRows(r.Context(), status, perPage, (page-1)*perPage)
 	if err != nil {
 		h.log.Error("list rows", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	h.render(w, h.indexTmpl, map[string]any{
-		"Title":  "review",
-		"Status": status,
-		"Rows":   rows,
-		"Flash":  flashFromCookie(r, w),
+		"Title":      "review",
+		"Status":     status,
+		"Rows":       rows,
+		"Page":       page,
+		"PerPage":    perPage,
+		"NumPages":   numPages,
+		"TotalCount": total,
+		"HasPrev":    page > 1,
+		"HasNext":    page < numPages,
+		"PrevPage":   page - 1,
+		"NextPage":   page + 1,
+		"Flash":      flashFromCookie(r, w),
 	})
 }
 
-func (h *Handler) listRows(ctx context.Context, status string) ([]indexRow, error) {
+// countRows returns the total number of staged_fold_txns rows in the
+// given status. Used to drive pagination — the prior implementation
+// truncated to 200 with no overflow indicator, hiding rows from the
+// operator when the queue got busy.
+func (h *Handler) countRows(ctx context.Context, status string) (int, error) {
+	var n int
+	err := h.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM staged_fold_txns WHERE status = ?`, status,
+	).Scan(&n)
+	return n, err
+}
+
+// parsePositiveInt parses a positive integer from a string, returning
+// the default on empty / parse error / non-positive.
+func parsePositiveInt(s string, def int) int {
+	if s == "" {
+		return def
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil || n < 1 {
+		return def
+	}
+	return n
+}
+
+func (h *Handler) listRows(ctx context.Context, status string, limit, offset int) ([]indexRow, error) {
 	q := `
 		SELECT s.fold_uuid, s.txn_timestamp, s.amount_paise, s.currency, s.mode, s.type,
 		       COALESCE(s.merchant_extracted,''), s.status,
@@ -200,8 +263,8 @@ func (h *Handler) listRows(ctx context.Context, status string) ([]indexRow, erro
 		FROM staged_fold_txns s
 		WHERE s.status = ?
 		ORDER BY s.txn_timestamp DESC
-		LIMIT 200`
-	rows, err := h.db.QueryContext(ctx, q, status)
+		LIMIT ? OFFSET ?`
+	rows, err := h.db.QueryContext(ctx, q, status, limit, offset)
 	if err != nil {
 		return nil, err
 	}
