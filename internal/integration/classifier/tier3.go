@@ -32,6 +32,8 @@ You will be given:
   - the raw fold transaction (full JSON, including fold's own account_id, mode, type, merchant, narration)
   - lists of the user's available firefly accounts, categories, budgets, and tags
   - examples of similar past firefly transactions (RAG retrieval)
+  - the user's own past description strings for this exact merchant (STYLE SAMPLES) — these teach you their voice
+  - a TIME CONTEXT block: when the transaction happened in IST and which meal/occasion bucket it falls in
   - hints from deterministic tiers, when available (these are GUIDANCE, not commands)
 
 Your job: produce the cleanest possible firefly proposal.
@@ -60,6 +62,26 @@ Hard rules:
 5. If the signals genuinely conflict, return confidence < 0.5 and explain in 'reasoning'.
 6. Output the JSON object only. No prose, no markdown fences.
 
+description_suggestion guidance (this is what becomes the transaction TITLE in firefly — treat it as a first-class output, not an afterthought):
+  A. MIRROR the user's voice from STYLE SAMPLES. Their past descriptions for this merchant
+     show the format they prefer (length, vocabulary, structure). Match it.
+       e.g. samples are "Dinner with X", "Lunch with Y", "Coffee solo"
+            → produce "Dinner with ___" or "Lunch with ___", not "Restaurant meal"
+  B. USE the TIME CONTEXT to guess the meal/occasion. A 21:42 txn at a restaurant is
+     dinner; 13:15 is lunch; 09:30 is breakfast. Fold this into the description
+     when STYLE SAMPLES show the user tends to mark the meal explicitly.
+  C. USE "___" (three underscores) as a placeholder when you don't know a specific detail
+     the user typically includes — companion name, dish name, occasion. The user will
+     fill these in during review. PREFER partial-with-placeholder over
+     generic-and-complete:
+       BETTER: "Dinner with ___"        WORSE: "Mezzaluna dinner"
+       BETTER: "___ for lunch at Zomato" WORSE: "Lunch at Zomato"
+  D. WHEN there are no STYLE SAMPLES for this merchant, fall back to a short
+     deterministic title: "[meal_bucket] at [merchant]" or just "[merchant]". Keep it
+     under ~6 words; the user will edit if they want richer.
+  E. NEVER write the raw bank narration as the description — that goes in notes
+     separately; description is the human-friendly title.
+
 The output JSON MUST include a "txn_type" field set to "withdrawal", "deposit", or "transfer".`
 
 // llmResponse is the structured shape we expect back from the LLM.
@@ -79,16 +101,26 @@ type llmResponse struct {
 // tier3Inputs bundles everything the synthesiser sees. Built by
 // gatherTier3Inputs.
 type tier3Inputs struct {
-	hits             []tier3Hit
-	assetAccounts    []AccountRef
-	expenseAccounts  []AccountRef
-	revenueAccounts  []AccountRef
-	categories       []AccountRef
-	budgets          []AccountRef
-	tagLibrary       []string
-	tier1            *Decision       // nil if Tier 1 missed
-	tier2            *Decision       // nil if Tier 2 missed
-	foldAccount      *FoldAccountRef // nil when raw_payload has no account_id, or it's not mirrored
+	hits            []tier3Hit
+	assetAccounts   []AccountRef
+	expenseAccounts []AccountRef
+	revenueAccounts []AccountRef
+	categories      []AccountRef
+	budgets         []AccountRef
+	tagLibrary      []string
+	tier1           *Decision       // nil if Tier 1 missed
+	tier2           *Decision       // nil if Tier 2 missed
+	foldAccount     *FoldAccountRef // nil when raw_payload has no account_id, or it's not mirrored
+
+	// mealCtx is a compact local-time-and-bucket string for the prompt's
+	// TIME CONTEXT block. Empty when the staged row's timestamp can't be
+	// parsed; the renderer omits the block in that case.
+	mealCtx string
+
+	// styleSamples are the user's past descriptions for this exact
+	// merchant, used to teach the LLM the voice/format to mirror. Empty
+	// for first-time merchants; the renderer omits the block then.
+	styleSamples []styleSample
 }
 
 // tierThreeLLM gathers context, builds the prompt, calls the LLM,
@@ -126,6 +158,22 @@ func (c *Classifier) tierThreeLLM(ctx context.Context, staged StagedRow, tier1Hi
 	// least pinned destination + source. Without those two, the
 	// firefly POST will 422.
 	if llm.Confidence < 0.5 || llm.DestinationAccountID == nil || llm.SourceAccountID == nil {
+		// Structural decision rejected, but the LLM's description is
+		// independent of the structural confidence — it's based on
+		// STYLE SAMPLES and TIME CONTEXT, which are valid signals
+		// regardless of whether the model could pin the right ids.
+		// Attach it to whichever Tier-1/Tier-2 hint we're about to
+		// fall through to, so the title for the row isn't lost.
+		if llm.DescriptionSuggestion != nil {
+			if d := strings.TrimSpace(*llm.DescriptionSuggestion); d != "" {
+				switch {
+				case tier1Hint != nil:
+					tier1Hint.Description = d
+				case tier2Hint != nil:
+					tier2Hint.Description = d
+				}
+			}
+		}
 		return Decision{}, false, nil
 	}
 
@@ -229,6 +277,18 @@ func (c *Classifier) gatherTier3Inputs(ctx context.Context, staged StagedRow, ti
 	buds, _ := listBudgets(ctx, c.db)
 	tags, _ := allTagsFromMirror(ctx, c.db)
 	foldAcc, _ := lookupFoldAccountForStaged(ctx, c.db, staged.RawPayload)
+
+	// Style samples for description generation: prefer the Tier-1 hit's
+	// destination_account_id (an exact match against firefly), fall back
+	// to a name-based lookup on the staged row's normalised merchant.
+	// Either way, we want the user's last N descriptions for THIS
+	// merchant so the LLM can mirror their voice.
+	var destForStyle int64
+	if tier1 != nil && tier1.DestinationAccountID != nil {
+		destForStyle = *tier1.DestinationAccountID
+	}
+	samples, _ := recentSameMerchantDescriptions(ctx, c.db, destForStyle, staged.MerchantExtracted, 10)
+
 	return tier3Inputs{
 		hits:            hits,
 		assetAccounts:   asset,
@@ -240,6 +300,8 @@ func (c *Classifier) gatherTier3Inputs(ctx context.Context, staged StagedRow, ti
 		tier1:           tier1,
 		tier2:           tier2,
 		foldAccount:     foldAcc,
+		mealCtx:         mealContext(staged.TxnTimestamp),
+		styleSamples:    samples,
 	}, nil
 }
 
@@ -386,6 +448,36 @@ func buildTier3Prompt(staged StagedRow, in tier3Inputs) string {
 	b.WriteString("\n\n")
 	b.WriteString(fmt.Sprintf("== FOLD TYPE: %s   MODE: %s ==\n", staged.Type, staged.Mode))
 	b.WriteString(fmt.Sprintf("(Firefly side will be: %s)\n\n", fireflyTxnTypeFor(staged.Type)))
+
+	// Block 1c: TIME CONTEXT — when this happened in IST, and which
+	// meal/occasion bucket it falls in. Used by the LLM to infer
+	// whether to call this "Lunch", "Dinner", etc. when STYLE SAMPLES
+	// show the user marks the meal explicitly.
+	if in.mealCtx != "" {
+		b.WriteString("== TIME CONTEXT ==\n")
+		b.WriteString("  " + in.mealCtx + "\n\n")
+	}
+
+	// Block 1d: STYLE SAMPLES — the user's past description strings
+	// for THIS merchant. Distinct from the HISTORICAL EXAMPLES (BM25)
+	// block below, which is for ID evidence; this is purely for voice.
+	// Capping at 10 keeps prompt size bounded.
+	if len(in.styleSamples) > 0 {
+		b.WriteString("== STYLE SAMPLES — past description strings YOU wrote for this merchant ==\n")
+		b.WriteString("(most recent first. MIRROR this voice — length, vocabulary, structure)\n")
+		for i, s := range in.styleSamples {
+			if i >= 10 {
+				break
+			}
+			dateStr := ""
+			if !s.Date.IsZero() {
+				dateStr = " — " + s.Date.Format("2006-01-02")
+			}
+			b.WriteString(fmt.Sprintf("  %d. %q%s\n", i+1, s.Description, dateStr))
+		}
+		b.WriteString("\nReminder: use ___ as a placeholder for missing specifics (companion, dish, occasion).\n")
+		b.WriteString("Prefer partial-with-placeholder over generic-and-complete.\n\n")
+	}
 
 	// Block 1b: the resolved fold-side account. This is the single
 	// strongest source-account signal we have — fold's `account_id`

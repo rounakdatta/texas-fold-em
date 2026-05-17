@@ -129,6 +129,11 @@ func TestPush_PreviewMode(t *testing.T) {
 	if !strings.Contains(string(bodyJSON), `"type":"withdrawal"`) {
 		t.Errorf("preview body should have type withdrawal: %s", bodyJSON)
 	}
+	// Notes must carry the raw fold narration so the operator has the
+	// bank ground-truth alongside the friendlier title.
+	if !strings.Contains(string(bodyJSON), `"notes":"CARD/x/Cake Palace/Rs/70.00/OUTGOING"`) {
+		t.Errorf("preview body should carry narration as notes: %s", bodyJSON)
+	}
 
 	// Row remains in ready_to_push.
 	var status string
@@ -271,6 +276,77 @@ func TestPush_NotFound(t *testing.T) {
 	_, err := p.Push(context.Background(), "no-such-uuid", false)
 	if !errors.Is(err, PushNotFoundError) {
 		t.Errorf("expected PushNotFoundError, got %v", err)
+	}
+}
+
+// TestPush_DescriptionFallback_Merchant: when proposed_description is
+// empty (typical for Tier-1/Tier-2-classified rows the LLM didn't
+// fill), the description falls back to merchant_extracted rather
+// than the raw narration. Cleaner title; narration still lands in
+// notes for the audit trail.
+func TestPush_DescriptionFallback_Merchant(t *testing.T) {
+	s := newPushTestSetup(t)
+
+	// Seed a second row where proposed_description is NULL but
+	// merchant_extracted is set. Simulates a Tier-1/Tier-2 fallback row.
+	if _, err := s.db.DB.Exec(`
+		INSERT INTO staged_fold_txns (fold_uuid, raw_payload, amount_paise, currency, txn_timestamp,
+		    mode, type, narration, merchant_extracted, status,
+		    proposed_source_account_id, proposed_destination_account_id, proposed_category_id)
+		VALUES ('u2','{}',5000,'INR','2026-05-08T13:00:00Z',
+		        'CARD','OUTGOING','CARD/y/NEON MARKET CAFE/Rs/50.00/OUTGOING','neon market cafe','ready_to_push',
+		        1, 99, 6)
+	`); err != nil {
+		t.Fatalf("seed u2: %v", err)
+	}
+
+	p := NewPusher(s.db, firefly.NewClient(s.fakeFirefly.URL, "p", s.fakeFirefly.Client()),
+		slog.New(slog.NewTextHandler(io.Discard, nil)), false)
+	report, err := p.Push(context.Background(), "u2", false)
+	if err != nil {
+		t.Fatalf("Push preview: %v", err)
+	}
+	body, _ := json.Marshal(report.PreviewBody)
+	if !strings.Contains(string(body), `"description":"neon market cafe"`) {
+		t.Errorf("description should fall back to merchant_extracted, got: %s", body)
+	}
+	if !strings.Contains(string(body), `"notes":"CARD/y/NEON MARKET CAFE/Rs/50.00/OUTGOING"`) {
+		t.Errorf("notes should carry the raw narration, got: %s", body)
+	}
+}
+
+// TestPush_DescriptionFallback_Narration: when proposed_description
+// AND merchant_extracted are both empty (rare — an OTHERS-mode UPI
+// blob with no merchant name), the description falls back to the raw
+// narration as the last resort. We still write notes in that case
+// (intentionally duplicating description), since notes is the
+// audit-loop column and should never be empty when narration exists.
+func TestPush_DescriptionFallback_Narration(t *testing.T) {
+	s := newPushTestSetup(t)
+
+	if _, err := s.db.DB.Exec(`
+		INSERT INTO staged_fold_txns (fold_uuid, raw_payload, amount_paise, currency, txn_timestamp,
+		    mode, type, narration, merchant_extracted, status,
+		    proposed_source_account_id, proposed_destination_account_id)
+		VALUES ('u3','{}',2400,'INR','2026-05-08T14:00:00Z',
+		        'OTHERS','INCOMING','UPI/refund/ref-91827361','','ready_to_push',
+		        1, 50)
+	`); err != nil {
+		t.Fatalf("seed u3: %v", err)
+	}
+
+	p := NewPusher(s.db, firefly.NewClient(s.fakeFirefly.URL, "p", s.fakeFirefly.Client()),
+		slog.New(slog.NewTextHandler(io.Discard, nil)), false)
+	report, err := p.Push(context.Background(), "u3", false)
+	if err != nil {
+		t.Fatalf("Push preview: %v", err)
+	}
+	body, _ := json.Marshal(report.PreviewBody)
+	if !strings.Contains(string(body), `"description":"UPI/refund/ref-91827361"`) {
+		t.Errorf("description should fall back to narration as last resort, got: %s", body)
+	}
+	if !strings.Contains(string(body), `"notes":"UPI/refund/ref-91827361"`) {
+		t.Errorf("notes should carry narration unconditionally, got: %s", body)
 	}
 }
 

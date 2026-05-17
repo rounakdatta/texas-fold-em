@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
+	"time"
 )
 
 // FoldAccountRef carries the human-readable details of a fold-side
@@ -178,6 +180,158 @@ func fireflyTxnTypeFor(foldType string) string {
 	default:
 		return "withdrawal" // safety default — rare on fold
 	}
+}
+
+// styleSample is one of the user's past description strings for a
+// particular merchant, with the date it was written. Fed into the
+// Tier-3 prompt so the LLM mirrors the user's voice for this merchant
+// rather than inventing a generic title. Distinct from the FTS
+// HISTORICAL EXAMPLES block (which is multi-merchant BM25 nearest) —
+// these are tightly scoped to the same destination.
+type styleSample struct {
+	Description string
+	Date        time.Time
+}
+
+// recentSameMerchantDescriptions returns up to n of the user's most
+// recent description strings for the given destination_account_id,
+// falling back to a name match if the id is unknown. Used to seed the
+// description-generation prompt with the user's writing voice for
+// THIS merchant specifically.
+//
+// Returns nil when neither lookup yields anything (e.g., first-time
+// merchant) — the prompt skips the STYLE SAMPLES block in that case.
+func recentSameMerchantDescriptions(ctx context.Context, db *sql.DB, destAccountID int64, merchantNormalized string, n int) ([]styleSample, error) {
+	if n <= 0 {
+		n = 10
+	}
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	switch {
+	case destAccountID != 0:
+		rows, err = db.QueryContext(ctx, `
+			SELECT description, date FROM firefly_txns
+			WHERE destination_account_id = ?
+			  AND description IS NOT NULL AND TRIM(description) <> ''
+			ORDER BY date DESC
+			LIMIT ?
+		`, destAccountID, n)
+	case merchantNormalized != "":
+		rows, err = db.QueryContext(ctx, `
+			SELECT description, date FROM firefly_txns
+			WHERE destination_account_name_normalized = ?
+			  AND description IS NOT NULL AND TRIM(description) <> ''
+			ORDER BY date DESC
+			LIMIT ?
+		`, merchantNormalized, n)
+	default:
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []styleSample
+	for rows.Next() {
+		var (
+			s       styleSample
+			dateStr string
+		)
+		if err := rows.Scan(&s.Description, &dateStr); err != nil {
+			return nil, err
+		}
+		// firefly_txns.date appears in a few formats depending on which
+		// migration created the row — try them in order, fall through
+		// to a zero Date if none match (the renderer handles the zero).
+		for _, layout := range []string{time.RFC3339, "2006-01-02 15:04:05+00:00", "2006-01-02"} {
+			if t, err := time.Parse(layout, dateStr); err == nil {
+				s.Date = t
+				break
+			}
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+// istLocation returns the IST time zone, with a hardcoded UTC+5:30
+// fallback for environments where tzdata is unavailable (e.g. the
+// distroless image build path some day in the future). IST has no DST
+// so the fixed offset is correct year-round.
+func istLocation() *time.Location {
+	if loc, err := time.LoadLocation("Asia/Kolkata"); err == nil {
+		return loc
+	}
+	return time.FixedZone("IST", 5*3600+30*60)
+}
+
+// mealContext returns a compact human-readable description of when a
+// transaction happened in the user's local time, including a
+// time-of-day bucket the LLM can use to guess at meal/occasion.
+//
+// Example output:
+//
+//	"2026-05-12 21:42 IST Mon — dinner (20:00-23:30) — weekday"
+//
+// Bucket boundaries are tuned to Indian dining patterns. If the input
+// timestamp can't be parsed, returns an empty string and the caller
+// is expected to skip rendering the TIME CONTEXT block.
+func mealContext(txnTimestamp string) string {
+	t, ok := parseTxnTimestamp(txnTimestamp)
+	if !ok {
+		return ""
+	}
+	local := t.In(istLocation())
+	bucket := mealBucket(local.Hour(), local.Minute())
+	wday := weekdayCategory(local.Weekday())
+	return fmt.Sprintf("%s IST %s — %s — %s",
+		local.Format("2006-01-02 15:04"),
+		local.Format("Mon"),
+		bucket,
+		wday,
+	)
+}
+
+// parseTxnTimestamp accepts the three timestamp shapes we observe in
+// staged_fold_txns.txn_timestamp and firefly_txns.date.
+func parseTxnTimestamp(s string) (time.Time, bool) {
+	for _, layout := range []string{time.RFC3339, "2006-01-02 15:04:05+00:00", "2006-01-02"} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// mealBucket maps a 24h IST clock position to a coarse meal/occasion
+// bucket. Boundaries are inclusive-lower, exclusive-upper.
+func mealBucket(h, m int) string {
+	mins := h*60 + m
+	switch {
+	case mins >= 6*60 && mins < 10*60+30:
+		return "breakfast (06:00-10:30)"
+	case mins >= 10*60+30 && mins < 12*60+30:
+		return "mid-morning / snack (10:30-12:30)"
+	case mins >= 12*60+30 && mins < 15*60+30:
+		return "lunch (12:30-15:30)"
+	case mins >= 15*60+30 && mins < 18*60:
+		return "tea / afternoon (15:30-18:00)"
+	case mins >= 18*60 && mins < 20*60:
+		return "early evening (18:00-20:00)"
+	case mins >= 20*60 && mins < 23*60+30:
+		return "dinner (20:00-23:30)"
+	default:
+		return "late-night (23:30-06:00)"
+	}
+}
+
+func weekdayCategory(d time.Weekday) string {
+	if d == time.Saturday || d == time.Sunday {
+		return "weekend"
+	}
+	return "weekday"
 }
 
 func listDistinct(ctx context.Context, db *sql.DB, query string) ([]AccountRef, error) {
