@@ -99,8 +99,17 @@ type pushableRow struct {
 	ProposedDescription          sql.NullString
 	ProposedTxnType              sql.NullString
 
-	// Default fallback for description: the original narration.
+	// Narration is the raw fold-side string ("CARD/.../MERCHANT/Rs./AMT/...").
+	// Used as firefly's notes field on every push so the operator has the
+	// underlying ground truth available alongside the friendlier title.
 	Narration string
+
+	// MerchantExtracted is the normalised merchant string (e.g. "zomato",
+	// "neon market cafe"). Used as the description fallback when both
+	// confirmed_description and proposed_description are empty — cleaner
+	// than raw narration, which now lives in notes anyway.
+	MerchantExtracted string
+
 	FireflyTxnID sql.NullInt64
 }
 
@@ -210,7 +219,7 @@ func (p *Pusher) fetchPushableRow(ctx context.Context, foldUUID string) (pushabl
 		       proposed_source_account_id, proposed_destination_account_id,
 		       proposed_category_id, proposed_budget_id, proposed_description,
 		       proposed_txn_type,
-		       narration, firefly_txn_id
+		       narration, COALESCE(merchant_extracted, ''), firefly_txn_id
 		FROM staged_fold_txns
 		WHERE fold_uuid = ?
 	`, foldUUID).Scan(
@@ -221,7 +230,7 @@ func (p *Pusher) fetchPushableRow(ctx context.Context, foldUUID string) (pushabl
 		&r.ProposedSourceAccountID, &r.ProposedDestinationAccountID,
 		&r.ProposedCategoryID, &r.ProposedBudgetID, &r.ProposedDescription,
 		&r.ProposedTxnType,
-		&r.Narration, &r.FireflyTxnID,
+		&r.Narration, &r.MerchantExtracted, &r.FireflyTxnID,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return r, fmt.Errorf("%w: %s", PushNotFoundError, foldUUID)
@@ -244,9 +253,21 @@ func (p *Pusher) buildCreateRequest(row pushableRow) firefly.CreateTransactionRe
 	destID := pickInt64(row.ConfirmedDestinationAccountID, row.ProposedDestinationAccountID)
 	catID := pickInt64(row.ConfirmedCategoryID, row.ProposedCategoryID)
 	budID := pickInt64(row.ConfirmedBudgetID, row.ProposedBudgetID)
+	// Description fallback ladder:
+	//   1. confirmed_description (human edit) — always wins
+	//   2. proposed_description (LLM's title suggestion)
+	//   3. merchant_extracted (normalised, e.g. "neon market cafe")
+	//   4. narration (raw fold string) — last resort
+	//
+	// Narration is now mirrored to firefly's notes field unconditionally,
+	// so using it as the description would just duplicate. The merchant
+	// fallback gives Tier-1/Tier-2 rows (where the LLM didn't fill
+	// description_suggestion) a readable title without an LLM call.
 	desc := pickString(row.ConfirmedDescription, row.ProposedDescription)
+	if desc == "" && row.MerchantExtracted != "" {
+		desc = row.MerchantExtracted
+	}
 	if desc == "" {
-		// Last resort — we don't want to send an empty description to firefly.
 		desc = row.Narration
 	}
 
@@ -267,14 +288,19 @@ func (p *Pusher) buildCreateRequest(row pushableRow) firefly.CreateTransactionRe
 	}
 
 	line := firefly.CreateTransactionLine{
-		Type:          txnType,
-		Date:          row.TxnTimestamp.Format(time.RFC3339),
-		Amount:        paiseToDecimal(row.AmountPaise),
-		CurrencyCode:  row.Currency,
-		Description:   desc,
-		ExternalID:    row.FoldUUID,
-		Tags:          tags,
-		Notes:         "",
+		Type:         txnType,
+		Date:         row.TxnTimestamp.Format(time.RFC3339),
+		Amount:       paiseToDecimal(row.AmountPaise),
+		CurrencyCode: row.Currency,
+		Description:  desc,
+		ExternalID:   row.FoldUUID,
+		Tags:         tags,
+		// Notes carries the raw fold narration (e.g. "CARD/19b4a7.../NEON
+		// MARKET CAFE/Rs./1313.00/OUTGOING/23-12-25") so the operator
+		// always has the bank's ground-truth string alongside firefly's
+		// friendlier description. The narration is what classification
+		// was performed on; preserving it here closes the audit loop.
+		Notes: row.Narration,
 	}
 	if srcID != 0 {
 		line.SourceID = strconv.FormatInt(srcID, 10)

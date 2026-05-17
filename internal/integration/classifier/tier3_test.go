@@ -436,6 +436,147 @@ func TestLongTokens(t *testing.T) {
 	}
 }
 
+// TestTier3_PromptHasTimeContextAndStyleSamples: for a known-merchant
+// staged row, the Tier-3 user prompt must include:
+//   - a TIME CONTEXT block computed from staged.TxnTimestamp (in IST,
+//     with a meal/occasion bucket)
+//   - a STYLE SAMPLES block listing the user's past descriptions for
+//     that merchant from firefly_txns
+//
+// These two blocks are what let the LLM mirror the user's voice and
+// infer the meal/occasion — without them, descriptions degrade to
+// generic strings like "Lunch at Zomato".
+func TestTier3_PromptHasTimeContextAndStyleSamples(t *testing.T) {
+	db := seedTestDB(t)
+
+	var capturedPrompt string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		capturedPrompt = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		// Reply with a low-confidence response so we exercise the path
+		// without affecting downstream Decision.
+		envelope := map[string]any{
+			"choices": []map[string]any{{
+				"index": 0,
+				"message": map[string]any{
+					"role":    "assistant",
+					"content": `{"txn_type":"withdrawal","destination_account_id":null,"source_account_id":null,"confidence":0.2,"reasoning":"low"}`,
+				},
+				"finish_reason": "stop",
+			}},
+			"usage": map[string]any{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+		}
+		_ = json.NewEncoder(w).Encode(envelope)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := New(db, slog.Default(), DefaultConfidenceThreshold, 10)
+	c.SetLLM(llm.NewClient("k", "", srv.URL, srv.Client()))
+
+	// A zomato txn at 16:00 UTC on 2026-05-12 — 21:30 IST Tue → "dinner".
+	// seedTestDB already populates two firefly_txns rows for destination
+	// "zomato" with descriptions "lunch order" and "dinner order" —
+	// those should surface in the STYLE SAMPLES block.
+	_, _ = c.ClassifyOne(context.Background(), StagedRow{
+		FoldUUID:          "tier3-tc",
+		Narration:         "CARD/x/Zomato/Rs/300/OUTGOING",
+		Mode:              "CARD",
+		Type:              "OUTGOING",
+		MerchantExtracted: "zomato",
+		TxnTimestamp:      "2026-05-12T16:00:00Z",
+		RawPayload:        `{"uuid":"tier3-tc","mode":"CARD","type":"OUTGOING"}`,
+	})
+
+	if !strings.Contains(capturedPrompt, "TIME CONTEXT") {
+		t.Errorf("prompt missing TIME CONTEXT block:\n%s", snippet(capturedPrompt, "FOLD"))
+	}
+	if !strings.Contains(capturedPrompt, "dinner") {
+		t.Errorf("prompt should contain meal-bucket 'dinner' for a 21:30 IST txn, body:\n%s", snippet(capturedPrompt, "TIME"))
+	}
+	if !strings.Contains(capturedPrompt, "STYLE SAMPLES") {
+		t.Errorf("prompt missing STYLE SAMPLES block:\n%s", capturedPrompt)
+	}
+	// Both seeded historical descriptions should appear so the LLM has
+	// the user's voice to mirror.
+	for _, want := range []string{"lunch order", "dinner order"} {
+		if !strings.Contains(capturedPrompt, want) {
+			t.Errorf("STYLE SAMPLES missing %q:\n%s", want, snippet(capturedPrompt, "STYLE"))
+		}
+	}
+	// Reminder line about placeholders MUST be present — that's how the
+	// LLM is licensed to emit ___ rather than invent text.
+	if !strings.Contains(capturedPrompt, "___") {
+		t.Errorf("prompt missing placeholder-reminder line, body:\n%s", snippet(capturedPrompt, "STYLE"))
+	}
+}
+
+// TestTier3_KeepsDescriptionOnLowConfidence: when the LLM returns
+// ok=false (low structural confidence on ids), we still want its
+// description_suggestion to flow through onto the Tier-1/2 fallback
+// Decision — the description is independent of structural confidence
+// and is based on STYLE SAMPLES + TIME CONTEXT, both of which are
+// valid signals regardless.
+func TestTier3_KeepsDescriptionOnLowConfidence(t *testing.T) {
+	db := seedTestDB(t)
+
+	// LLM returns a sensible description but null structural ids and
+	// confidence < 0.5 → ok=false. Tier-1 hint exists because "zomato"
+	// is in merchant_lookup.
+	fakeLLM := newFakeLLM(t, `{
+		"txn_type": "withdrawal",
+		"destination_account_id": null,
+		"source_account_id": null,
+		"confidence": 0.3,
+		"description_suggestion": "Dinner with ___",
+		"reasoning": "low structural confidence but description is independent"
+	}`)
+	t.Cleanup(fakeLLM.Close)
+
+	c := New(db, slog.Default(), DefaultConfidenceThreshold, 10)
+	c.SetLLM(llm.NewClient("k", "", fakeLLM.URL, fakeLLM.Client()))
+
+	d, err := c.ClassifyOne(context.Background(), StagedRow{
+		FoldUUID:          "tier3-keep-desc",
+		Narration:         "CARD/x/Zomato/Rs/300/OUTGOING",
+		Mode:              "CARD",
+		Type:              "OUTGOING",
+		MerchantExtracted: "zomato",
+		TxnTimestamp:      "2026-05-12T16:00:00Z",
+		RawPayload:        `{"uuid":"tier3-keep-desc","mode":"CARD","type":"OUTGOING"}`,
+	})
+	if err != nil {
+		t.Fatalf("ClassifyOne: %v", err)
+	}
+	// Tier 1 should have won the structural decision (LLM punted)…
+	if d.Tier != TierMerchantLookup {
+		t.Errorf("expected TierMerchantLookup, got %d", d.Tier)
+	}
+	// …but the LLM's description gets preserved onto the Tier-1
+	// Decision so the title isn't lost.
+	if d.Description != "Dinner with ___" {
+		t.Errorf("expected LLM's description to be preserved, got %q", d.Description)
+	}
+}
+
+// snippet returns a 200-char window around a substring for error
+// messages — full bodies are several KB and unhelpful to dump.
+func snippet(s, needle string) string {
+	i := strings.Index(s, needle)
+	if i < 0 {
+		return "(no match for " + needle + ")"
+	}
+	start := i - 40
+	if start < 0 {
+		start = 0
+	}
+	end := i + 160
+	if end > len(s) {
+		end = len(s)
+	}
+	return s[start:end]
+}
+
 // newFakeLLM returns an httptest server that always responds with the
 // OpenAI chat-completions envelope wrapping the supplied JSON string
 // as the assistant message content. Used by the Tier-3 test suite to
