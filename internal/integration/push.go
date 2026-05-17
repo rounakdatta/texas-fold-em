@@ -55,11 +55,12 @@ type Learner interface {
 // update staged_fold_txns. Read-only mode short-circuits before any
 // write.
 type Pusher struct {
-	db       *DB
-	fc       *firefly.Client
-	log      *slog.Logger
-	readOnly bool
-	learner  Learner // optional; when set, push success triggers reinforcement
+	db          *DB
+	fc          *firefly.Client
+	log         *slog.Logger
+	readOnly    bool
+	learner     Learner  // optional; when set, push success triggers reinforcement
+	eagerSyncer *Syncer  // optional; when set, push success mirrors the just-created firefly journal into firefly_txns
 }
 
 // NewPusher constructs a Pusher with no learner.
@@ -69,9 +70,21 @@ func NewPusher(db *DB, fc *firefly.Client, log *slog.Logger, readOnly bool) *Pus
 
 // SetLearner attaches a Learner. After a successful real push (not a
 // preview, not a dedup-no-op-for-already-pushed), the Pusher will call
-// LearnFromPushed in a non-blocking goroutine. Failures in the
-// learner are logged but never surface to the push caller.
+// LearnFromPushed. Failures in the learner are logged but never
+// surface to the push caller.
 func (p *Pusher) SetLearner(l Learner) { p.learner = l }
+
+// SetEagerSyncer attaches a Syncer that the Pusher uses to eagerly
+// mirror the just-created firefly journal into firefly_txns
+// immediately after Push succeeds. Without this, the journal lands in
+// our mirror only when the next periodic /admin/firefly/sync runs
+// (up to an hour later) — meaning any correction the operator made
+// during review takes that long to flow back into the classifier's
+// FTS index and the Tier-3 STYLE SAMPLES. With it, the next
+// classification of a similar transaction sees the correction within
+// seconds. Failures are logged-not-fatal so a degraded mirror never
+// breaks the push itself.
+func (p *Pusher) SetEagerSyncer(s *Syncer) { p.eagerSyncer = s }
 
 // pushableRow is the slim view of staged_fold_txns we read for a push.
 type pushableRow struct {
@@ -192,8 +205,42 @@ func (p *Pusher) Push(ctx context.Context, foldUUID string, confirm bool) (PushR
 	}
 	p.audit(ctx, "firefly_create", row.FoldUUID, journalID, body, 200, "")
 
+	// Eager mirror: pull the just-created firefly journal back into our
+	// local mirror so the next classification round sees this row's
+	// description / notes / category without waiting for the periodic
+	// /admin/firefly/sync. Latency drops from ≤1h to ~2s. Failures are
+	// logged-not-fatal so a degraded mirror never breaks the push
+	// itself; the periodic sync will reconcile on its next pass.
+	if p.eagerSyncer != nil && journalID > 0 {
+		group, err := p.fc.GetTransaction(ctx, journalID)
+		if err != nil {
+			p.log.Warn("eager mirror: GetTransaction failed (push still succeeded)",
+				"fold_uuid", row.FoldUUID, "journal_id", journalID, "err", err)
+		} else if groupID, perr := strconv.ParseInt(group.Data.ID, 10, 64); perr != nil {
+			p.log.Warn("eager mirror: parse group id failed",
+				"fold_uuid", row.FoldUUID, "group_id_raw", group.Data.ID, "err", perr)
+		} else {
+			// A split would contain several journals under the same group;
+			// mirror the one that matches the id we just pushed. (For
+			// the non-split common case there is exactly one journal.)
+			wantID := strconv.FormatInt(journalID, 10)
+			for _, j := range group.Data.Attributes.Transactions {
+				if j.JournalID != wantID {
+					continue
+				}
+				if err := p.eagerSyncer.MirrorJournal(ctx, j, groupID); err != nil {
+					p.log.Warn("eager mirror: upsert failed (push still succeeded)",
+						"fold_uuid", row.FoldUUID, "journal_id", journalID, "err", err)
+				}
+				break
+			}
+		}
+	}
+
 	// Active-learning reinforcement. Synchronous so tests can assert,
 	// failures logged-not-fatal so a degraded learner can't break push.
+	// Runs AFTER the eager mirror so the learner reads from a mirror
+	// that already has this row reflected.
 	if p.learner != nil {
 		if err := p.learner.LearnFromPushed(ctx, row.FoldUUID); err != nil {
 			p.log.Warn("learner failed; push still succeeded", "fold_uuid", row.FoldUUID, "err", err)

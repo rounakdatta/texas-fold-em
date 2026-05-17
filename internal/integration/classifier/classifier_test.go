@@ -47,17 +47,20 @@ func seedTestDB(t *testing.T) *sql.DB {
 		      12, 'Cake Palace', 'cake palace',
 		      6, 'Snacks',         NULL, NULL, 'birthday cake', '[]')
 		`,
-		// merchant_lookup: zomato has 2/2 = 1.0 confidence, cake palace 1/1 = 1.0
+		// merchant_lookup: zomato has 2/2 = 1.0 confidence, cake palace 1/1 = 1.0.
+		// zomato's modal_description is the user's most recent voice-matched
+		// title for this merchant — so Tier-1 ships that on its Decision.
 		`INSERT INTO merchant_lookup (
 		     merchant_normalized,
 		     modal_destination_account_id, modal_destination_account_name,
 		     modal_source_account_id, modal_source_account_name,
 		     modal_category_id, modal_category_name,
 		     modal_budget_id, modal_budget_name,
+		     modal_description,
 		     sample_size, confidence, last_seen)
 		 VALUES
-		     ('zomato',      11, 'Zomato',      1, 'HDFC Card', 5, 'Eating outside', NULL, NULL, 2, 1.0, '2026-05-07'),
-		     ('cake palace', 12, 'Cake Palace', 1, 'HDFC Card', 6, 'Snacks',         NULL, NULL, 1, 1.0, '2026-05-04')
+		     ('zomato',      11, 'Zomato',      1, 'HDFC Card', 5, 'Eating outside', NULL, NULL, 'Lunch with Tushar', 2, 1.0, '2026-05-07'),
+		     ('cake palace', 12, 'Cake Palace', 1, 'HDFC Card', 6, 'Snacks',         NULL, NULL, NULL,                1, 1.0, '2026-05-04')
 		`,
 	} {
 		if _, err := db.Exec(q); err != nil {
@@ -97,6 +100,13 @@ func TestClassifyOne_Tier1Hit(t *testing.T) {
 	}
 	if d.Evidence.LookupHit == nil {
 		t.Error("expected LookupHit in evidence")
+	}
+	// Tier-1 must surface the modal_description from the lookup table
+	// so push.go's description fallback chain picks up a voice-matched
+	// title without needing an LLM call.
+	if d.Description != "Lunch with Tushar" {
+		t.Errorf("Decision.Description = %q, want %q (seeded modal_description)",
+			d.Description, "Lunch with Tushar")
 	}
 }
 

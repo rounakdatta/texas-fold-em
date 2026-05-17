@@ -61,6 +61,19 @@ type TransactionJournal struct {
 	Description     string   `json:"description"`
 	Tags            []string `json:"tags"`
 	ExternalID      string   `json:"external_id"`
+	// Notes is firefly's free-text per-transaction notes field. Months
+	// of manual work has gone into populating it with raw fold narrations
+	// (e.g. `CARD/.../SHREE VINAYAKA ENTE/...`) — surfacing that into our
+	// mirror gives both BM25 (Tier-2) and the LLM (Tier-3) the bridging
+	// signal between fold's truncated merchant string and firefly's
+	// canonical destination_account_name.
+	Notes           string   `json:"notes"`
+}
+
+// TransactionGroupResponse is the body returned by GET /api/v1/transactions/{id}.
+// Singular wrapper of TransactionGroup (same shape as list endpoint's element).
+type TransactionGroupResponse struct {
+	Data TransactionGroup `json:"data"`
 }
 
 // TransactionGroup is the outer wrapper firefly returns. data[i].attributes

@@ -41,16 +41,17 @@ func (c *Classifier) LearnFromPushed(ctx context.Context, foldUUID string) error
 	// string. We require status='pushed' to prevent reinforcement off
 	// rows that were rolled back somehow.
 	var (
-		merchant   sql.NullString
-		status     string
-		dstID      sql.NullInt64
-		dstName    sql.NullString
-		srcID      sql.NullInt64
-		srcName    sql.NullString
-		catID      sql.NullInt64
-		catName    sql.NullString
-		budID      sql.NullInt64
-		budName    sql.NullString
+		merchant sql.NullString
+		status   string
+		dstID    sql.NullInt64
+		dstName  sql.NullString
+		srcID    sql.NullInt64
+		srcName  sql.NullString
+		catID    sql.NullInt64
+		catName  sql.NullString
+		budID    sql.NullInt64
+		budName  sql.NullString
+		desc     sql.NullString
 	)
 	// We resolve human-readable names by joining against firefly_txns.
 	// In the moment immediately after a push, the just-created firefly
@@ -76,10 +77,11 @@ func (c *Classifier) LearnFromPushed(ctx context.Context, foldUUID string) error
 		       COALESCE(confirmed_budget_id, proposed_budget_id),
 		       (SELECT budget_name FROM firefly_txns
 		         WHERE budget_id = COALESCE(confirmed_budget_id, proposed_budget_id)
-		         LIMIT 1)
+		         LIMIT 1),
+		       COALESCE(NULLIF(TRIM(confirmed_description),''), NULLIF(TRIM(proposed_description),''))
 		FROM staged_fold_txns
 		WHERE fold_uuid = ?
-	`, foldUUID).Scan(&merchant, &status, &dstID, &dstName, &srcID, &srcName, &catID, &catName, &budID, &budName)
+	`, foldUUID).Scan(&merchant, &status, &dstID, &dstName, &srcID, &srcName, &catID, &catName, &budID, &budName, &desc)
 	if err != nil {
 		return fmt.Errorf("learn: read staged: %w", err)
 	}
@@ -115,6 +117,10 @@ func (c *Classifier) LearnFromPushed(ctx context.Context, foldUUID string) error
 	// modestly (we don't have category-distribution data here without
 	// a re-scan, so we keep confidence stable when the same labels
 	// reinforce, and lower it conservatively when labels CHANGED).
+	// modal_description is updated to the row's own confirmed/proposed
+	// description so that Tier-1 hits the next time around can ship
+	// with a voice-matched title — no LLM call needed. "Latest wins"
+	// matches the periodic-rebuild semantics in sync.go.
 	now := time.Now().UTC()
 	_, err = c.db.ExecContext(ctx, `
 		INSERT INTO merchant_lookup (
@@ -123,8 +129,9 @@ func (c *Classifier) LearnFromPushed(ctx context.Context, foldUUID string) error
 		    modal_source_account_id, modal_source_account_name,
 		    modal_category_id, modal_category_name,
 		    modal_budget_id, modal_budget_name,
+		    modal_description,
 		    sample_size, confidence, last_seen
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1.0, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1.0, ?)
 		ON CONFLICT(merchant_normalized) DO UPDATE SET
 		    modal_destination_account_id   = excluded.modal_destination_account_id,
 		    modal_destination_account_name = excluded.modal_destination_account_name,
@@ -134,6 +141,7 @@ func (c *Classifier) LearnFromPushed(ctx context.Context, foldUUID string) error
 		    modal_category_name            = COALESCE(excluded.modal_category_name, modal_category_name),
 		    modal_budget_id                = COALESCE(excluded.modal_budget_id, modal_budget_id),
 		    modal_budget_name              = COALESCE(excluded.modal_budget_name, modal_budget_name),
+		    modal_description              = COALESCE(excluded.modal_description, modal_description),
 		    sample_size                    = sample_size + 1,
 		    -- Stable confidence rule: when the labels match what's
 		    -- already there, keep at 1.0. When they differ (the human
@@ -153,6 +161,7 @@ func (c *Classifier) LearnFromPushed(ctx context.Context, foldUUID string) error
 		nullToInt64Any(srcID), nullToString(srcName),
 		nullToInt64Any(catID), nullToString(catName),
 		nullToInt64Any(budID), nullToString(budName),
+		nullToString(desc),
 		now,
 	)
 	if err != nil {
@@ -161,6 +170,7 @@ func (c *Classifier) LearnFromPushed(ctx context.Context, foldUUID string) error
 	c.log.Info("learned from push",
 		"merchant", merchantNorm,
 		"category_id", nullableLogValue(catID),
+		"description_seeded", desc.Valid,
 	)
 	return nil
 }
