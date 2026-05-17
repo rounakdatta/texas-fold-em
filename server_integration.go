@@ -91,24 +91,31 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 // THEN /admin/classify. PR H will wire that into a single periodic
 // goroutine.)
 func (s *Server) handleClassify(w http.ResponseWriter, r *http.Request) {
-	// Per-row Tier-3 latency with a reasoning-capable model + 5–15kB
-	// prompts runs ~3–5s. A backlog catch-up after a multi-day outage
-	// (or a re-evaluate-everything after a model swap) routinely
-	// touches 150+ rows in one call. 10m budget was hitting the wall
-	// at row ~35-40 and leaving the rest in pending; 60m comfortably
-	// covers up to ~700 rows at the observed rate. Idempotent, so
-	// shorter calls are still safe.
-	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Minute)
+	// Per-row Tier-3 latency depends heavily on prompt size: a thin
+	// prompt with a reasoning model runs ~5s/row; the richer prompt
+	// added in chart 0.6.0 (TIME CONTEXT + STYLE SAMPLES blocks)
+	// raised it to ~10-12s/row. A full ?scope=all reprocess after a
+	// prompt change touches every non-confirmed row in the DB — which
+	// can be 600-2000 rows — and the operator wants it to finish in
+	// one click rather than babysit retries.
+	//
+	// 4h covers ~1400 rows at 10s/row. Beyond that the operator
+	// should restart with ?scope=pending (idempotent) and let the
+	// hourly cron pick up the rest. The endpoint is never load-bearing
+	// for end-user latency; only operators invoke it.
+	ctx, cancel := context.WithTimeout(r.Context(), 4*time.Hour)
 	defer cancel()
 
 	// The HTTP server's WriteTimeout is 30s (suitable for /token);
-	// extend it per-request here so the response after 10–60 minutes
+	// extend it per-request here so the response after several hours
 	// can actually reach the caller. Without this, the handler keeps
 	// running and updating the DB, but the connection is long dead
-	// and curl sees an "empty reply from server".
+	// and curl sees an "empty reply from server". The +5min margin
+	// over the context timeout gives us room to write the final
+	// JSON response cleanly after ctx expires.
 	if rc := http.NewResponseController(w); rc != nil {
-		_ = rc.SetWriteDeadline(time.Now().Add(65 * time.Minute))
-		_ = rc.SetReadDeadline(time.Now().Add(65 * time.Minute))
+		_ = rc.SetWriteDeadline(time.Now().Add(4*time.Hour + 5*time.Minute))
+		_ = rc.SetReadDeadline(time.Now().Add(4*time.Hour + 5*time.Minute))
 	}
 
 	q := r.URL.Query()
