@@ -157,6 +157,12 @@ func run() error {
 		// auto-classifies via Tier 1.
 		pusher := integration.NewPusher(intDB, fireflyClient, intLog, cfg.FireflyReadOnly)
 		pusher.SetLearner(cls)
+		// Eager mirror: after a successful push, fetch the just-created
+		// firefly journal back into firefly_txns immediately. Makes
+		// human corrections (description, tags, etc.) visible to the
+		// next classify cycle within seconds instead of waiting for the
+		// hourly /admin/firefly/sync tick.
+		pusher.SetEagerSyncer(fireflySyncer)
 		srv.SetPusher(pusher)
 
 		// Review UI. Auth mode chosen by config: UICookie for local dev

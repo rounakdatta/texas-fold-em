@@ -110,6 +110,22 @@ func TestLearningLoop_Reinforces(t *testing.T) {
 	if conf < 0.99 {
 		t.Errorf("confidence=%f, want ~1.0", conf)
 	}
+
+	// Reinforcement must also persist the row's confirmed_description as
+	// modal_description so Tier-1 hits for this merchant next time ship
+	// with a voice-matched title automatically.
+	var modalDesc string
+	err = db.DB.QueryRow(`
+		SELECT COALESCE(modal_description,'') FROM merchant_lookup
+		WHERE merchant_normalized='cake palace'
+	`).Scan(&modalDesc)
+	if err != nil {
+		t.Fatalf("modal_description read: %v", err)
+	}
+	if modalDesc != "birthday cake" {
+		t.Errorf("modal_description=%q, want %q (the confirmed_description on the pushed row)",
+			modalDesc, "birthday cake")
+	}
 }
 
 // TestLearningLoop_ReinforcesMatchingLabels: when the same merchant

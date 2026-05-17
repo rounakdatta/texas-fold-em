@@ -279,6 +279,75 @@ func TestPush_NotFound(t *testing.T) {
 	}
 }
 
+// TestPush_EagerMirror: after a successful create, the just-pushed
+// firefly journal is fetched back and upserted into firefly_txns
+// within the same Push call — closing the description-learning lag
+// from ≤1h (next periodic firefly sync) to ~2s. We seed a fake
+// firefly that returns the created journal with a `notes` field
+// populated (mirroring what the real firefly returns after a v0.6.0+
+// push) and assert the row lands in our mirror.
+func TestPush_EagerMirror(t *testing.T) {
+	s := newPushTestSetup(t)
+
+	// Augment the fake to handle GET /api/v1/transactions/7951 — the
+	// just-created journal. Returns the same shape the real firefly
+	// does, including notes (the raw fold narration we push on every
+	// transaction now).
+	var getCalls atomic.Int32
+	s.fakeFirefly.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/search/transactions"):
+			s.searchCalls.Add(1)
+			_, _ = w.Write([]byte(`{"data":[]}`))
+		case r.URL.Path == "/api/v1/transactions/7951":
+			getCalls.Add(1)
+			_, _ = w.Write([]byte(`{"data":{"id":"7950","type":"transactions","attributes":{"group_title":"","transactions":[{
+				"transaction_journal_id":"7951","type":"withdrawal","amount":"70.00","currency_code":"INR",
+				"date":"2026-05-08T12:59:18+05:30",
+				"source_id":"1","source_name":"HDFC Card",
+				"destination_id":"12","destination_name":"Cake Palace",
+				"category_id":"6","category_name":"Snacks",
+				"budget_id":"","budget_name":"",
+				"description":"Snack at cake palace","tags":[],"external_id":"u1",
+				"notes":"CARD/x/Cake Palace/Rs/70.00/OUTGOING"
+			}]}}}`))
+		case r.URL.Path == "/api/v1/transactions":
+			s.createCalls.Add(1)
+			_, _ = w.Write([]byte(`{"data":{"id":"7950","attributes":{"transactions":[{"transaction_journal_id":"7951"}]}}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	fc := firefly.NewClient(s.fakeFirefly.URL, "p", s.fakeFirefly.Client())
+	syncer := NewSyncer(s.db, fc, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	p := NewPusher(s.db, fc, slog.New(slog.NewTextHandler(io.Discard, nil)), false)
+	p.SetEagerSyncer(syncer)
+
+	report, err := p.Push(context.Background(), "u1", true)
+	if err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+	if report.FireflyTxnID != 7951 {
+		t.Errorf("firefly_txn_id=%d, want 7951", report.FireflyTxnID)
+	}
+	if getCalls.Load() != 1 {
+		t.Errorf("expected exactly 1 GET /transactions/7951 (eager mirror), got %d", getCalls.Load())
+	}
+
+	// The just-pushed journal must now be in firefly_txns with notes
+	// populated. The very next classify cycle's FTS index sees this
+	// row's narration→merchant mapping.
+	var notes string
+	if err := s.db.DB.QueryRow(`SELECT COALESCE(notes,'') FROM firefly_txns WHERE firefly_id=7951`).Scan(&notes); err != nil {
+		t.Fatalf("eager-mirrored row missing: %v", err)
+	}
+	if notes != "CARD/x/Cake Palace/Rs/70.00/OUTGOING" {
+		t.Errorf("eager-mirrored notes = %q, want raw narration", notes)
+	}
+}
+
 // TestPush_DescriptionFallback_Merchant: when proposed_description is
 // empty (typical for Tier-1/Tier-2-classified rows the LLM didn't
 // fill), the description falls back to merchant_extracted rather

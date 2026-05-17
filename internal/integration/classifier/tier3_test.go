@@ -511,6 +511,76 @@ func TestTier3_PromptHasTimeContextAndStyleSamples(t *testing.T) {
 	}
 }
 
+// TestTier3_PromptIncludesHistoricalNotes: when a firefly_txn carries
+// a `notes` field with the raw fold narration (e.g.
+// `CARD/.../SHREE VINAYAKA ENTE/...` filed under "Sri Udupi Park,
+// Indiranagar"), the Tier-3 prompt's HISTORICAL EXAMPLES block must
+// surface that notes string so the LLM can map a future fold txn
+// with the same truncated merchant name to the right firefly
+// destination. This is the data path that closes the
+// "in the age of AI, why doesn't it know?" gap.
+func TestTier3_PromptIncludesHistoricalNotes(t *testing.T) {
+	db := seedTestDB(t)
+
+	// Seed a historical firefly_txn whose `notes` field contains the
+	// raw fold narration. The destination is the firefly-canonical
+	// merchant; the narration is the bank-side string. FTS5 must
+	// find this row when the staged row's merchant tokens match
+	// against `notes`.
+	if _, err := db.Exec(`
+		INSERT INTO firefly_txns (firefly_id, group_id, txn_type, amount_paise, currency, date,
+		    source_account_id, source_account_name,
+		    destination_account_id, destination_account_name, destination_account_name_normalized,
+		    category_id, category_name, description, tags_json, notes)
+		VALUES (8001, 8001, 'withdrawal', 6000, 'INR', '2025-12-23',
+		    1, 'Tata Neu HDFC Bank Credit Card',
+		    501, 'Sri Udupi Park, Indiranagar', 'sri udupi park, indiranagar',
+		    5, 'Food', 'Morning Filter Coffee and Kesari Bath', '[]',
+		    'CARD/19b4989b2e3afba8/SHREE VINAYAKA ENTE/Rs./60.00/OUTGOING/23-12-25')
+	`); err != nil {
+		t.Fatalf("seed historical notes row: %v", err)
+	}
+
+	var capturedPrompt string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		capturedPrompt = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"index":0,"message":{"role":"assistant","content":"{\"confidence\":0.1}"},"finish_reason":"stop"}],"usage":{}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	c := New(db, slog.Default(), DefaultConfidenceThreshold, 10)
+	c.SetLLM(llm.NewClient("k", "", srv.URL, srv.Client()))
+
+	// Staged row whose narration matches the historical notes. FTS
+	// query uses MerchantExtracted ("shree vinayaka ente") — tokens
+	// "shree", "vinayaka", "ente" all appear in the historical row's
+	// `notes`. BM25 must find the row → it appears in HISTORICAL
+	// EXAMPLES → the prompt carries the notes string.
+	_, _ = c.ClassifyOne(context.Background(), StagedRow{
+		FoldUUID:          "tier3-notes",
+		Narration:         "CARD/19b4989b2e3afba8/SHREE VINAYAKA ENTE/Rs./60.00/OUTGOING/23-12-25",
+		Mode:              "CARD",
+		Type:              "OUTGOING",
+		MerchantExtracted: "shree vinayaka ente",
+		TxnTimestamp:      "2026-05-17T10:00:00Z",
+		RawPayload:        `{"uuid":"tier3-notes"}`,
+	})
+
+	if !strings.Contains(capturedPrompt, "HISTORICAL EXAMPLES") {
+		t.Fatalf("prompt missing HISTORICAL EXAMPLES block")
+	}
+	if !strings.Contains(capturedPrompt, "SHREE VINAYAKA ENTE") {
+		t.Errorf("prompt missing the raw narration from notes — Tier-2/3 can't bridge bank↔merchant without it. snippet:\n%s",
+			snippet(capturedPrompt, "HISTORICAL"))
+	}
+	if !strings.Contains(capturedPrompt, "Sri Udupi Park, Indiranagar") {
+		t.Errorf("prompt missing canonical destination, snippet:\n%s",
+			snippet(capturedPrompt, "HISTORICAL"))
+	}
+}
+
 // TestTier3_KeepsDescriptionOnLowConfidence: when the LLM returns
 // ok=false (low structural confidence on ids), we still want its
 // description_suggestion to flow through onto the Tier-1/2 fallback

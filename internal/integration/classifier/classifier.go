@@ -283,6 +283,12 @@ func (c *Classifier) tierOneMerchantLookup(ctx context.Context, staged StagedRow
 		CategoryName:           row.CategoryName,
 		BudgetID:               ptrIfSet(row.BudgetID, row.BudgetIDValid),
 		BudgetName:             row.BudgetName,
+		// Description from merchant_lookup is the most-recent description
+		// the operator confirmed for this merchant. Surfacing it here
+		// lets Tier-1 hits ship with a voice-matched title — same
+		// signal the Tier-3 LLM would produce, but without an LLM call.
+		// Empty is fine; the Pusher's fallback chain takes over.
+		Description: row.ModalDescription,
 		Evidence: Evidence{
 			Tier:               TierMerchantLookup,
 			MerchantNormalized: staged.MerchantExtracted,
@@ -302,32 +308,35 @@ func (c *Classifier) tierOneMerchantLookup(ctx context.Context, staged StagedRow
 // nullability flags so we can distinguish "no source account" (column
 // is NULL) from "id 0" (impossible but safe to model).
 type merchantLookupRow struct {
-	DestinationAccountID      int64
-	DestinationAccountName    string
-	SourceAccountID           int64
-	SourceAccountIDValid      bool
-	SourceAccountName         string
-	CategoryID                int64
-	CategoryIDValid           bool
-	CategoryName              string
-	BudgetID                  int64
-	BudgetIDValid             bool
-	BudgetName                string
-	SampleSize                int
-	Confidence                float64
+	DestinationAccountID   int64
+	DestinationAccountName string
+	SourceAccountID        int64
+	SourceAccountIDValid   bool
+	SourceAccountName      string
+	CategoryID             int64
+	CategoryIDValid        bool
+	CategoryName           string
+	BudgetID               int64
+	BudgetIDValid          bool
+	BudgetName             string
+	ModalDescription       string
+	SampleSize             int
+	Confidence             float64
 }
 
 func (c *Classifier) queryMerchantLookup(ctx context.Context, merchantNorm string) (merchantLookupRow, error) {
 	var (
-		row              merchantLookupRow
-		srcID, catID, bID sql.NullInt64
+		row                     merchantLookupRow
+		srcID, catID, bID       sql.NullInt64
 		srcName, catName, bName sql.NullString
+		modalDesc               sql.NullString
 	)
 	err := c.db.QueryRowContext(ctx, `
 		SELECT modal_destination_account_id, modal_destination_account_name,
 		       modal_source_account_id, modal_source_account_name,
 		       modal_category_id, modal_category_name,
 		       modal_budget_id, modal_budget_name,
+		       modal_description,
 		       sample_size, confidence
 		FROM merchant_lookup
 		WHERE merchant_normalized = ?
@@ -336,6 +345,7 @@ func (c *Classifier) queryMerchantLookup(ctx context.Context, merchantNorm strin
 		&srcID, &srcName,
 		&catID, &catName,
 		&bID, &bName,
+		&modalDesc,
 		&row.SampleSize, &row.Confidence,
 	)
 	if err != nil {
@@ -352,6 +362,9 @@ func (c *Classifier) queryMerchantLookup(ctx context.Context, merchantNorm strin
 	row.BudgetID, row.BudgetIDValid = bID.Int64, bID.Valid
 	if bName.Valid {
 		row.BudgetName = bName.String
+	}
+	if modalDesc.Valid {
+		row.ModalDescription = modalDesc.String
 	}
 	return row, nil
 }

@@ -260,6 +260,13 @@ type tier3Hit struct {
 	Date                   time.Time
 	Score                  float64
 	TagsJSON               string
+	// Notes is the raw narration the operator (or our v0.6.0+ push)
+	// stored on the firefly transaction. Often contains fold's truncated
+	// merchant string verbatim — e.g. "CARD/.../SHREE VINAYAKA ENTE/..."
+	// which links to firefly's friendlier "Sri Udupi Park, Indiranagar".
+	// Surfacing this in the prompt is what teaches the LLM the
+	// narration↔merchant mapping that's otherwise invisible.
+	Notes                  string
 }
 
 // gatherTier3Inputs assembles every slice of context the prompt needs.
@@ -335,6 +342,7 @@ func (c *Classifier) retrieveTier3Candidates(ctx context.Context, staged StagedR
 		       t.category_id,            t.category_name,
 		       t.budget_id,              t.budget_name,
 		       t.description,            t.date, t.tags_json,
+		       COALESCE(t.notes, ''),
 		       bm25(firefly_txns_fts)    AS score
 		FROM firefly_txns_fts
 		JOIN firefly_txns t ON t.firefly_id = firefly_txns_fts.rowid
@@ -363,7 +371,7 @@ func (c *Classifier) retrieveTier3Candidates(ctx context.Context, staged StagedR
 			&h.SourceAccountID, &sn,
 			&h.CategoryID, &cn,
 			&h.BudgetID, &bn,
-			&h.Description, &dateStr, &tagsJS, &h.Score,
+			&h.Description, &dateStr, &tagsJS, &h.Notes, &h.Score,
 		); err != nil {
 			return nil, err
 		}
@@ -570,7 +578,17 @@ func buildTier3Prompt(staged StagedRow, in tier3Inputs) string {
 			if h.TagsJSON != "" && h.TagsJSON != "[]" {
 				b.WriteString(fmt.Sprintf("    tags=%s\n", h.TagsJSON))
 			}
+			// Notes carries the raw fold narration the operator (or a
+			// recent v0.6.0+ push) stored on this firefly transaction.
+			// Often contains the bank's truncated merchant string
+			// verbatim — the LLM uses it to map "SHREE VINAYAKA ENTE"
+			// in the current staged narration to this row's clean
+			// destination ("Sri Udupi Park, Indiranagar").
+			if h.Notes != "" {
+				b.WriteString(fmt.Sprintf("    notes=%q\n", h.Notes))
+			}
 		}
+		b.WriteString("\nWhen the current fold transaction's narration shares tokens with any HISTORICAL EXAMPLE's `notes` field above, that row's destination is a high-confidence match — the user has effectively already mapped this bank string to a firefly merchant. Mirror that mapping unless other signals strongly disagree.\n")
 	} else {
 		b.WriteString("== HISTORICAL EXAMPLES ==\n(none — first time seeing this kind of transaction; rely on inventories.)\n")
 	}

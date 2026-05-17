@@ -57,8 +57,8 @@ func TestOpen_FreshFileMigratesAllExpectedTables(t *testing.T) {
 		`SELECT COUNT(*) FROM goose_db_version WHERE version_id > 0`).Scan(&applied); err != nil {
 		t.Fatalf("goose ledger: %v", err)
 	}
-	if applied != 5 {
-		t.Errorf("expected 5 migrations applied, got %d", applied)
+	if applied != 6 {
+		t.Errorf("expected 6 migrations applied, got %d", applied)
 	}
 }
 
@@ -88,8 +88,8 @@ func TestOpen_IsIdempotent(t *testing.T) {
 		`SELECT COUNT(*) FROM goose_db_version WHERE version_id > 0`).Scan(&applied); err != nil {
 		t.Fatalf("goose ledger: %v", err)
 	}
-	if applied != 5 {
-		t.Errorf("expected 5 migrations after re-open, got %d", applied)
+	if applied != 6 {
+		t.Errorf("expected 6 migrations after re-open, got %d", applied)
 	}
 }
 

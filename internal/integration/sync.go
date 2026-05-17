@@ -166,8 +166,8 @@ INSERT INTO firefly_txns (
     source_account_id, source_account_name,
     destination_account_id, destination_account_name, destination_account_name_normalized,
     category_id, category_name, budget_id, budget_name,
-    description, tags_json, external_id, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    description, tags_json, external_id, notes, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 ON CONFLICT(firefly_id) DO UPDATE SET
     group_id                            = excluded.group_id,
     txn_type                            = excluded.txn_type,
@@ -186,8 +186,45 @@ ON CONFLICT(firefly_id) DO UPDATE SET
     description                         = excluded.description,
     tags_json                           = excluded.tags_json,
     external_id                         = excluded.external_id,
+    notes                               = excluded.notes,
     updated_at                          = CURRENT_TIMESTAMP
 `
+
+// MirrorJournal upserts a single firefly transaction journal into the
+// local mirror. Used by the eager-after-push code path so a freshly
+// created firefly transaction lands in firefly_txns (and firefly_txns_fts
+// via the triggers) within seconds of the push completing — without
+// waiting for the next periodic /admin/firefly/sync to walk the whole
+// corpus.
+//
+// Wraps the existing upsertJournal in its own small transaction so
+// callers don't need to manage one. The FTS triggers fire as part of
+// the same transaction, keeping the index consistent.
+func (s *Syncer) MirrorJournal(ctx context.Context, j firefly.TransactionJournal, groupID int64) error {
+	tx, err := s.db.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("mirror: begin tx: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	stmt, err := tx.PrepareContext(ctx, upsertFireflyTxnSQL)
+	if err != nil {
+		return fmt.Errorf("mirror: prepare upsert: %w", err)
+	}
+	defer stmt.Close()
+	if err := s.upsertJournal(ctx, stmt, groupID, j); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("mirror: commit: %w", err)
+	}
+	committed = true
+	return nil
+}
 
 func (s *Syncer) upsertJournal(ctx context.Context, stmt *sql.Stmt, groupID int64, j firefly.TransactionJournal) error {
 	journalID, err := strconv.ParseInt(j.JournalID, 10, 64)
@@ -226,6 +263,7 @@ func (s *Syncer) upsertJournal(ctx context.Context, stmt *sql.Stmt, groupID int6
 		j.Description,
 		string(tagsJSON),
 		nullIfEmpty(j.ExternalID),
+		nullIfEmpty(j.Notes),
 	)
 	if err != nil {
 		return fmt.Errorf("exec upsert: %w", err)
@@ -249,6 +287,13 @@ func (s *Syncer) rebuildMerchantLookup(ctx context.Context, tx *sql.Tx) (int, er
 	// One CTE per merchant: the latest 30 expense rows. Then GROUP BY
 	// merchant + label combo, keep the most-frequent. This is one query
 	// instead of N+1; SQLite handles it fine for our 7k corpus.
+	//
+	// modal_description is treated separately from the structural fields:
+	// we take the MOST-RECENT non-empty description per merchant rather
+	// than a modal vote, because descriptions vary in specifics
+	// ("Dinner with Tushar", "Dinner with Jojo") and the latest is more
+	// useful than the most-frequent. The operator edits during review
+	// before push if the specifics differ.
 	const buildSQL = `
 WITH ranked AS (
     SELECT
@@ -262,6 +307,7 @@ WITH ranked AS (
         category_name,
         budget_id,
         budget_name,
+        description,
         date,
         ROW_NUMBER() OVER (PARTITION BY destination_account_name_normalized ORDER BY date DESC) AS rn
     FROM firefly_txns
@@ -291,13 +337,26 @@ counts AS (
 sample_sizes AS (
     SELECT norm, COUNT(*) AS sample_size FROM recent GROUP BY norm
 ),
+latest_descriptions AS (
+    SELECT norm,
+           description AS modal_description
+    FROM (
+        SELECT norm, description,
+               ROW_NUMBER() OVER (PARTITION BY norm ORDER BY date DESC) AS rn_desc
+        FROM recent
+        WHERE description IS NOT NULL AND TRIM(description) <> ''
+    )
+    WHERE rn_desc = 1
+),
 ranked_combos AS (
     SELECT
         c.*,
         s.sample_size,
+        ld.modal_description,
         ROW_NUMBER() OVER (PARTITION BY c.norm ORDER BY c.combo_count DESC, c.last_seen DESC) AS combo_rank
     FROM counts c
     JOIN sample_sizes s USING (norm)
+    LEFT JOIN latest_descriptions ld USING (norm)
 )
 INSERT INTO merchant_lookup (
     merchant_normalized,
@@ -305,6 +364,7 @@ INSERT INTO merchant_lookup (
     modal_source_account_id,      modal_source_account_name,
     modal_category_id,            modal_category_name,
     modal_budget_id,              modal_budget_name,
+    modal_description,
     sample_size, confidence, last_seen
 )
 SELECT
@@ -313,6 +373,7 @@ SELECT
     source_account_id,      source_account_name,
     category_id,            category_name,
     budget_id,              budget_name,
+    modal_description,
     sample_size,
     CAST(combo_count AS REAL) / CAST(sample_size AS REAL),
     last_seen
