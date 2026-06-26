@@ -53,16 +53,25 @@
     .chip { display:inline-block; padding:3px 10px; border-radius:99px; background:rgba(124,92,255,0.12); color:var(--accent); border:1px solid rgba(124,92,255,0.3); font-size:11px; cursor:pointer; user-select:none; }
     .chip:hover { background:rgba(124,92,255,0.22); }
     small.hint { color:var(--muted); font-size:11px; display:block; margin-top:3px; }
+    header nav a.active { color:var(--fg); font-weight:600; }
+    /* Compact per-row status glyphs (reuse the .pill status colours). */
+    .sicon { display:inline-block; width:1.3em; text-align:center; font-weight:700; font-size:14px; cursor:default; }
+    .sicon-pending { color:var(--muted); }
+    .sicon-needs_review { color:var(--warn); }
+    .sicon-ready_to_push { color:var(--accent); }
+    .sicon-pushed { color:var(--ok); }
+    .sicon-skipped { color:var(--err); }
   </style>
 </head>
 <body>
   <header>
     <h1>texas-fold-em</h1>
     <nav>
-      <a href="/admin/ui/?status=needs_review">needs review</a>
-      <a href="/admin/ui/?status=ready_to_push">ready to push</a>
-      <a href="/admin/ui/?status=pushed">pushed</a>
-      <a href="/admin/ui/?status=pending">pending</a>
+      <a href="/admin/ui/?status=all"{{if eq .Status "all"}} class="active"{{end}}>all</a>
+      <a href="/admin/ui/?status=needs_review"{{if eq .Status "needs_review"}} class="active"{{end}}>needs review</a>
+      <a href="/admin/ui/?status=ready_to_push"{{if eq .Status "ready_to_push"}} class="active"{{end}}>ready to push</a>
+      <a href="/admin/ui/?status=pushed"{{if eq .Status "pushed"}} class="active"{{end}}>pushed</a>
+      <a href="/admin/ui/?status=pending"{{if eq .Status "pending"}} class="active"{{end}}>pending</a>
     </nav>
   </header>
   <main>

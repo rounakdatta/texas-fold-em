@@ -561,6 +561,51 @@ func TestUI_Save_NewDestinationName(t *testing.T) {
 	}
 }
 
+// TestUI_IndexAllStatus: the "all" view lists rows of every status (no
+// status filter), renders a per-row colour-coded status icon, and marks
+// the "all" nav tab active.
+func TestUI_IndexAllStatus(t *testing.T) {
+	u := newUITestHarness(t, AuthModeBypass)
+	// Harness seeds rev-1 (needs_review, merchant "cake palace"). Add one
+	// ready_to_push and one pushed so "all" spans three statuses.
+	if _, err := u.db.DB.Exec(`
+		INSERT INTO staged_fold_txns (fold_uuid, raw_payload, amount_paise, currency, txn_timestamp,
+		    mode, type, narration, merchant_extracted, status)
+		VALUES ('rtp-1','{}',2500,'INR','2026-05-09T10:00:00Z','CARD','OUTGOING','x','zomato','ready_to_push'),
+		       ('psh-1','{}',3500,'INR','2026-05-09T11:00:00Z','CARD','OUTGOING','x','swiggy','pushed')
+	`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	resp := u.do(t, "GET", "/admin/ui/?status=all", nil)
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	s, _ := io.ReadAll(resp.Body)
+	body := string(s)
+
+	// All three statuses' rows are present.
+	for _, m := range []string{"cake palace", "zomato", "swiggy"} {
+		if !strings.Contains(body, m) {
+			t.Errorf("all view missing merchant %q", m)
+		}
+	}
+	if !strings.Contains(body, "all (3)") {
+		t.Errorf("expected heading 'all (3)', got: %q", snippet(body, "all ("))
+	}
+	// Per-row status icons for the mixed statuses.
+	for _, cls := range []string{"sicon-needs_review", "sicon-ready_to_push", "sicon-pushed"} {
+		if !strings.Contains(body, cls) {
+			t.Errorf("all view missing status icon %q", cls)
+		}
+	}
+	// The "all" nav tab is highlighted as active.
+	if !strings.Contains(body, `?status=all" class="active"`) {
+		t.Errorf("expected the 'all' nav tab to be marked active")
+	}
+}
+
 // TestUI_Skip_Persists transitions to skipped without touching firefly.
 func TestUI_Skip_Persists(t *testing.T) {
 	u := newUITestHarness(t, AuthModeBypass)
