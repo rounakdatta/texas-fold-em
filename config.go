@@ -44,6 +44,13 @@ type Config struct {
 	// production. Required when the integration is enabled.
 	FireflyPAT string // TEXAS_FOLDEM_FIREFLY_PAT           required when integration enabled
 
+	// FireflyPublicURL is the user-facing firefly base (e.g.
+	// https://firefly.example.com) used only to build review-UI deep
+	// links to pushed transactions. Optional — unset means the UI shows
+	// no firefly links. Distinct from FireflyBase (the in-cluster API URL,
+	// which isn't reachable from a browser).
+	FireflyPublicURL string // TEXAS_FOLDEM_FIREFLY_PUBLIC_URL   optional
+
 	// LLMAPIKey is an OpenAI-compatible API key — DeepSeek by default,
 	// but any host speaking the OpenAI chat-completions protocol works
 	// (OpenAI itself, Groq, a local vLLM, etc.). Optional: when unset,
@@ -123,6 +130,7 @@ func LoadConfig() (Config, error) {
 		StagingDBPath:       envStr("TEXAS_FOLDEM_STAGING_DB_PATH", filepath.Join(home, ".texas-fold-em", "staging.db")),
 		FireflyBase:         strings.TrimRight(envStr("TEXAS_FOLDEM_FIREFLY_BASE", "http://firefly.apps.svc.cluster.local:8080"), "/"),
 		FireflyPAT:          os.Getenv("TEXAS_FOLDEM_FIREFLY_PAT"),
+		FireflyPublicURL:    strings.TrimRight(os.Getenv("TEXAS_FOLDEM_FIREFLY_PUBLIC_URL"), "/"),
 		LLMAPIKey:           os.Getenv("TEXAS_FOLDEM_LLM_API_KEY"),
 		LLMModel:            envStr("TEXAS_FOLDEM_LLM_MODEL", "deepseek-v4-flash"),
 		LLMBaseURL:          strings.TrimRight(envStr("TEXAS_FOLDEM_LLM_BASE_URL", "https://api.deepseek.com/v1"), "/"),

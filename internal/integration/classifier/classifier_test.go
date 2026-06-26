@@ -266,17 +266,71 @@ func TestClassifyPending_OrchestratesAndPersists(t *testing.T) {
 	}
 }
 
+// TestReclassifyUUIDs re-runs the classifier on a specific row set:
+// non-pushed rows are reprocessed, pushed rows are skipped (terminal,
+// already in firefly), and unknown ids are ignored.
+func TestReclassifyUUIDs(t *testing.T) {
+	db := seedTestDB(t)
+	c := New(db, slog.Default(), DefaultConfidenceThreshold, 10) // no LLM → deterministic
+
+	// A needs_review zomato row (Tier-1 lookup will claim it) + a pushed
+	// zomato row that must be left untouched.
+	if _, err := db.Exec(`
+		INSERT INTO staged_fold_txns (fold_uuid, raw_payload, amount_paise, currency, txn_timestamp,
+		    mode, type, narration, merchant_extracted, status)
+		VALUES ('rc-1','{}',5000,'INR','2026-05-08T10:00:00Z','CARD','OUTGOING','x','zomato','needs_review'),
+		       ('rc-pushed','{}',6000,'INR','2026-05-08T11:00:00Z','CARD','OUTGOING','x','zomato','pushed')
+	`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	rep, err := c.ReclassifyUUIDs(context.Background(), []string{"rc-1", "rc-pushed", "does-not-exist"})
+	if err != nil {
+		t.Fatalf("ReclassifyUUIDs: %v", err)
+	}
+	if rep.Examined != 1 {
+		t.Errorf("examined=%d, want 1 (pushed + missing skipped)", rep.Examined)
+	}
+
+	// rc-1 → Tier-1 lookup hit (zomato is in merchant_lookup), ready_to_push.
+	var tier int
+	var status string
+	if err := db.QueryRow(`SELECT classifier_tier, status FROM staged_fold_txns WHERE fold_uuid='rc-1'`).Scan(&tier, &status); err != nil {
+		t.Fatal(err)
+	}
+	if tier != int(TierMerchantLookup) {
+		t.Errorf("rc-1 tier=%d, want %d", tier, TierMerchantLookup)
+	}
+	if status != "ready_to_push" {
+		t.Errorf("rc-1 status=%q, want ready_to_push", status)
+	}
+
+	// rc-pushed is untouched.
+	var pStatus string
+	if err := db.QueryRow(`SELECT status FROM staged_fold_txns WHERE fold_uuid='rc-pushed'`).Scan(&pStatus); err != nil {
+		t.Fatal(err)
+	}
+	if pStatus != "pushed" {
+		t.Errorf("rc-pushed status=%q, want pushed (untouched)", pStatus)
+	}
+
+	// Empty set → no-op.
+	if rep2, err := c.ReclassifyUUIDs(context.Background(), nil); err != nil || rep2.Examined != 0 {
+		t.Errorf("empty reclassify: rep=%+v err=%v", rep2, err)
+	}
+}
+
 // TestBuildFTSQuery covers the FTS5 escaping. Borderline merchant names
 // (apostrophes, ampersands, Unicode) should not produce malformed FTS5
 // expressions.
 func TestBuildFTSQuery(t *testing.T) {
 	cases := map[string]string{
-		"":                "",
-		"zomato":          `"zomato"`,
-		"cake palace":     `"cake" OR "palace"`,
-		"at&t":            `"at&t"`,
-		"m&s food":        `"m&s" OR "food"`,
-		`some "quoted"`:   `"some" OR """quoted"""`,
+		"":              "",
+		"zomato":        `"zomato"`,
+		"cake palace":   `"cake" OR "palace"`,
+		"at&t":          `"at&t"`,
+		"m&s food":      `"m&s" OR "food"`,
+		`some "quoted"`: `"some" OR """quoted"""`,
 	}
 	for in, want := range cases {
 		if got := buildFTSQuery(in); got != want {

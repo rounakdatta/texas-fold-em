@@ -37,6 +37,7 @@ import (
 	"time"
 
 	"github.com/rounakdatta/texas-fold-em/internal/integration"
+	"github.com/rounakdatta/texas-fold-em/internal/integration/classifier"
 )
 
 //go:embed templates/*.html
@@ -71,7 +72,23 @@ type Handler struct {
 	auth       AuthMode
 	indexTmpl  *template.Template
 	detailTmpl *template.Template
+	// fireflyPublicURL is the user-facing firefly base (e.g.
+	// https://firefly.taptappers.club) for deep-linking pushed rows to
+	// their firefly transaction. Empty disables the links. Distinct from
+	// the integration's internal FIREFLY_BASE (the in-cluster API URL).
+	fireflyPublicURL string
+	// cls enables the reclassify-selected action. Optional; when nil the
+	// review list's reclassify button reports it's unavailable.
+	cls *classifier.Classifier
 }
+
+// SetFireflyPublicURL sets the user-facing firefly base used to link
+// pushed rows to their firefly transaction (trailing slash trimmed).
+func (h *Handler) SetFireflyPublicURL(u string) { h.fireflyPublicURL = strings.TrimRight(u, "/") }
+
+// SetClassifier wires the classifier so the review UI can reclassify
+// selected rows on demand. Optional.
+func (h *Handler) SetClassifier(c *classifier.Classifier) { h.cls = c }
 
 // New constructs a UI Handler.
 func New(db *sql.DB, pusher *integration.Pusher, log *slog.Logger, adminKey string, auth AuthMode) (*Handler, error) {
@@ -79,7 +96,7 @@ func New(db *sql.DB, pusher *integration.Pusher, log *slog.Logger, adminKey stri
 	// every link preserves the active filter set without hand-built
 	// querystrings. Registered on both templates for uniformity even
 	// though only the index references it today.
-	funcs := template.FuncMap{"filterURL": filterURL, "statusBadge": statusBadge}
+	funcs := template.FuncMap{"filterURL": filterURL, "statusBadge": statusBadge, "confidenceBar": confidenceBar}
 	indexTmpl, err := template.New("layout.html").Funcs(funcs).ParseFS(tmplFS, "templates/layout.html", "templates/index.html")
 	if err != nil {
 		return nil, fmt.Errorf("parse index template: %w", err)
@@ -113,6 +130,7 @@ func (h *Handler) Mount(mux *http.ServeMux) {
 	mux.Handle("POST /admin/ui/staged/{fold_uuid}/save", h.withAuth(h.handleSave))
 	mux.Handle("POST /admin/ui/staged/{fold_uuid}/push", h.withAuth(h.handlePush))
 	mux.Handle("POST /admin/ui/staged/{fold_uuid}/skip", h.withAuth(h.handleSkip))
+	mux.Handle("POST /admin/ui/reclassify", h.withAuth(h.handleReclassify))
 	if h.auth == AuthModeCookie {
 		mux.HandleFunc("GET /admin/ui/login", h.handleLogin)
 	}
@@ -178,6 +196,14 @@ type indexRow struct {
 	// overrides proposed), resolved to a firefly name. Empty when the
 	// row has no source account yet (common for pending/needs_review).
 	SourceAccountName string
+	// DestinationName is the effective destination: the confirmed/proposed
+	// destination account name, else a C2 proposed-new-account name, else
+	// the raw extracted merchant as a fallback.
+	DestinationName string
+	// FireflyURL deep-links a pushed row to the firefly transaction it
+	// created. Empty unless the row is pushed, the public firefly URL is
+	// configured, and the group id is resolvable from the mirror.
+	FireflyURL string
 }
 
 // listFilters is the set of WHERE constraints the index list honours.
@@ -263,6 +289,30 @@ func statusBadge(status string) template.HTML {
 			template.HTMLEscapeString(status)))
 	}
 	return template.HTML(fmt.Sprintf(`<span class="sicon sicon-%s" title="%s">%s</span>`, status, label, glyph))
+}
+
+// confidenceBar renders the classifier confidence (0..1) as a small
+// battery-style gauge — a fill proportional to the score, coloured by
+// band (high/mid/low), with the numeric value alongside. Zero/absent
+// confidence (e.g. a Tier-4 row with no score) shows a dash.
+func confidenceBar(conf float64) template.HTML {
+	if conf <= 0 {
+		return template.HTML(`<span class="conf-na" title="no score">—</span>`)
+	}
+	pct := int(conf*100 + 0.5)
+	if pct > 100 {
+		pct = 100
+	}
+	level := "low"
+	switch {
+	case conf >= 0.85:
+		level = "high"
+	case conf >= 0.6:
+		level = "mid"
+	}
+	return template.HTML(fmt.Sprintf(
+		`<span class="batt batt-%s" title="confidence %.2f"><span class="batt-fill" style="width:%d%%"></span></span><span class="conf-num">%.2f</span>`,
+		level, conf, pct, conf))
 }
 
 // defaultPerPage / maxPerPage bound the list query. 50 keeps the
@@ -383,7 +433,15 @@ func (h *Handler) listRows(ctx context.Context, f listFilters, limit, offset int
 		       (SELECT category_name FROM firefly_txns
 		         WHERE category_id = s.proposed_category_id LIMIT 1),
 		       (SELECT source_account_name FROM firefly_txns
-		         WHERE source_account_id = COALESCE(s.confirmed_source_account_id, s.proposed_source_account_id) LIMIT 1)
+		         WHERE source_account_id = COALESCE(s.confirmed_source_account_id, s.proposed_source_account_id) LIMIT 1),
+		       COALESCE(
+		         (SELECT destination_account_name FROM firefly_txns
+		           WHERE destination_account_id = COALESCE(s.confirmed_destination_account_id, s.proposed_destination_account_id) LIMIT 1),
+		         NULLIF(s.confirmed_destination_account_name, ''),
+		         NULLIF(s.proposed_destination_account_name, ''),
+		         NULLIF(s.merchant_extracted, '')
+		       ),
+		       (SELECT group_id FROM firefly_txns WHERE firefly_id = s.firefly_txn_id LIMIT 1)
 		FROM staged_fold_txns s
 		WHERE ` + where + `
 		ORDER BY s.txn_timestamp DESC
@@ -403,10 +461,12 @@ func (h *Handler) listRows(ctx context.Context, f listFilters, limit, offset int
 			conf        sql.NullFloat64
 			catName     sql.NullString
 			srcName     sql.NullString
+			destName    sql.NullString
+			groupID     sql.NullInt64
 			tsStr       string
 		)
 		if err := rows.Scan(&r.FoldUUID, &tsStr, &amountPaise, &r.Currency, &r.Mode, &r.Type,
-			&r.MerchantExtracted, &r.Status, &tier, &conf, &catName, &srcName); err != nil {
+			&r.MerchantExtracted, &r.Status, &tier, &conf, &catName, &srcName, &destName, &groupID); err != nil {
 			return nil, err
 		}
 		// Two views of the timestamp: a server-rendered fallback for
@@ -433,6 +493,15 @@ func (h *Handler) listRows(ctx context.Context, f listFilters, limit, offset int
 		}
 		if srcName.Valid {
 			r.SourceAccountName = srcName.String
+		}
+		if destName.Valid {
+			r.DestinationName = destName.String
+		}
+		// Deep-link pushed rows to their firefly transaction (group id
+		// resolved from the mirror). firefly's web route is
+		// /transactions/show/{groupId}.
+		if r.Status == "pushed" && h.fireflyPublicURL != "" && groupID.Valid {
+			r.FireflyURL = h.fireflyPublicURL + "/transactions/show/" + strconv.FormatInt(groupID.Int64, 10)
 		}
 		out = append(out, r)
 	}
@@ -685,6 +754,51 @@ func (h *Handler) handleSkip(w http.ResponseWriter, r *http.Request) {
 	}
 	h.flashOk(w, "marked skipped")
 	http.Redirect(w, r, "/admin/ui/?status=needs_review", http.StatusSeeOther)
+}
+
+// handleReclassify re-runs the classifier on the selected fold_uuids —
+// the review list's "reclassify selected" action, for backfilling
+// already-processed transactions on demand. Skips pushed rows and
+// preserves human-confirmed fields (see classifier.ReclassifyUUIDs).
+func (h *Handler) handleReclassify(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	// "back" returns the user to the list+filters they came from. Only
+	// honour our own relative paths (no open redirect).
+	back := r.FormValue("back")
+	if !strings.HasPrefix(back, "/admin/ui/") {
+		back = "/admin/ui/"
+	}
+	if h.cls == nil {
+		h.flashErr(w, "reclassify is unavailable (no classifier configured)")
+		http.Redirect(w, r, back, http.StatusSeeOther)
+		return
+	}
+	uuids := r.Form["fold_uuids"]
+	if len(uuids) == 0 {
+		h.flashErr(w, "no transactions selected to reclassify")
+		http.Redirect(w, r, back, http.StatusSeeOther)
+		return
+	}
+	// Each row is one LLM call (the classifier fans them out concurrently).
+	// Budget generously and extend the write deadline so even a large
+	// selection finishes and still returns a response.
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Minute)
+	defer cancel()
+	if rc := http.NewResponseController(w); rc != nil {
+		_ = rc.SetWriteDeadline(time.Now().Add(35 * time.Minute))
+	}
+	report, err := h.cls.ReclassifyUUIDs(ctx, uuids)
+	if err != nil {
+		h.flashErr(w, "reclassify failed: "+err.Error())
+		http.Redirect(w, r, back, http.StatusSeeOther)
+		return
+	}
+	h.flashOk(w, fmt.Sprintf("reclassified %d — %d ready, %d need review",
+		report.Examined, report.AutoClassified, report.NeedsReview))
+	http.Redirect(w, r, back, http.StatusSeeOther)
 }
 
 // saveEdits writes form values to the confirmed_* columns. Names from
