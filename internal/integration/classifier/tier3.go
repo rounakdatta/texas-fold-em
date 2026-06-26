@@ -159,22 +159,18 @@ func (c *Classifier) tierThreeLLM(ctx context.Context, staged StagedRow, tier1Hi
 	// firefly POST will 422.
 	if llm.Confidence < 0.5 || llm.DestinationAccountID == nil || llm.SourceAccountID == nil {
 		// Structural decision rejected, but the LLM's description is
-		// independent of the structural confidence — it's based on
-		// STYLE SAMPLES and TIME CONTEXT, which are valid signals
-		// regardless of whether the model could pin the right ids.
-		// Attach it to whichever Tier-1/Tier-2 hint we're about to
-		// fall through to, so the title for the row isn't lost.
+		// independent of structural confidence — it's built from STYLE
+		// SAMPLES + TIME CONTEXT, valid regardless of whether the model
+		// could pin the right ids. Return it on an ok=false Decision so
+		// ClassifyOne can graft it onto whatever fallback it lands on —
+		// Tier 1, Tier 2, OR the Tier-4 human-review default. (The old
+		// in-tier graft could only reach Tier-1/Tier-2 hints, so a row
+		// with no deterministic hit lost the title entirely.)
+		salvage := Decision{Tier: TierLLM}
 		if llm.DescriptionSuggestion != nil {
-			if d := strings.TrimSpace(*llm.DescriptionSuggestion); d != "" {
-				switch {
-				case tier1Hint != nil:
-					tier1Hint.Description = d
-				case tier2Hint != nil:
-					tier2Hint.Description = d
-				}
-			}
+			salvage.Description = strings.TrimSpace(*llm.DescriptionSuggestion)
 		}
-		return Decision{}, false, nil
+		return salvage, false, nil
 	}
 
 	// Resolve human-readable names for the UI's display from any of

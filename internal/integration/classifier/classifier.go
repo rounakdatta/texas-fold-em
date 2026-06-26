@@ -210,6 +210,14 @@ func (c *Classifier) ClassifyOne(ctx context.Context, staged StagedRow) (Decisio
 		tier2Hint = &dCopy
 	}
 
+	// salvagedDesc carries a title the LLM produced even when its
+	// structural decision was rejected (low confidence / unpinned ids).
+	// The title is built from STYLE SAMPLES + TIME CONTEXT and is valid
+	// regardless of whether the model could pin the right account ids, so
+	// we graft it onto whatever fallback we land on below — including the
+	// Tier-4 human-review default, which the previous in-tier graft
+	// couldn't reach (it left the reviewer with a blank title).
+	var salvagedDesc string
 	if c.llm != nil {
 		if d, ok, err := c.tierThreeLLM(ctx, staged, tier1Hint, tier2Hint); err != nil {
 			// Tier-3 transport / parse / hallucination failure. If a
@@ -229,19 +237,31 @@ func (c *Classifier) ClassifyOne(ctx context.Context, staged StagedRow) (Decisio
 				"fold_uuid", staged.FoldUUID, "err", err)
 		} else if ok {
 			return d, nil
+		} else {
+			// LLM declined to commit structurally, but may have nailed
+			// the title — keep it for whichever fallback we use.
+			salvagedDesc = d.Description
 		}
 	}
 
-	// Fallback ladder: prefer the more confident deterministic tier.
+	// Fallback ladder: prefer the more confident deterministic tier, and
+	// carry the salvaged LLM title onto whichever one we use.
 	if tier1Hint != nil {
+		if salvagedDesc != "" {
+			tier1Hint.Description = salvagedDesc
+		}
 		return *tier1Hint, nil
 	}
 	if tier2Hint != nil {
+		if salvagedDesc != "" {
+			tier2Hint.Description = salvagedDesc
+		}
 		return *tier2Hint, nil
 	}
 	return Decision{
-		Tier:       TierHumanReview,
-		Confidence: 0,
+		Tier:        TierHumanReview,
+		Confidence:  0,
+		Description: salvagedDesc,
 		Evidence: Evidence{
 			Tier:               TierHumanReview,
 			MerchantNormalized: staged.MerchantExtracted,
@@ -541,28 +561,62 @@ func modeAccount[T any](hits []T, pick func(T) (sql.NullInt64, sql.NullString)) 
 		conf
 }
 
-// buildFTSQuery turns a normalised merchant string into an FTS5
-// expression. We use phrase matching by default ("zomato pvt ltd" →
-// docs containing all three tokens in order, then any order, then
-// partial). FTS5 syntax docs: https://www.sqlite.org/fts5.html#full_text_query_syntax
+// ftsStopwords are tokens we drop before building the FTS5 query.
 //
-// For multi-word merchants we use OR over individual tokens because
-// firefly's destination_account_name often abbreviates ("Zomato" vs
-// fold's "Zomato Limited"). False-positives go through the modal vote
-// which surfaces real signals; OR doesn't hurt precision much.
+// Bank/UPI narrations are littered with location and filler words —
+// "UNITED AIRLINES NEW DELHI IN" — that carry no merchant identity. OR-ed
+// into the query, these match a large, unrelated slice of firefly
+// history, which for a typical user is dominated by their single most
+// frequent category (food). The Tier-2 modal vote then runs over that
+// polluted candidate set and confidently returns the wrong category AND
+// the wrong source card (the modal of the noise), e.g. an airline ticket
+// filed as "Food" on the most-used card. Dropping these leaves only
+// identity-bearing tokens; if none remain, buildFTSQuery returns "" and
+// the caller declines (Tier 2 abstains; Tier-3 retrieval falls back to
+// narration tokens) rather than guessing from noise.
+//
+// We deliberately only strip unambiguous noise. Real merchants almost
+// always retain a distinctive token after filtering ("New Shanti Sagar"
+// → "shanti"/"sagar"), so the risk of nuking a real signal is low. Tuned
+// for Indian card/UPI narrations; extend as new noise classes show up.
+var ftsStopwords = map[string]bool{
+	// filler / connectors
+	"in": true, "the": true, "and": true, "for": true, "of": true, "to": true, "at": true, "on": true,
+	// corporate suffixes
+	"pvt": true, "ltd": true, "limited": true, "private": true, "llp": true, "inc": true, "co": true,
+	// country / common geo qualifiers
+	"india": true, "new": true,
+	// metros — non-discriminative; the same brand appears across cities
+	"delhi": true, "mumbai": true, "bengaluru": true, "bangalore": true,
+	"hyderabad": true, "chennai": true, "kolkata": true, "pune": true,
+	"gurgaon": true, "gurugram": true, "noida": true,
+}
+
+// buildFTSQuery turns a normalised merchant string into an FTS5
+// expression. FTS5 syntax docs: https://www.sqlite.org/fts5.html#full_text_query_syntax
+//
+// For multi-word merchants we OR over individual identity-bearing tokens
+// because firefly's destination_account_name often abbreviates ("Zomato"
+// vs fold's "Zomato Limited"). Stopwords (see ftsStopwords) are dropped
+// first so noise tokens can't drag the modal vote toward an unrelated
+// dominant cluster. Returns "" when nothing identity-bearing remains —
+// the caller treats that as "no usable lexical signal".
 func buildFTSQuery(merchantNorm string) string {
 	tokens := strings.Fields(merchantNorm)
-	if len(tokens) == 0 {
-		return ""
-	}
 	// Quote each token individually to neutralise any FTS5 syntax chars
 	// (e.g., a merchant name like "AT&T" or "M&S"). FTS5 phrase quoting
 	// uses double quotes; double them up to escape an actual " in the
 	// token (rare but possible).
 	quoted := make([]string, 0, len(tokens))
 	for _, t := range tokens {
-		t = strings.ReplaceAll(t, `"`, `""`)
-		quoted = append(quoted, `"`+t+`"`)
+		if ftsStopwords[strings.ToLower(t)] {
+			continue
+		}
+		esc := strings.ReplaceAll(t, `"`, `""`)
+		quoted = append(quoted, `"`+esc+`"`)
+	}
+	if len(quoted) == 0 {
+		return ""
 	}
 	return strings.Join(quoted, " OR ")
 }

@@ -629,6 +629,50 @@ func TestTier3_KeepsDescriptionOnLowConfidence(t *testing.T) {
 	}
 }
 
+// TestTier3_SalvagesDescriptionToHumanReview: when the LLM declines
+// structurally (null ids / low confidence) AND there's no Tier-1 or
+// Tier-2 hint to fall back to, the row goes to human review — but the
+// LLM's title (independent of the id confidence) is preserved so the
+// reviewer isn't handed a blank description. This is the "United
+// Airlines" case: the model nailed the title but couldn't pin a
+// firefly destination account, so it correctly punted the structure.
+func TestTier3_SalvagesDescriptionToHumanReview(t *testing.T) {
+	db := seedTestDB(t)
+	fakeLLM := newFakeLLM(t, `{
+		"txn_type": "withdrawal",
+		"destination_account_id": null,
+		"source_account_id": null,
+		"confidence": 0.2,
+		"description_suggestion": "Flight booking - United Airlines",
+		"reasoning": "clearly an airline ticket, but no matching firefly expense account to pin"
+	}`)
+	t.Cleanup(fakeLLM.Close)
+
+	c := New(db, slog.Default(), DefaultConfidenceThreshold, 10)
+	c.SetLLM(llm.NewClient("k", "", fakeLLM.URL, fakeLLM.Client()))
+
+	// Unfamiliar merchant: not in merchant_lookup, and after stopword
+	// hygiene its FTS query ("united" OR "airlines") matches nothing in
+	// the seeded corpus → no Tier-1/Tier-2 hint. LLM declines structurally.
+	d, err := c.ClassifyOne(context.Background(), StagedRow{
+		FoldUUID:          "ua-salvage",
+		Narration:         "CARD/x/united airlines new delhi in/INR/35161/OUTGOING",
+		Mode:              "CARD",
+		Type:              "OUTGOING",
+		MerchantExtracted: "united airlines new delhi in",
+		RawPayload:        `{"uuid":"ua-salvage","mode":"CARD","type":"OUTGOING"}`,
+	})
+	if err != nil {
+		t.Fatalf("ClassifyOne: %v", err)
+	}
+	if d.Tier != TierHumanReview {
+		t.Errorf("expected Tier 4 human review, got Tier %d", d.Tier)
+	}
+	if d.Description != "Flight booking - United Airlines" {
+		t.Errorf("expected the LLM's title to survive to human review, got %q", d.Description)
+	}
+}
+
 // snippet returns a 200-char window around a substring for error
 // messages — full bodies are several KB and unhelpful to dump.
 func snippet(s, needle string) string {

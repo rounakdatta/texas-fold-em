@@ -140,6 +140,55 @@ func TestClassifyOne_Tier2Hit(t *testing.T) {
 	}
 }
 
+// TestClassifyOne_NoisyTokensDontPullDominantCluster is the regression
+// test for the "United Airlines filed as Food" misclassification.
+//
+// An unfamiliar merchant whose narration shares only noise tokens
+// ("new", "delhi", "in") with the corpus must NOT inherit the dominant
+// (food) cluster via a Tier-2 modal vote. Before FTS stopword hygiene,
+// the OR-of-all-tokens query matched a food row through its `notes`
+// (which contained "new delhi in"), and the modal vote confidently
+// returned Eating-outside + the most-used card. After the fix the noise
+// is dropped, "united"/"airlines" match nothing, and the row correctly
+// drops to human review instead of a confident wrong answer.
+func TestClassifyOne_NoisyTokensDontPullDominantCluster(t *testing.T) {
+	db := seedTestDB(t)
+	// A food row whose NOTES carry the location/filler tokens — exactly
+	// the kind of incidental overlap that polluted the candidate set.
+	if _, err := db.Exec(`
+		INSERT INTO firefly_txns (firefly_id, group_id, txn_type, amount_paise, currency, date,
+		    source_account_id, source_account_name,
+		    destination_account_id, destination_account_name, destination_account_name_normalized,
+		    category_id, category_name, description, tags_json, notes)
+		VALUES (704, 7004, 'withdrawal', 30000, 'INR', '2026-05-05',
+		    1, 'HDFC Card', 11, 'Zomato', 'zomato',
+		    5, 'Eating outside', 'lunch', '[]',
+		    'UPI/zomato order placed in new delhi')
+	`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	c := New(db, slog.Default(), DefaultConfidenceThreshold, 10) // no LLM
+
+	d, err := c.ClassifyOne(context.Background(), StagedRow{
+		FoldUUID:          "ua-1",
+		Narration:         "CARD/x/united airlines new delhi in/INR/35161/OUTGOING",
+		Mode:              "CARD",
+		Type:              "OUTGOING",
+		MerchantExtracted: "united airlines new delhi in",
+	})
+	if err != nil {
+		t.Fatalf("ClassifyOne: %v", err)
+	}
+	if d.Tier == TierFTSVote {
+		t.Errorf("airline booking must not inherit the food cluster via noise tokens; "+
+			"got Tier 2 (category=%q, conf=%.2f)", d.CategoryName, d.Confidence)
+	}
+	if d.Tier != TierHumanReview {
+		t.Errorf("expected Tier 4 human review for the unfamiliar merchant, got Tier %d", d.Tier)
+	}
+}
+
 // TestClassifyOne_NoMerchantNoFTS returns Tier 4 / human review.
 func TestClassifyOne_NoMerchantNoFTS(t *testing.T) {
 	db := seedTestDB(t)
@@ -278,6 +327,13 @@ func TestBuildFTSQuery(t *testing.T) {
 		"m&s food":        `"m&s" OR "food"`,
 		`some "quoted"`:   `"some" OR """quoted"""`,
 	}
+	// Stopword hygiene: location/filler noise ("in", "new", "delhi") and
+	// corporate suffixes ("pvt", "ltd") are dropped so they can't drag the
+	// Tier-2 modal vote toward the user's dominant cluster. Kept as
+	// separate assignments to leave the aligned literal above untouched.
+	cases["united airlines new delhi in"] = `"united" OR "airlines"`
+	cases["zomato pvt ltd"] = `"zomato"`
+	cases["new delhi"] = "" // all-stopword input → no query → caller declines
 	for in, want := range cases {
 		if got := buildFTSQuery(in); got != want {
 			t.Errorf("buildFTSQuery(%q) = %q, want %q", in, got, want)
