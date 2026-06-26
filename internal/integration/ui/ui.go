@@ -1,13 +1,13 @@
 // Package ui is the server-rendered admin UI for the integration.
 // HTML pages at /admin/ui/. The UI lets a human:
 //
-//	- list staged fold transactions filtered by status
-//	- inspect a row's classifier decision and evidence
-//	- edit the proposed firefly fields (destination, source, category,
-//	  budget, description, tags)
-//	- push to firefly (with the same idempotency safety as the JSON
-//	  endpoint — the Pusher is the same code path)
-//	- skip a transaction (excluded from firefly forever)
+//   - list staged fold transactions filtered by status
+//   - inspect a row's classifier decision and evidence
+//   - edit the proposed firefly fields (destination, source, category,
+//     budget, description, tags)
+//   - push to firefly (with the same idempotency safety as the JSON
+//     endpoint — the Pusher is the same code path)
+//   - skip a transaction (excluded from firefly forever)
 //
 // The UI is intentionally minimal — single-page detail view, dark-mode
 // CSS in the template. No client-side framework. No JS beyond what
@@ -64,13 +64,13 @@ const (
 // into one template, the last-parsed `content` definition would win
 // for every render.
 type Handler struct {
-	db          *sql.DB
-	pusher      *integration.Pusher
-	log         *slog.Logger
-	adminKey    string
-	auth        AuthMode
-	indexTmpl   *template.Template
-	detailTmpl  *template.Template
+	db         *sql.DB
+	pusher     *integration.Pusher
+	log        *slog.Logger
+	adminKey   string
+	auth       AuthMode
+	indexTmpl  *template.Template
+	detailTmpl *template.Template
 }
 
 // New constructs a UI Handler.
@@ -374,17 +374,17 @@ func (h *Handler) handleDetail(w http.ResponseWriter, r *http.Request) {
 	suggested, _ := h.suggestedTagsForMerchant(r.Context(), merchantID)
 
 	h.render(w, h.detailTmpl, map[string]any{
-		"Title":          uuid,
-		"Row":            row,
-		"Edit":           edit,
-		"EvidencePretty": prettyJSON(evidence),
-		"Flash":          flashFromCookie(r, w),
-		"DestOptions":    destAccounts,
-		"SourceOptions":  srcAccounts,
+		"Title":           uuid,
+		"Row":             row,
+		"Edit":            edit,
+		"EvidencePretty":  prettyJSON(evidence),
+		"Flash":           flashFromCookie(r, w),
+		"DestOptions":     destAccounts,
+		"SourceOptions":   srcAccounts,
 		"CategoryOptions": categories,
-		"BudgetOptions":  budgets,
-		"TagLibrary":     allTags,
-		"SuggestedTags":  suggested,
+		"BudgetOptions":   budgets,
+		"TagLibrary":      allTags,
+		"SuggestedTags":   suggested,
 	})
 }
 
@@ -399,6 +399,7 @@ func (h *Handler) fetchDetail(ctx context.Context, uuid string) (detailRow, edit
 
 		cSrcID, cDestID, cCatID, cBudID sql.NullInt64
 		cDesc, cTags                    sql.NullString
+		cDestName, pDestName            sql.NullString
 		pSrcID, pDestID, pCatID, pBudID sql.NullInt64
 		pDesc                           sql.NullString
 	)
@@ -410,7 +411,8 @@ func (h *Handler) fetchDetail(ctx context.Context, uuid string) (detailRow, edit
 		       confirmed_category_id, confirmed_budget_id,
 		       confirmed_description, confirmed_tags_json,
 		       proposed_source_account_id, proposed_destination_account_id,
-		       proposed_category_id, proposed_budget_id, proposed_description
+		       proposed_category_id, proposed_budget_id, proposed_description,
+		       confirmed_destination_account_name, proposed_destination_account_name
 		FROM staged_fold_txns
 		WHERE fold_uuid = ?
 	`, uuid).Scan(
@@ -418,6 +420,7 @@ func (h *Handler) fetchDetail(ctx context.Context, uuid string) (detailRow, edit
 		&r.MerchantExtracted, &r.Status, &tier, &conf, &evidence,
 		&cSrcID, &cDestID, &cCatID, &cBudID, &cDesc, &cTags,
 		&pSrcID, &pDestID, &pCatID, &pBudID, &pDesc,
+		&cDestName, &pDestName,
 	)
 	if err != nil {
 		return r, editForm{}, "", err
@@ -457,6 +460,11 @@ func (h *Handler) fetchDetail(ctx context.Context, uuid string) (detailRow, edit
 	// Resolve the human-readable names from firefly_txns for display next to id inputs.
 	if id, ok := parseInt(edit.DestinationAccountID); ok {
 		edit.DestinationAccountName = h.lookupAccountName(ctx, id)
+	} else if name := nullableStringValue(cDestName, pDestName); name != "" {
+		// Name-only destination: a novel merchant the classifier proposed
+		// for firefly to create on push. Pre-fill so the human sees and
+		// can confirm/edit the name before it becomes a real account.
+		edit.DestinationAccountName = name
 	}
 	if id, ok := parseInt(edit.SourceAccountID); ok {
 		edit.SourceAccountName = h.lookupAccountName(ctx, id)
@@ -566,10 +574,26 @@ func (h *Handler) saveEdits(ctx context.Context, uuid string, form url.Values) (
 	desc := strings.TrimSpace(form.Get("description"))
 	tagsStr := strings.TrimSpace(form.Get("tags"))
 
+	// Effective firefly type governs whether an unmatched destination name
+	// is allowed. A withdrawal's expense account is auto-created by firefly
+	// from the name, so an unmatched name is a NEW account, not an error.
+	// A deposit/transfer destination must be an existing asset, so there an
+	// unmatched name is a genuine unresolved field.
+	var effType string
+	_ = h.db.QueryRowContext(ctx, `
+		SELECT COALESCE(NULLIF(confirmed_txn_type,''), NULLIF(proposed_txn_type,''),
+		                CASE WHEN type='INCOMING' THEN 'deposit' ELSE 'withdrawal' END)
+		FROM staged_fold_txns WHERE fold_uuid = ?`, uuid).Scan(&effType)
+
 	var dstID, srcID, catID, budID any
+	var dstName any // set instead of dstID for a new expense account (withdrawal)
 	if destName != "" {
 		if id := h.resolveAccountID(ctx, "destination", destName); id != 0 {
 			dstID = id
+		} else if effType == "withdrawal" {
+			// Novel merchant: keep the typed name so the push creates the
+			// firefly expense account by that name (not "unresolved").
+			dstName = destName
 		} else {
 			unresolved = append(unresolved, fmt.Sprintf("destination %q", destName))
 		}
@@ -612,17 +636,18 @@ func (h *Handler) saveEdits(ctx context.Context, uuid string, form url.Values) (
 
 	_, err = h.db.ExecContext(ctx, `
 		UPDATE staged_fold_txns
-		SET confirmed_source_account_id      = ?,
-		    confirmed_destination_account_id = ?,
-		    confirmed_category_id            = ?,
-		    confirmed_budget_id              = ?,
-		    confirmed_description            = ?,
-		    confirmed_tags_json              = ?,
-		    reviewed_at                      = CURRENT_TIMESTAMP,
-		    updated_at                       = CURRENT_TIMESTAMP,
+		SET confirmed_source_account_id        = ?,
+		    confirmed_destination_account_id   = ?,
+		    confirmed_destination_account_name = ?,
+		    confirmed_category_id              = ?,
+		    confirmed_budget_id                = ?,
+		    confirmed_description              = ?,
+		    confirmed_tags_json                = ?,
+		    reviewed_at                        = CURRENT_TIMESTAMP,
+		    updated_at                         = CURRENT_TIMESTAMP,
 		    status = CASE WHEN status='needs_review' THEN 'ready_to_push' ELSE status END
 		WHERE fold_uuid = ?
-	`, srcID, dstID, catID, budID, nullableStrFromForm(desc), tagsJSON, uuid)
+	`, srcID, dstID, dstName, catID, budID, nullableStrFromForm(desc), tagsJSON, uuid)
 	return unresolved, err
 }
 

@@ -2,6 +2,7 @@ package classifier
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
@@ -397,10 +398,10 @@ func TestTier3_NoFoldAccountHintWhenUnmirrored(t *testing.T) {
 // ``` fences despite the system prompt asking for plain JSON.
 func TestStripJSONFences(t *testing.T) {
 	cases := map[string]string{
-		`{"a":1}`:               `{"a":1}`,
+		`{"a":1}`:                 `{"a":1}`,
 		"```json\n{\"a\":1}\n```": `{"a":1}`,
-		"```\n{\"a\":1}\n```":    `{"a":1}`,
-		"  \n{\"a\":1}\n  ":      `{"a":1}`,
+		"```\n{\"a\":1}\n```":     `{"a":1}`,
+		"  \n{\"a\":1}\n  ":       `{"a":1}`,
 	}
 	for in, want := range cases {
 		if got := stripJSONFences(in); got != want {
@@ -626,6 +627,89 @@ func TestTier3_KeepsDescriptionOnLowConfidence(t *testing.T) {
 	// Decision so the title isn't lost.
 	if d.Description != "Dinner with ___" {
 		t.Errorf("expected LLM's description to be preserved, got %q", d.Description)
+	}
+}
+
+// TestTier3_ProposesNewDestinationName covers C2: for a WITHDRAWAL whose
+// merchant has no matching firefly expense account, the LLM may return a
+// null destination_account_id plus a destination_name_suggestion. We
+// accept that as a Tier-3 decision carrying the NEW name (id nil), persist
+// it to proposed_destination_account_name, and force needs_review even at
+// high confidence — because pushing it will CREATE a firefly account, so a
+// human should eyeball the name first.
+func TestTier3_ProposesNewDestinationName(t *testing.T) {
+	db := seedTestDB(t)
+	// High confidence (0.9 ≥ threshold) so that landing in needs_review
+	// proves the new-destination forcing, not just a low score.
+	fakeLLM := newFakeLLM(t, `{
+		"txn_type": "withdrawal",
+		"destination_account_id": null,
+		"destination_name_suggestion": "United Airlines",
+		"source_account_id": 1,
+		"category_id": 5,
+		"confidence": 0.9,
+		"description_suggestion": "DEL-___ flight booking",
+		"reasoning": "airline ticket; no existing expense account, propose a new one"
+	}`)
+	t.Cleanup(fakeLLM.Close)
+
+	c := New(db, slog.Default(), DefaultConfidenceThreshold, 10)
+	c.SetLLM(llm.NewClient("k", "", fakeLLM.URL, fakeLLM.Client()))
+
+	// Seed the staged row so ApplyDecision's UPDATE lands.
+	if _, err := db.Exec(`
+		INSERT INTO staged_fold_txns (fold_uuid, raw_payload, amount_paise, currency, txn_timestamp,
+		    mode, type, narration, merchant_extracted, status)
+		VALUES ('ua-newdest','{}',3516100,'INR','2026-06-23T01:27:00Z',
+		    'CARD','OUTGOING','x','united airlines new delhi in','pending')`); err != nil {
+		t.Fatalf("seed staged: %v", err)
+	}
+
+	d, err := c.ClassifyOne(context.Background(), StagedRow{
+		FoldUUID:          "ua-newdest",
+		Narration:         "CARD/x/United Airlines New Delhi In/INR/35161/OUTGOING",
+		Mode:              "CARD",
+		Type:              "OUTGOING",
+		MerchantExtracted: "united airlines new delhi in",
+		RawPayload:        `{"uuid":"ua-newdest","mode":"CARD","type":"OUTGOING"}`,
+	})
+	if err != nil {
+		t.Fatalf("ClassifyOne: %v", err)
+	}
+	if d.Tier != TierLLM {
+		t.Fatalf("expected Tier 3, got %d", d.Tier)
+	}
+	if d.DestinationAccountID != nil {
+		t.Errorf("destination id should be nil for a new-name destination, got %v", *d.DestinationAccountID)
+	}
+	if d.DestinationAccountName != "United Airlines" {
+		t.Errorf("destination name = %q, want %q", d.DestinationAccountName, "United Airlines")
+	}
+	if d.SourceAccountID == nil || *d.SourceAccountID != 1 {
+		t.Errorf("source = %v, want 1", d.SourceAccountID)
+	}
+
+	if err := c.ApplyDecision(context.Background(), "ua-newdest", d); err != nil {
+		t.Fatalf("ApplyDecision: %v", err)
+	}
+	var (
+		status   string
+		destID   sql.NullInt64
+		destName sql.NullString
+	)
+	if err := db.QueryRow(`
+		SELECT status, proposed_destination_account_id, proposed_destination_account_name
+		FROM staged_fold_txns WHERE fold_uuid='ua-newdest'`).Scan(&status, &destID, &destName); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if status != "needs_review" {
+		t.Errorf("a new-name destination must force needs_review (even at conf 0.9), got %q", status)
+	}
+	if destID.Valid {
+		t.Errorf("proposed_destination_account_id should be NULL, got %d", destID.Int64)
+	}
+	if destName.String != "United Airlines" {
+		t.Errorf("proposed_destination_account_name = %q, want %q", destName.String, "United Airlines")
 	}
 }
 
