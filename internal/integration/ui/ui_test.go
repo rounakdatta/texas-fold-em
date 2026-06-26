@@ -476,14 +476,16 @@ func TestUI_Save_PersistsAndBumpsStatus(t *testing.T) {
 	}
 }
 
-// TestUI_Save_UnresolvedNamesFlag confirms that an unknown name lands
-// as NULL in the corresponding column AND that the user gets a flash
-// warning listing the unresolved fields.
+// TestUI_Save_UnresolvedNamesFlag confirms that a name that CANNOT be
+// auto-created — a source asset account — lands as NULL and surfaces a
+// flash warning. (A destination on a withdrawal IS auto-created by
+// firefly, so that path is intentional, not an error — see
+// TestUI_Save_NewDestinationName.)
 func TestUI_Save_UnresolvedNamesFlag(t *testing.T) {
 	u := newUITestHarness(t, AuthModeBypass)
 	form := url.Values{}
-	form.Set("destination_name", "Brand New Merchant That Doesn't Exist")
-	form.Set("source_name", "HDFC Card") // resolvable
+	form.Set("destination_name", "Cake Palace")     // resolvable → 12
+	form.Set("source_name", "Nonexistent Bank XYZ") // unresolvable asset → NULL + flagged
 	form.Set("description", "x")
 
 	resp := u.do(t, "POST", "/admin/ui/staged/rev-1/save", form)
@@ -491,13 +493,13 @@ func TestUI_Save_UnresolvedNamesFlag(t *testing.T) {
 	if resp.StatusCode != http.StatusSeeOther {
 		t.Fatalf("expected 303, got %d", resp.StatusCode)
 	}
-	// The destination resolution should have failed → column NULL.
-	var dest sql.NullInt64
-	if err := u.db.DB.QueryRow(`SELECT confirmed_destination_account_id FROM staged_fold_txns WHERE fold_uuid='rev-1'`).Scan(&dest); err != nil {
+	// The source resolution should have failed → column NULL.
+	var src sql.NullInt64
+	if err := u.db.DB.QueryRow(`SELECT confirmed_source_account_id FROM staged_fold_txns WHERE fold_uuid='rev-1'`).Scan(&src); err != nil {
 		t.Fatal(err)
 	}
-	if dest.Valid {
-		t.Errorf("destination should be NULL for unresolvable name, got %v", dest)
+	if src.Valid {
+		t.Errorf("source should be NULL for unresolvable name, got %v", src)
 	}
 
 	// Flash cookie should carry the unresolved name in its message.
@@ -512,6 +514,50 @@ func TestUI_Save_UnresolvedNamesFlag(t *testing.T) {
 	}
 	if !strings.Contains(flash.Value, "couldn") {
 		t.Errorf("expected flash to mention unresolved names, got: %s", flash.Value)
+	}
+}
+
+// TestUI_Save_NewDestinationName covers the C2 path: on a withdrawal, a
+// destination name with no matching firefly account is NOT an error —
+// it's a NEW expense account the push will create. It's stored in
+// confirmed_destination_account_name (id stays NULL), produces no
+// unresolved flash, and the row advances to ready_to_push.
+func TestUI_Save_NewDestinationName(t *testing.T) {
+	u := newUITestHarness(t, AuthModeBypass)
+	form := url.Values{}
+	form.Set("destination_name", "United Airlines") // novel — no firefly account
+	form.Set("source_name", "HDFC Card")            // resolvable → 1
+	form.Set("description", "Flight booking")
+
+	resp := u.do(t, "POST", "/admin/ui/staged/rev-1/save", form)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("expected 303, got %d", resp.StatusCode)
+	}
+	var (
+		destID   sql.NullInt64
+		destName sql.NullString
+		status   string
+	)
+	if err := u.db.DB.QueryRow(`
+		SELECT confirmed_destination_account_id, confirmed_destination_account_name, status
+		FROM staged_fold_txns WHERE fold_uuid='rev-1'`).Scan(&destID, &destName, &status); err != nil {
+		t.Fatal(err)
+	}
+	if destID.Valid {
+		t.Errorf("destination id should be NULL for a new-name destination, got %v", destID)
+	}
+	if destName.String != "United Airlines" {
+		t.Errorf("expected confirmed_destination_account_name=%q, got %q", "United Airlines", destName.String)
+	}
+	if status != "ready_to_push" {
+		t.Errorf("save should bump needs_review→ready_to_push, got %q", status)
+	}
+	// No unresolved flash — the new account is intentional, not an error.
+	for _, c := range resp.Cookies() {
+		if c.Name == "tfe-flash" && strings.Contains(c.Value, "couldn") {
+			t.Errorf("did not expect an unresolved-names flash, got: %s", c.Value)
+		}
 	}
 }
 

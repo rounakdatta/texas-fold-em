@@ -33,12 +33,12 @@ var PushReadOnlyError = errors.New("push: TEXAS_FOLDEM_FIREFLY_READONLY is set; 
 
 // PushReport is the structured outcome of a push attempt.
 type PushReport struct {
-	FoldUUID            string    `json:"fold_uuid"`
-	Action              string    `json:"action"`               // "preview" | "created" | "deduped"
-	FireflyTxnID        int64     `json:"firefly_txn_id,omitempty"`
-	FireflyGroupID      int64     `json:"firefly_group_id,omitempty"`
-	PushedAt            time.Time `json:"pushed_at,omitempty"`
-	PreviewBody         any       `json:"preview_body,omitempty"` // present when Action="preview"
+	FoldUUID       string    `json:"fold_uuid"`
+	Action         string    `json:"action"` // "preview" | "created" | "deduped"
+	FireflyTxnID   int64     `json:"firefly_txn_id,omitempty"`
+	FireflyGroupID int64     `json:"firefly_group_id,omitempty"`
+	PushedAt       time.Time `json:"pushed_at,omitempty"`
+	PreviewBody    any       `json:"preview_body,omitempty"` // present when Action="preview"
 }
 
 // Learner is the optional active-learning hook called after a
@@ -59,8 +59,8 @@ type Pusher struct {
 	fc          *firefly.Client
 	log         *slog.Logger
 	readOnly    bool
-	learner     Learner  // optional; when set, push success triggers reinforcement
-	eagerSyncer *Syncer  // optional; when set, push success mirrors the just-created firefly journal into firefly_txns
+	learner     Learner // optional; when set, push success triggers reinforcement
+	eagerSyncer *Syncer // optional; when set, push success mirrors the just-created firefly journal into firefly_txns
 }
 
 // NewPusher constructs a Pusher with no learner.
@@ -88,29 +88,31 @@ func (p *Pusher) SetEagerSyncer(s *Syncer) { p.eagerSyncer = s }
 
 // pushableRow is the slim view of staged_fold_txns we read for a push.
 type pushableRow struct {
-	FoldUUID                  string
-	AmountPaise               int64
-	Currency                  string
-	TxnTimestamp              time.Time
-	Type                      string // INCOMING | OUTGOING
-	Status                    string
+	FoldUUID     string
+	AmountPaise  int64
+	Currency     string
+	TxnTimestamp time.Time
+	Type         string // INCOMING | OUTGOING
+	Status       string
 
-	ConfirmedSourceAccountID      sql.NullInt64
-	ConfirmedDestinationAccountID sql.NullInt64
-	ConfirmedCategoryID           sql.NullInt64
-	ConfirmedBudgetID             sql.NullInt64
-	ConfirmedDescription          sql.NullString
-	ConfirmedTagsJSON             sql.NullString
+	ConfirmedSourceAccountID        sql.NullInt64
+	ConfirmedDestinationAccountID   sql.NullInt64
+	ConfirmedDestinationAccountName sql.NullString
+	ConfirmedCategoryID             sql.NullInt64
+	ConfirmedBudgetID               sql.NullInt64
+	ConfirmedDescription            sql.NullString
+	ConfirmedTagsJSON               sql.NullString
 
-	ConfirmedTxnType              sql.NullString
+	ConfirmedTxnType sql.NullString
 
 	// Fall-through: when confirmed_* is null we use proposed_* (auto-classified).
-	ProposedSourceAccountID      sql.NullInt64
-	ProposedDestinationAccountID sql.NullInt64
-	ProposedCategoryID           sql.NullInt64
-	ProposedBudgetID             sql.NullInt64
-	ProposedDescription          sql.NullString
-	ProposedTxnType              sql.NullString
+	ProposedSourceAccountID        sql.NullInt64
+	ProposedDestinationAccountID   sql.NullInt64
+	ProposedDestinationAccountName sql.NullString
+	ProposedCategoryID             sql.NullInt64
+	ProposedBudgetID               sql.NullInt64
+	ProposedDescription            sql.NullString
+	ProposedTxnType                sql.NullString
 
 	// Narration is the raw fold-side string ("CARD/.../MERCHANT/Rs./AMT/...").
 	// Used as firefly's notes field on every push so the operator has the
@@ -260,10 +262,10 @@ func (p *Pusher) fetchPushableRow(ctx context.Context, foldUUID string) (pushabl
 	var r pushableRow
 	err := p.db.QueryRowContext(ctx, `
 		SELECT fold_uuid, amount_paise, currency, txn_timestamp, type, status,
-		       confirmed_source_account_id, confirmed_destination_account_id,
+		       confirmed_source_account_id, confirmed_destination_account_id, confirmed_destination_account_name,
 		       confirmed_category_id, confirmed_budget_id,
 		       confirmed_description, confirmed_tags_json, confirmed_txn_type,
-		       proposed_source_account_id, proposed_destination_account_id,
+		       proposed_source_account_id, proposed_destination_account_id, proposed_destination_account_name,
 		       proposed_category_id, proposed_budget_id, proposed_description,
 		       proposed_txn_type,
 		       narration, COALESCE(merchant_extracted, ''), firefly_txn_id
@@ -271,10 +273,10 @@ func (p *Pusher) fetchPushableRow(ctx context.Context, foldUUID string) (pushabl
 		WHERE fold_uuid = ?
 	`, foldUUID).Scan(
 		&r.FoldUUID, &r.AmountPaise, &r.Currency, &r.TxnTimestamp, &r.Type, &r.Status,
-		&r.ConfirmedSourceAccountID, &r.ConfirmedDestinationAccountID,
+		&r.ConfirmedSourceAccountID, &r.ConfirmedDestinationAccountID, &r.ConfirmedDestinationAccountName,
 		&r.ConfirmedCategoryID, &r.ConfirmedBudgetID,
 		&r.ConfirmedDescription, &r.ConfirmedTagsJSON, &r.ConfirmedTxnType,
-		&r.ProposedSourceAccountID, &r.ProposedDestinationAccountID,
+		&r.ProposedSourceAccountID, &r.ProposedDestinationAccountID, &r.ProposedDestinationAccountName,
 		&r.ProposedCategoryID, &r.ProposedBudgetID, &r.ProposedDescription,
 		&r.ProposedTxnType,
 		&r.Narration, &r.MerchantExtracted, &r.FireflyTxnID,
@@ -354,6 +356,12 @@ func (p *Pusher) buildCreateRequest(row pushableRow) firefly.CreateTransactionRe
 	}
 	if destID != 0 {
 		line.DestinationID = strconv.FormatInt(destID, 10)
+	} else if destName := pickString(row.ConfirmedDestinationAccountName, row.ProposedDestinationAccountName); destName != "" {
+		// No existing account id — send the name so firefly finds-or-creates
+		// the expense account by that name (its standard behaviour on a
+		// withdrawal POST). This is the push side of the classifier's
+		// "propose a new destination for a novel merchant" path.
+		line.DestinationName = destName
 	}
 	if catID != 0 {
 		line.CategoryID = strconv.FormatInt(catID, 10)

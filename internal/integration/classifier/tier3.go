@@ -42,6 +42,7 @@ Output exactly this JSON shape (any nullable field may be null):
 {
   "txn_type":               "withdrawal" | "deposit" | "transfer",
   "destination_account_id": <int|null>,
+  "destination_name_suggestion": <string|null>,
   "source_account_id":      <int|null>,
   "category_id":            <int|null>,
   "budget_id":              <int|null>,
@@ -60,7 +61,8 @@ Hard rules:
 3. Pick the source account using fold's mode + account_id + narration signals — don't blindly copy a "modal source" hint if fold's signals point elsewhere (different card, different bank).
 4. Use the historical examples to pick category, budget, and tags. If the user has previously tagged this merchant, mirror those tags.
 5. If the signals genuinely conflict, return confidence < 0.5 and explain in 'reasoning'.
-6. Output the JSON object only. No prose, no markdown fences.
+6. NEW destination accounts: for a WITHDRAWAL whose merchant has NO good match in the expense inventory, do NOT force-fit an unrelated id and do NOT dump it in a generic catch-all account. Instead set destination_account_id to null and put a clean, canonical merchant name in destination_name_suggestion (e.g. "United Airlines" — never the raw bank narration, never a guessed id). firefly creates the expense account on push. Always prefer an existing id when one genuinely fits; only suggest a new name when none does. For deposits and transfers, always use an existing id (do not invent names).
+7. Output the JSON object only. No prose, no markdown fences.
 
 description_suggestion guidance (this is what becomes the transaction TITLE in firefly — treat it as a first-class output, not an afterthought):
   A. MIRROR the user's voice from STYLE SAMPLES. Their past descriptions for this merchant
@@ -87,15 +89,19 @@ The output JSON MUST include a "txn_type" field set to "withdrawal", "deposit", 
 // llmResponse is the structured shape we expect back from the LLM.
 // Pointer fields distinguish "not provided" from "explicitly null".
 type llmResponse struct {
-	TxnType               string   `json:"txn_type"` // "withdrawal" | "deposit" | "transfer"
-	DestinationAccountID  *int64   `json:"destination_account_id"`
-	SourceAccountID       *int64   `json:"source_account_id"`
-	CategoryID            *int64   `json:"category_id"`
-	BudgetID              *int64   `json:"budget_id"`
-	Tags                  []string `json:"tags"`
-	DescriptionSuggestion *string  `json:"description_suggestion"`
-	Confidence            float64  `json:"confidence"`
-	Reasoning             string   `json:"reasoning"`
+	TxnType              string `json:"txn_type"` // "withdrawal" | "deposit" | "transfer"
+	DestinationAccountID *int64 `json:"destination_account_id"`
+	// DestinationNameSuggestion is a NEW expense-account name for a
+	// withdrawal whose merchant has no matching account yet (id null).
+	// firefly auto-creates it on push. See hard rule 6 in the prompt.
+	DestinationNameSuggestion *string  `json:"destination_name_suggestion"`
+	SourceAccountID           *int64   `json:"source_account_id"`
+	CategoryID                *int64   `json:"category_id"`
+	BudgetID                  *int64   `json:"budget_id"`
+	Tags                      []string `json:"tags"`
+	DescriptionSuggestion     *string  `json:"description_suggestion"`
+	Confidence                float64  `json:"confidence"`
+	Reasoning                 string   `json:"reasoning"`
 }
 
 // tier3Inputs bundles everything the synthesiser sees. Built by
@@ -154,10 +160,35 @@ func (c *Classifier) tierThreeLLM(ctx context.Context, staged StagedRow, tier1Hi
 		return Decision{}, false, errors.New("llm produced ids not present in inventories (hallucination guard)")
 	}
 
-	// Accept only when the LLM is reasonably confident AND has at
-	// least pinned destination + source. Without those two, the
-	// firefly POST will 422.
-	if llm.Confidence < 0.5 || llm.DestinationAccountID == nil || llm.SourceAccountID == nil {
+	// Validate txn_type first — we need it to decide whether a name-only
+	// destination is allowed. The LLM is asked to set it; default to the
+	// fold-direction mapping if it didn't (or returned garbage) so the
+	// Pusher always has a usable value downstream.
+	txnType := strings.ToLower(strings.TrimSpace(llm.TxnType))
+	switch txnType {
+	case "withdrawal", "deposit", "transfer":
+		// ok
+	default:
+		txnType = fireflyTxnTypeFor(staged.Type)
+	}
+
+	// Resolve the destination. Two valid shapes:
+	//   - an existing account by id (the common case), OR
+	//   - a NEW expense account by name, for a withdrawal whose merchant
+	//     has no matching account yet (e.g. a first-ever "United Airlines"
+	//     flight). firefly auto-creates the expense account from the name
+	//     on push. Honoured for withdrawals only; deposits/transfers must
+	//     resolve to an existing asset id.
+	newDestName := ""
+	if llm.DestinationAccountID == nil && txnType == "withdrawal" && llm.DestinationNameSuggestion != nil {
+		newDestName = strings.TrimSpace(*llm.DestinationNameSuggestion)
+	}
+	hasDestination := llm.DestinationAccountID != nil || newDestName != ""
+
+	// Accept only when the LLM is reasonably confident, pinned a source,
+	// and has SOME destination (an existing id or a new name). Without a
+	// source + destination the firefly POST would 422.
+	if llm.Confidence < 0.5 || llm.SourceAccountID == nil || !hasDestination {
 		// Structural decision rejected, but the LLM's description is
 		// independent of the structural confidence — it's based on
 		// STYLE SAMPLES and TIME CONTEXT, which are valid signals
@@ -177,11 +208,14 @@ func (c *Classifier) tierThreeLLM(ctx context.Context, staged StagedRow, tier1Hi
 		return Decision{}, false, nil
 	}
 
-	// Resolve human-readable names for the UI's display from any of
-	// the ID inventories (FTS hits first, then the broader account
-	// lists). lookupName falls through silently if the ID is somehow
-	// missing — already guaranteed valid by the guard above.
-	destName := lookupName(inputs, "destination", *llm.DestinationAccountID)
+	// Resolve human-readable names for the UI's display. An id-backed
+	// destination is looked up across the inventories (already validated
+	// by the hallucination guard); a name-only new destination IS its
+	// own display name.
+	destName := newDestName
+	if llm.DestinationAccountID != nil {
+		destName = lookupName(inputs, "destination", *llm.DestinationAccountID)
+	}
 	srcName := lookupName(inputs, "source", *llm.SourceAccountID)
 	catName := ""
 	if llm.CategoryID != nil {
@@ -195,17 +229,6 @@ func (c *Classifier) tierThreeLLM(ctx context.Context, staged StagedRow, tier1Hi
 	desc := ""
 	if llm.DescriptionSuggestion != nil {
 		desc = *llm.DescriptionSuggestion
-	}
-
-	// Validate the txn_type field. The LLM is asked to set it; default
-	// to the fold-direction mapping if it didn't (or returned garbage)
-	// so the Pusher always has a usable value downstream.
-	txnType := strings.ToLower(strings.TrimSpace(llm.TxnType))
-	switch txnType {
-	case "withdrawal", "deposit", "transfer":
-		// ok
-	default:
-		txnType = fireflyTxnTypeFor(staged.Type)
 	}
 
 	ftsView := make([]FTSHitView, 0, len(inputs.hits))
@@ -266,7 +289,7 @@ type tier3Hit struct {
 	// which links to firefly's friendlier "Sri Udupi Park, Indiranagar".
 	// Surfacing this in the prompt is what teaches the LLM the
 	// narration↔merchant mapping that's otherwise invisible.
-	Notes                  string
+	Notes string
 }
 
 // gatherTier3Inputs assembles every slice of context the prompt needs.

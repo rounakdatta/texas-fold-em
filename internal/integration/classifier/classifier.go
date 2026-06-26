@@ -62,8 +62,8 @@ const (
 // nullable — firefly columns are optional (no category, no budget),
 // and we mirror that.
 type Decision struct {
-	Tier                   Tier
-	Confidence             float64
+	Tier       Tier
+	Confidence float64
 	// TxnType overrides the default fold-direction → firefly mapping.
 	// Empty string defers to Pusher's foldTypeToFireflyType (which only
 	// produces "withdrawal" or "deposit"); set to "transfer" by Tier 3
@@ -86,12 +86,12 @@ type Decision struct {
 // the proposal so the human can see what the classifier saw. Stored as
 // JSON in classifier_evidence_json.
 type Evidence struct {
-	Tier               Tier              `json:"tier"`
-	MerchantNormalized string            `json:"merchant_normalized,omitempty"`
-	LookupHit          *LookupHitView    `json:"lookup_hit,omitempty"`
-	FTSHits            []FTSHitView      `json:"fts_hits,omitempty"`
-	Note               string            `json:"note,omitempty"`
-	Tags               []string          `json:"tags,omitempty"`
+	Tier               Tier           `json:"tier"`
+	MerchantNormalized string         `json:"merchant_normalized,omitempty"`
+	LookupHit          *LookupHitView `json:"lookup_hit,omitempty"`
+	FTSHits            []FTSHitView   `json:"fts_hits,omitempty"`
+	Note               string         `json:"note,omitempty"`
+	Tags               []string       `json:"tags,omitempty"`
 }
 
 // LookupHitView is a denormalised view of merchant_lookup for the UI.
@@ -178,16 +178,17 @@ func (c *Classifier) SetLLM(client *llm.Client) { c.llm = client }
 // orchestrator endpoint) is responsible for persisting.
 //
 // Order, post LLM-synthesiser refactor:
-//   Tier 1 (merchant_lookup) and Tier 2 (FTS5 vote) run as candidate
-//   gatherers. Their results become HINTS for Tier 3 — they no
-//   longer terminate the pipeline early.
-//   Tier 3 (LLM synthesiser) is then ALWAYS invoked when an LLM
-//   client is configured. It sees the raw fold payload, the user's
-//   full account / category / budget / tag inventories, the FTS hits,
-//   and the deterministic hints. It produces the final decision —
-//   including type direction (withdrawal / deposit / transfer) and
-//   source-account inference, both of which are too nuanced for the
-//   deterministic tiers.
+//
+//	Tier 1 (merchant_lookup) and Tier 2 (FTS5 vote) run as candidate
+//	gatherers. Their results become HINTS for Tier 3 — they no
+//	longer terminate the pipeline early.
+//	Tier 3 (LLM synthesiser) is then ALWAYS invoked when an LLM
+//	client is configured. It sees the raw fold payload, the user's
+//	full account / category / budget / tag inventories, the FTS hits,
+//	and the deterministic hints. It produces the final decision —
+//	including type direction (withdrawal / deposit / transfer) and
+//	source-account inference, both of which are too nuanced for the
+//	deterministic tiers.
 //
 // Fallbacks:
 //   - LLM not configured → use Tier 1, else Tier 2, else Tier 4.
@@ -407,18 +408,18 @@ func (c *Classifier) tierTwoFTSVote(ctx context.Context, staged StagedRow) (Deci
 	defer rows.Close()
 
 	type hit struct {
-		FireflyID                int64
-		DestinationAccountID     sql.NullInt64
-		DestinationAccountName   sql.NullString
-		SourceAccountID          sql.NullInt64
-		SourceAccountName        sql.NullString
-		CategoryID               sql.NullInt64
-		CategoryName             sql.NullString
-		BudgetID                 sql.NullInt64
-		BudgetName               sql.NullString
-		Description              string
-		Date                     time.Time
-		Score                    float64
+		FireflyID              int64
+		DestinationAccountID   sql.NullInt64
+		DestinationAccountName sql.NullString
+		SourceAccountID        sql.NullInt64
+		SourceAccountName      sql.NullString
+		CategoryID             sql.NullInt64
+		CategoryName           sql.NullString
+		BudgetID               sql.NullInt64
+		BudgetName             sql.NullString
+		Description            string
+		Date                   time.Time
+		Score                  float64
 	}
 	var hits []hit
 	for rows.Next() {
@@ -600,8 +601,16 @@ func (c *Classifier) resetToPending(ctx context.Context, foldUUID string) error 
 // confident classifications, 'needs_review' otherwise.
 func (c *Classifier) ApplyDecision(ctx context.Context, foldUUID string, d Decision) error {
 	status := "ready_to_push"
-	if d.Tier == TierHumanReview || d.Confidence < c.threshold {
+	// A new-name destination (no existing firefly id, just a proposed
+	// name) always goes to review: pushing it will CREATE a firefly
+	// expense account, so a human should eyeball the name first.
+	newDestination := d.DestinationAccountID == nil && strings.TrimSpace(d.DestinationAccountName) != ""
+	if d.Tier == TierHumanReview || d.Confidence < c.threshold || newDestination {
 		status = "needs_review"
+	}
+	var proposedDestName any
+	if newDestination {
+		proposedDestName = strings.TrimSpace(d.DestinationAccountName)
 	}
 	evidenceJSON, err := json.Marshal(d.Evidence)
 	if err != nil {
@@ -622,6 +631,7 @@ func (c *Classifier) ApplyDecision(ctx context.Context, foldUUID string, d Decis
 		    classifier_evidence_json          = ?,
 		    proposed_source_account_id        = ?,
 		    proposed_destination_account_id   = ?,
+		    proposed_destination_account_name = ?,
 		    proposed_category_id              = ?,
 		    proposed_budget_id                = ?,
 		    proposed_description              = ?,
@@ -637,11 +647,12 @@ func (c *Classifier) ApplyDecision(ctx context.Context, foldUUID string, d Decis
 		string(evidenceJSON),
 		nullableInt64(d.SourceAccountID),
 		nullableInt64(d.DestinationAccountID),
+		proposedDestName,
 		nullableInt64(d.CategoryID),
 		nullableInt64(d.BudgetID),
 		nullableString(d.Description),
-		tagsJSON,                       // proposed_tags_json (COALESCE preserves existing on empty)
-		nullableString(d.TxnType),      // proposed_txn_type
+		tagsJSON,                  // proposed_tags_json (COALESCE preserves existing on empty)
+		nullableString(d.TxnType), // proposed_txn_type
 		foldUUID,
 	)
 	if err != nil {
