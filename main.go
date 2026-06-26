@@ -139,6 +139,10 @@ func run() error {
 		// Deterministic classifier (Tiers 1+2). Tier-3 attaches below if
 		// an LLM API key is configured.
 		cls := classifier.New(intDB.DB, intLog, classifier.DefaultConfidenceThreshold, 10)
+		// Fan out Tier-3 across a bounded worker pool so a scope=all
+		// backfill finishes in minutes instead of hours (the LLM call is
+		// the per-row bottleneck and holds no DB connection).
+		cls.SetConcurrency(cfg.ClassifyConcurrency)
 
 		llmEnabled := false
 		if cfg.LLMAPIKey != "" {
@@ -186,6 +190,7 @@ func run() error {
 			"llm_base_url", cfg.LLMBaseURL,
 			"firefly_readonly", cfg.FireflyReadOnly,
 			"ui_auth", uiAuthLabel(uiAuth),
+			"classify_concurrency", cfg.ClassifyConcurrency,
 			"periodic_sync_every", cfg.PeriodicSyncEvery,
 			"endpoints", []string{
 				"POST /admin/firefly/sync",
