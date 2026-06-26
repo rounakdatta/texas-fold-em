@@ -79,7 +79,7 @@ func New(db *sql.DB, pusher *integration.Pusher, log *slog.Logger, adminKey stri
 	// every link preserves the active filter set without hand-built
 	// querystrings. Registered on both templates for uniformity even
 	// though only the index references it today.
-	funcs := template.FuncMap{"filterURL": filterURL}
+	funcs := template.FuncMap{"filterURL": filterURL, "statusBadge": statusBadge}
 	indexTmpl, err := template.New("layout.html").Funcs(funcs).ParseFS(tmplFS, "templates/layout.html", "templates/index.html")
 	if err != nil {
 		return nil, fmt.Errorf("parse index template: %w", err)
@@ -196,8 +196,14 @@ type listFilters struct {
 // staged_fold_txns alias `s`) plus its positional args. Always at least
 // the status clause; optional dimensions append when set.
 func (f listFilters) where() (string, []any) {
-	clauses := []string{"s.status = ?"}
-	args := []any{f.Status}
+	var clauses []string
+	var args []any
+	// "all" (and empty) means no status constraint — the overview view
+	// that lists every transaction regardless of status.
+	if f.Status != "" && f.Status != "all" {
+		clauses = append(clauses, "s.status = ?")
+		args = append(args, f.Status)
+	}
 	if f.SourceAccount != "" {
 		// Effective source = confirmed (human) overrides proposed
 		// (classifier) — the same precedence the Pusher uses when it
@@ -208,6 +214,9 @@ func (f listFilters) where() (string, []any) {
 			clauses = append(clauses, "COALESCE(s.confirmed_source_account_id, s.proposed_source_account_id) = ?")
 			args = append(args, id)
 		}
+	}
+	if len(clauses) == 0 {
+		return "1=1", nil // no constraints (e.g. status=all, no account) → every row
 	}
 	return strings.Join(clauses, " AND "), args
 }
@@ -228,6 +237,32 @@ func filterURL(f listFilters, perPage, page int) template.URL {
 		v.Set("page", strconv.Itoa(page))
 	}
 	return template.URL("/admin/ui/?" + v.Encode())
+}
+
+// statusBadge renders a compact, colour-coded status glyph for the index
+// table. It matters most in the "all" view, where rows of every status
+// mix and a per-row indicator is the only at-a-glance signal. The
+// staged_fold_txns.status CHECK constraint keeps the input to a known
+// enum, so the inline class/title are safe; the default arm escapes
+// anything unexpected.
+func statusBadge(status string) template.HTML {
+	var glyph, label string
+	switch status {
+	case "pending":
+		glyph, label = "○", "pending"
+	case "needs_review":
+		glyph, label = "⚠", "needs review"
+	case "ready_to_push":
+		glyph, label = "➤", "ready to push"
+	case "pushed":
+		glyph, label = "✓", "pushed"
+	case "skipped":
+		glyph, label = "⊘", "skipped"
+	default:
+		return template.HTML(fmt.Sprintf(`<span class="sicon" title="%s">•</span>`,
+			template.HTMLEscapeString(status)))
+	}
+	return template.HTML(fmt.Sprintf(`<span class="sicon sicon-%s" title="%s">%s</span>`, status, label, glyph))
 }
 
 // defaultPerPage / maxPerPage bound the list query. 50 keeps the
@@ -469,6 +504,7 @@ func (h *Handler) handleDetail(w http.ResponseWriter, r *http.Request) {
 
 	h.render(w, h.detailTmpl, map[string]any{
 		"Title":           uuid,
+		"Status":          row.Status, // for the shared nav's active-state highlight
 		"Row":             row,
 		"Edit":            edit,
 		"EvidencePretty":  prettyJSON(evidence),
