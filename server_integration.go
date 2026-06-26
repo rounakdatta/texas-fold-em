@@ -91,18 +91,17 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 // THEN /admin/classify. PR H will wire that into a single periodic
 // goroutine.)
 func (s *Server) handleClassify(w http.ResponseWriter, r *http.Request) {
-	// Per-row Tier-3 latency depends heavily on prompt size: a thin
-	// prompt with a reasoning model runs ~5s/row; the richer prompt
-	// added in chart 0.6.0 (TIME CONTEXT + STYLE SAMPLES blocks)
-	// raised it to ~10-12s/row. A full ?scope=all reprocess after a
-	// prompt change touches every non-confirmed row in the DB — which
-	// can be 600-2000 rows — and the operator wants it to finish in
-	// one click rather than babysit retries.
+	// Per-row Tier-3 latency is ~10-12s (the LLM call), so a full
+	// ?scope=all reprocess (600-2000 non-confirmed rows after a prompt or
+	// grounding change) would take hours run serially. The classifier
+	// fans those independent LLM calls out across
+	// TEXAS_FOLDEM_CLASSIFY_CONCURRENCY workers (default 8), so wall-clock
+	// is ~(rows/concurrency)×12s — a ~800-row backfill lands in ~15-25min.
 	//
-	// 4h covers ~1400 rows at 10s/row. Beyond that the operator
-	// should restart with ?scope=pending (idempotent) and let the
-	// hourly cron pick up the rest. The endpoint is never load-bearing
-	// for end-user latency; only operators invoke it.
+	// The 4h ceiling stays as a generous safety belt (concurrency=1, a
+	// huge backlog, or a slow/rate-limited LLM). The endpoint is never
+	// load-bearing for end-user latency; only operators invoke it, and
+	// ?scope=pending is idempotent if a restart is ever needed.
 	ctx, cancel := context.WithTimeout(r.Context(), 4*time.Hour)
 	defer cancel()
 

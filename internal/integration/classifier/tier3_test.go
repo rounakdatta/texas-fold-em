@@ -5,12 +5,15 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/rounakdatta/texas-fold-em/internal/integration/llm"
 )
@@ -710,6 +713,68 @@ func TestTier3_ProposesNewDestinationName(t *testing.T) {
 	}
 	if destName.String != "United Airlines" {
 		t.Errorf("proposed_destination_account_name = %q, want %q", destName.String, "United Airlines")
+	}
+}
+
+// TestClassifyPending_ParallelOverlapsLLMCalls verifies the bounded
+// worker pool actually overlaps Tier-3 LLM calls when concurrency > 1,
+// while still classifying every row correctly. The LLM stub records the
+// peak number of in-flight requests; with concurrency 8 and 24 rows it
+// must exceed 1 (proving parallelism), and all rows must auto-classify.
+func TestClassifyPending_ParallelOverlapsLLMCalls(t *testing.T) {
+	db := seedTestDB(t)
+
+	var inflight, maxInflight int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n := atomic.AddInt64(&inflight, 1)
+		for { // track the running max in-flight
+			m := atomic.LoadInt64(&maxInflight)
+			if n <= m || atomic.CompareAndSwapInt64(&maxInflight, m, n) {
+				break
+			}
+		}
+		time.Sleep(40 * time.Millisecond) // hold the slot so calls overlap
+		atomic.AddInt64(&inflight, -1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"index":0,"message":{"role":"assistant","content":"{\"txn_type\":\"withdrawal\",\"destination_account_id\":11,\"source_account_id\":1,\"category_id\":5,\"confidence\":0.9,\"description_suggestion\":\"x\",\"reasoning\":\"r\"}"},"finish_reason":"stop"}],"usage":{}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	c := New(db, slog.Default(), DefaultConfidenceThreshold, 10)
+	c.SetLLM(llm.NewClient("k", "", srv.URL, srv.Client()))
+	c.SetConcurrency(8)
+
+	const n = 24
+	for i := 0; i < n; i++ {
+		if _, err := db.Exec(`
+			INSERT INTO staged_fold_txns (fold_uuid, raw_payload, amount_paise, currency, txn_timestamp,
+			    mode, type, narration, merchant_extracted, status)
+			VALUES (?, '{}', 10000, 'INR', '2026-05-08T10:00:00Z',
+			    'CARD','OUTGOING','CARD/x/Zomato/Rs/100/OUTGOING','zomato','pending')`,
+			fmt.Sprintf("par-%02d", i)); err != nil {
+			t.Fatalf("seed %d: %v", i, err)
+		}
+	}
+
+	rep, err := c.ClassifyPending(context.Background())
+	if err != nil {
+		t.Fatalf("ClassifyPending: %v", err)
+	}
+	if rep.Examined != n {
+		t.Errorf("examined=%d, want %d", rep.Examined, n)
+	}
+	if rep.AutoClassified != n {
+		t.Errorf("auto_classified=%d, want %d (all confident)", rep.AutoClassified, n)
+	}
+	if got := atomic.LoadInt64(&maxInflight); got < 2 {
+		t.Errorf("peak in-flight LLM calls = %d; expected >1 — parallelism isn't happening", got)
+	}
+	var pending int
+	if err := db.QueryRow(`SELECT count(*) FROM staged_fold_txns WHERE status='pending'`).Scan(&pending); err != nil {
+		t.Fatal(err)
+	}
+	if pending != 0 {
+		t.Errorf("expected 0 rows still pending after parallel classify, got %d", pending)
 	}
 }
 

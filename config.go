@@ -90,6 +90,14 @@ type Config struct {
 	// 2000 covers >18 months of typical activity (~150 txns/month) so
 	// any realistic outage self-heals on the next tick.
 	PeriodicSyncLimit int // TEXAS_FOLDEM_PERIODIC_SYNC_LIMIT   default 2000
+
+	// ClassifyConcurrency bounds how many staged rows the classifier
+	// processes in parallel. Each row's Tier-3 LLM call dominates latency
+	// and holds no DB connection, so fanning out turns a multi-hour
+	// scope=all backfill into minutes. 8 is a safe default against
+	// DeepSeek (the LLM client retries 429s with backoff); raise/lower to
+	// taste, or set 1 to force the original sequential behaviour.
+	ClassifyConcurrency int // TEXAS_FOLDEM_CLASSIFY_CONCURRENCY  default 8
 }
 
 // LoadConfig reads env vars and returns a validated Config. It never reads
@@ -101,27 +109,28 @@ func LoadConfig() (Config, error) {
 	}
 
 	cfg := Config{
-		ListenAddr:         envStr("TEXAS_FOLDEM_LISTEN_ADDR", ":8080"),
-		StatePath:          envStr("TEXAS_FOLDEM_STATE_PATH", filepath.Join(home, ".texas-fold-em", "state.json")),
-		BrokerKey:          os.Getenv("TEXAS_FOLDEM_BROKER_KEY"),
-		AdminKey:           os.Getenv("TEXAS_FOLDEM_ADMIN_KEY"),
-		APIBase:            strings.TrimRight(envStr("TEXAS_FOLDEM_API_BASE", "https://api.fold.money/api"), "/"),
-		LogLevel:           envStr("TEXAS_FOLDEM_LOG_LEVEL", "info"),
-		RefreshLead:        envDur("TEXAS_FOLDEM_REFRESH_LEAD", 2*time.Minute),
-		KeepWarmEvery:      envDur("TEXAS_FOLDEM_KEEPWARM_EVERY", time.Minute),
-		HTTPTimeout:        envDur("TEXAS_FOLDEM_HTTP_TIMEOUT", 15*time.Second),
-		ShutdownGrace:      envDur("TEXAS_FOLDEM_SHUTDOWN_GRACE", 10*time.Second),
-		IntegrationEnabled: envBool("TEXAS_FOLDEM_INTEGRATION_ENABLED", false),
-		StagingDBPath:      envStr("TEXAS_FOLDEM_STAGING_DB_PATH", filepath.Join(home, ".texas-fold-em", "staging.db")),
-		FireflyBase:        strings.TrimRight(envStr("TEXAS_FOLDEM_FIREFLY_BASE", "http://firefly.apps.svc.cluster.local:8080"), "/"),
-		FireflyPAT:         os.Getenv("TEXAS_FOLDEM_FIREFLY_PAT"),
-		LLMAPIKey:          os.Getenv("TEXAS_FOLDEM_LLM_API_KEY"),
-		LLMModel:           envStr("TEXAS_FOLDEM_LLM_MODEL", "deepseek-v4-flash"),
-		LLMBaseURL:         strings.TrimRight(envStr("TEXAS_FOLDEM_LLM_BASE_URL", "https://api.deepseek.com/v1"), "/"),
-		FireflyReadOnly:    envBool("TEXAS_FOLDEM_FIREFLY_READONLY", false),
-		UICookieAuth:       envBool("TEXAS_FOLDEM_UI_COOKIE_AUTH", false),
-		PeriodicSyncEvery:  envDur("TEXAS_FOLDEM_PERIODIC_SYNC_EVERY", 0),
-		PeriodicSyncLimit:  envInt("TEXAS_FOLDEM_PERIODIC_SYNC_LIMIT", 2000),
+		ListenAddr:          envStr("TEXAS_FOLDEM_LISTEN_ADDR", ":8080"),
+		StatePath:           envStr("TEXAS_FOLDEM_STATE_PATH", filepath.Join(home, ".texas-fold-em", "state.json")),
+		BrokerKey:           os.Getenv("TEXAS_FOLDEM_BROKER_KEY"),
+		AdminKey:            os.Getenv("TEXAS_FOLDEM_ADMIN_KEY"),
+		APIBase:             strings.TrimRight(envStr("TEXAS_FOLDEM_API_BASE", "https://api.fold.money/api"), "/"),
+		LogLevel:            envStr("TEXAS_FOLDEM_LOG_LEVEL", "info"),
+		RefreshLead:         envDur("TEXAS_FOLDEM_REFRESH_LEAD", 2*time.Minute),
+		KeepWarmEvery:       envDur("TEXAS_FOLDEM_KEEPWARM_EVERY", time.Minute),
+		HTTPTimeout:         envDur("TEXAS_FOLDEM_HTTP_TIMEOUT", 15*time.Second),
+		ShutdownGrace:       envDur("TEXAS_FOLDEM_SHUTDOWN_GRACE", 10*time.Second),
+		IntegrationEnabled:  envBool("TEXAS_FOLDEM_INTEGRATION_ENABLED", false),
+		StagingDBPath:       envStr("TEXAS_FOLDEM_STAGING_DB_PATH", filepath.Join(home, ".texas-fold-em", "staging.db")),
+		FireflyBase:         strings.TrimRight(envStr("TEXAS_FOLDEM_FIREFLY_BASE", "http://firefly.apps.svc.cluster.local:8080"), "/"),
+		FireflyPAT:          os.Getenv("TEXAS_FOLDEM_FIREFLY_PAT"),
+		LLMAPIKey:           os.Getenv("TEXAS_FOLDEM_LLM_API_KEY"),
+		LLMModel:            envStr("TEXAS_FOLDEM_LLM_MODEL", "deepseek-v4-flash"),
+		LLMBaseURL:          strings.TrimRight(envStr("TEXAS_FOLDEM_LLM_BASE_URL", "https://api.deepseek.com/v1"), "/"),
+		FireflyReadOnly:     envBool("TEXAS_FOLDEM_FIREFLY_READONLY", false),
+		UICookieAuth:        envBool("TEXAS_FOLDEM_UI_COOKIE_AUTH", false),
+		PeriodicSyncEvery:   envDur("TEXAS_FOLDEM_PERIODIC_SYNC_EVERY", 0),
+		PeriodicSyncLimit:   envInt("TEXAS_FOLDEM_PERIODIC_SYNC_LIMIT", 2000),
+		ClassifyConcurrency: envInt("TEXAS_FOLDEM_CLASSIFY_CONCURRENCY", 8),
 	}
 
 	var problems []string

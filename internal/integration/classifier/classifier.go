@@ -32,7 +32,10 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/rounakdatta/texas-fold-em/internal/integration/llm"
 )
@@ -147,6 +150,13 @@ type Classifier struct {
 	threshold float64
 	ftsTopK   int
 	llm       *llm.Client // nil → Tier-3 skipped
+	// concurrency bounds how many rows classifyMatching processes in
+	// parallel. <=1 (the default) is strictly sequential. The Tier-3 LLM
+	// call dominates per-row latency and holds no DB connection, so a
+	// bound of N overlaps N LLM calls while SQLite's single writer
+	// serialises the cheap reads/writes — turning a multi-hour backfill
+	// into minutes. Set via SetConcurrency (main wires it from config).
+	concurrency int
 }
 
 // New constructs a Classifier with Tier-3 disabled. Use SetLLM to
@@ -172,6 +182,12 @@ func New(db *sql.DB, log *slog.Logger, threshold float64, ftsTopK int) *Classifi
 // default). When set, ClassifyOne invokes Tier-3 synthesis after
 // gathering deterministic hints from Tiers 1+2. Pass nil to disable.
 func (c *Classifier) SetLLM(client *llm.Client) { c.llm = client }
+
+// SetConcurrency sets how many rows classifyMatching processes in
+// parallel (see the concurrency field). Values <=1 force the original
+// strictly-sequential path. Safe to leave unset for tests; main wires
+// it from TEXAS_FOLDEM_CLASSIFY_CONCURRENCY.
+func (c *Classifier) SetConcurrency(n int) { c.concurrency = n }
 
 // ClassifyOne runs the tiered pipeline against one staged row. Pure
 // function — does not touch staged_fold_txns. Caller (Apply or the
@@ -769,41 +785,32 @@ func (c *Classifier) classifyMatching(ctx context.Context, scope classifyScope) 
 		return report, err
 	}
 
-	for _, s := range staged {
-		report.Examined++
-		d, err := c.ClassifyOne(ctx, s)
-		if err != nil {
-			if errors.Is(err, ErrLLMDeferred) {
-				// LLM unavailable. A previous (worse) run may have
-				// already saved a low-quality decision to this row;
-				// reset to pending so the next classify cycle treats
-				// it as fresh. The "no human edits" guard upstream
-				// protects anything the user has manually adjusted.
-				if resetErr := c.resetToPending(ctx, s.FoldUUID); resetErr != nil {
-					c.log.Warn("classify deferred; reset to pending failed",
-						"fold_uuid", s.FoldUUID, "err", resetErr)
-				}
-				report.Deferred++
-				c.log.Info("classify deferred; LLM unavailable",
-					"fold_uuid", s.FoldUUID, "reason", err)
-				continue
+	// Process rows. Tier 3's LLM call dominates per-row latency (seconds);
+	// run serially, a backfill (scope=all, hundreds of rows) takes hours.
+	// The LLM calls are independent network I/O and ClassifyOne holds no
+	// DB connection across them, so we fan out across a bounded worker
+	// pool: the slow LLM calls overlap while SQLite's single writer
+	// serialises the cheap reads/writes underneath. errgroup gives us the
+	// bound (SetLimit), first-error abort, and ctx-cancellation. A
+	// concurrency of <=1 keeps the original strictly-sequential path.
+	var mu sync.Mutex // guards the shared report counters
+	if c.concurrency <= 1 {
+		for _, s := range staged {
+			if err := c.classifyAndApply(ctx, s, &report, &mu); err != nil {
+				return report, err
 			}
-			c.log.Warn("classify one failed; skipping", "fold_uuid", s.FoldUUID, "err", err)
-			continue
 		}
-		if err := c.ApplyDecision(ctx, s.FoldUUID, d); err != nil {
-			return report, fmt.Errorf("apply %s: %w", s.FoldUUID, err)
+	} else {
+		g, gctx := errgroup.WithContext(ctx)
+		g.SetLimit(c.concurrency)
+		for _, s := range staged {
+			if gctx.Err() != nil {
+				break // ctx cancelled or a sibling returned a fatal error
+			}
+			g.Go(func() error { return c.classifyAndApply(gctx, s, &report, &mu) })
 		}
-		switch d.Tier {
-		case TierMerchantLookup:
-			report.Tier1Hits++
-		case TierFTSVote:
-			report.Tier2Hits++
-		}
-		if d.Tier == TierHumanReview || d.Confidence < c.threshold {
-			report.NeedsReview++
-		} else {
-			report.AutoClassified++
+		if err := g.Wait(); err != nil {
+			return report, err
 		}
 	}
 	report.Duration = time.Since(start)
@@ -817,6 +824,62 @@ func (c *Classifier) classifyMatching(ctx context.Context, scope classifyScope) 
 		"duration_ms", report.Duration.Milliseconds(),
 	)
 	return report, nil
+}
+
+// classifyAndApply classifies one staged row and persists the decision,
+// updating the shared report under mu. It is the per-row body shared by
+// the sequential and parallel paths in classifyMatching, so both behave
+// identically. Returns a non-nil error only for a fatal persistence
+// failure (which aborts the whole batch); per-row classification issues
+// (LLM deferral, a single bad row) are handled in place and return nil.
+//
+// Concurrency notes: ClassifyOne reads the DB and calls the LLM but holds
+// no connection across the HTTP call, so parallel callers overlap their
+// LLM latency while SQLite's single connection serialises every DB op.
+// mu guards only the in-memory counters.
+func (c *Classifier) classifyAndApply(ctx context.Context, s StagedRow, report *ClassifyReport, mu *sync.Mutex) error {
+	mu.Lock()
+	report.Examined++
+	mu.Unlock()
+
+	d, err := c.ClassifyOne(ctx, s)
+	if err != nil {
+		if errors.Is(err, ErrLLMDeferred) {
+			// LLM unavailable. A previous (worse) run may have already
+			// saved a low-quality decision to this row; reset to pending
+			// so the next classify cycle treats it as fresh. The "no
+			// human edits" guard upstream protects manual adjustments.
+			if resetErr := c.resetToPending(ctx, s.FoldUUID); resetErr != nil {
+				c.log.Warn("classify deferred; reset to pending failed",
+					"fold_uuid", s.FoldUUID, "err", resetErr)
+			}
+			mu.Lock()
+			report.Deferred++
+			mu.Unlock()
+			c.log.Info("classify deferred; LLM unavailable",
+				"fold_uuid", s.FoldUUID, "reason", err)
+			return nil
+		}
+		c.log.Warn("classify one failed; skipping", "fold_uuid", s.FoldUUID, "err", err)
+		return nil
+	}
+	if err := c.ApplyDecision(ctx, s.FoldUUID, d); err != nil {
+		return fmt.Errorf("apply %s: %w", s.FoldUUID, err)
+	}
+	mu.Lock()
+	switch d.Tier {
+	case TierMerchantLookup:
+		report.Tier1Hits++
+	case TierFTSVote:
+		report.Tier2Hits++
+	}
+	if d.Tier == TierHumanReview || d.Confidence < c.threshold {
+		report.NeedsReview++
+	} else {
+		report.AutoClassified++
+	}
+	mu.Unlock()
+	return nil
 }
 
 // helpers ////////////////////////////////////////////////////////////////
