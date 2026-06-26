@@ -2,3 +2,6 @@
 coverage.out
 state.json
 .DS_Store
+# Local classifier sandbox: pulled staging.db snapshot + LLM key + state.
+# Never commit — contains real financial data and a live API key.
+/.local/
