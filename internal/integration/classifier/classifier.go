@@ -738,9 +738,6 @@ const (
 )
 
 func (c *Classifier) classifyMatching(ctx context.Context, scope classifyScope) (ClassifyReport, error) {
-	start := time.Now()
-	report := ClassifyReport{}
-
 	// "no human edits" guard, applied to any non-pending row so we
 	// never overwrite something the user has manually adjusted.
 	const noHumanEdits = `confirmed_destination_account_id IS NULL
@@ -760,39 +757,76 @@ func (c *Classifier) classifyMatching(ctx context.Context, scope classifyScope) 
 		statusFilter = `status = 'pending'`
 	}
 
+	staged, err := c.fetchStagedForClassify(ctx, statusFilter)
+	if err != nil {
+		return ClassifyReport{}, err
+	}
+	return c.runClassify(ctx, staged)
+}
+
+// ReclassifyUUIDs re-runs the classifier on a specific set of staged rows
+// — the "backfill these particular transactions" action behind the review
+// UI's reclassify-selected button. Pushed rows are skipped (they already
+// live in firefly; re-classifying would un-set their terminal status).
+// confirmed_* human edits are preserved — only proposed_* and the row's
+// status get recomputed.
+func (c *Classifier) ReclassifyUUIDs(ctx context.Context, uuids []string) (ClassifyReport, error) {
+	if len(uuids) == 0 {
+		return ClassifyReport{}, nil
+	}
+	ph := make([]string, len(uuids))
+	args := make([]any, len(uuids))
+	for i, u := range uuids {
+		ph[i] = "?"
+		args[i] = u
+	}
+	where := "fold_uuid IN (" + strings.Join(ph, ",") + ") AND status <> 'pushed'"
+	staged, err := c.fetchStagedForClassify(ctx, where, args...)
+	if err != nil {
+		return ClassifyReport{}, err
+	}
+	return c.runClassify(ctx, staged)
+}
+
+// fetchStagedForClassify loads the slim StagedRow set matching a WHERE
+// clause against staged_fold_txns, newest first.
+func (c *Classifier) fetchStagedForClassify(ctx context.Context, where string, args ...any) ([]StagedRow, error) {
 	rows, err := c.db.QueryContext(ctx, `
 		SELECT fold_uuid, narration, mode, type, COALESCE(merchant_extracted,''),
 		       amount_paise, currency, txn_timestamp, raw_payload
 		FROM staged_fold_txns
-		WHERE `+statusFilter+`
+		WHERE `+where+`
 		ORDER BY txn_timestamp DESC
-	`)
+	`, args...)
 	if err != nil {
-		return report, fmt.Errorf("list pending: %w", err)
+		return nil, fmt.Errorf("list staged: %w", err)
 	}
 	defer rows.Close()
-
 	var staged []StagedRow
 	for rows.Next() {
 		var r StagedRow
 		if err := rows.Scan(&r.FoldUUID, &r.Narration, &r.Mode, &r.Type, &r.MerchantExtracted,
 			&r.AmountPaise, &r.Currency, &r.TxnTimestamp, &r.RawPayload); err != nil {
-			return report, fmt.Errorf("scan: %w", err)
+			return nil, fmt.Errorf("scan: %w", err)
 		}
 		staged = append(staged, r)
 	}
-	if err := rows.Err(); err != nil {
-		return report, err
-	}
+	return staged, rows.Err()
+}
 
-	// Process rows. Tier 3's LLM call dominates per-row latency (seconds);
-	// run serially, a backfill (scope=all, hundreds of rows) takes hours.
-	// The LLM calls are independent network I/O and ClassifyOne holds no
-	// DB connection across them, so we fan out across a bounded worker
-	// pool: the slow LLM calls overlap while SQLite's single writer
-	// serialises the cheap reads/writes underneath. errgroup gives us the
-	// bound (SetLimit), first-error abort, and ctx-cancellation. A
-	// concurrency of <=1 keeps the original strictly-sequential path.
+// runClassify processes a pre-fetched staged set through the tiered
+// pipeline, persisting each decision and accumulating the report.
+//
+// Tier 3's LLM call dominates per-row latency (seconds); run serially, a
+// backfill (hundreds of rows) takes hours. The LLM calls are independent
+// network I/O and ClassifyOne holds no DB connection across them, so we
+// fan out across a bounded worker pool: the slow LLM calls overlap while
+// SQLite's single writer serialises the cheap reads/writes underneath.
+// errgroup gives us the bound (SetLimit), first-error abort, and
+// ctx-cancellation. concurrency <= 1 keeps a strictly-sequential path.
+func (c *Classifier) runClassify(ctx context.Context, staged []StagedRow) (ClassifyReport, error) {
+	start := time.Now()
+	report := ClassifyReport{}
 	var mu sync.Mutex // guards the shared report counters
 	if c.concurrency <= 1 {
 		for _, s := range staged {

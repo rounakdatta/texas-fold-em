@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/rounakdatta/texas-fold-em/internal/integration"
+	"github.com/rounakdatta/texas-fold-em/internal/integration/classifier"
 	"github.com/rounakdatta/texas-fold-em/internal/integration/firefly"
 )
 
@@ -90,6 +91,8 @@ func newUITestHarness(t *testing.T, auth AuthMode) *uiTestHarness {
 	if err != nil {
 		t.Fatalf("ui.New: %v", err)
 	}
+	// Deterministic classifier (no LLM) so reclassify-selected works in tests.
+	h.SetClassifier(classifier.New(idb.DB, slog.New(slog.NewTextHandler(io.Discard, nil)), 0, 10))
 
 	mux := http.NewServeMux()
 	h.Mount(mux)
@@ -142,8 +145,10 @@ func TestUI_IndexBypassMode(t *testing.T) {
 	if !strings.Contains(string(body), "rev-1") {
 		t.Errorf("expected rev-1 in index body, got: %s", body)
 	}
-	if !strings.Contains(string(body), "cake palace") {
-		t.Errorf("expected merchant in body, got: %s", body)
+	// Destination now resolves to the firefly account name (proposed
+	// destination 12 → "Cake Palace"), not the raw lowercase merchant.
+	if !strings.Contains(string(body), "Cake Palace") {
+		t.Errorf("expected resolved destination 'Cake Palace' in body, got: %s", body)
 	}
 }
 
@@ -566,13 +571,14 @@ func TestUI_Save_NewDestinationName(t *testing.T) {
 // the "all" nav tab active.
 func TestUI_IndexAllStatus(t *testing.T) {
 	u := newUITestHarness(t, AuthModeBypass)
-	// Harness seeds rev-1 (needs_review, merchant "cake palace"). Add one
-	// ready_to_push and one pushed so "all" spans three statuses.
+	// Harness seeds rev-1 (needs_review, dest "Cake Palace"). Add one
+	// ready_to_push (high confidence → full battery) and one pushed so
+	// "all" spans three statuses.
 	if _, err := u.db.DB.Exec(`
 		INSERT INTO staged_fold_txns (fold_uuid, raw_payload, amount_paise, currency, txn_timestamp,
-		    mode, type, narration, merchant_extracted, status)
-		VALUES ('rtp-1','{}',2500,'INR','2026-05-09T10:00:00Z','CARD','OUTGOING','x','zomato','ready_to_push'),
-		       ('psh-1','{}',3500,'INR','2026-05-09T11:00:00Z','CARD','OUTGOING','x','swiggy','pushed')
+		    mode, type, narration, merchant_extracted, status, classifier_tier, classifier_confidence)
+		VALUES ('rtp-1','{}',2500,'INR','2026-05-09T10:00:00Z','CARD','OUTGOING','x','zomato','ready_to_push',3,0.92),
+		       ('psh-1','{}',3500,'INR','2026-05-09T11:00:00Z','CARD','OUTGOING','x','swiggy','pushed',1,1.0)
 	`); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -585,10 +591,11 @@ func TestUI_IndexAllStatus(t *testing.T) {
 	s, _ := io.ReadAll(resp.Body)
 	body := string(s)
 
-	// All three statuses' rows are present.
-	for _, m := range []string{"cake palace", "zomato", "swiggy"} {
+	// All three statuses' rows are present (rev-1's destination resolves
+	// to "Cake Palace"; rtp-1/psh-1 fall back to the raw merchant).
+	for _, m := range []string{"Cake Palace", "zomato", "swiggy"} {
 		if !strings.Contains(body, m) {
-			t.Errorf("all view missing merchant %q", m)
+			t.Errorf("all view missing destination %q", m)
 		}
 	}
 	if !strings.Contains(body, "all (3)") {
@@ -600,9 +607,57 @@ func TestUI_IndexAllStatus(t *testing.T) {
 			t.Errorf("all view missing status icon %q", cls)
 		}
 	}
+	// Cockpit columns + the battery gauge (rtp-1 conf 0.92 → high band).
+	for _, want := range []string{"<th>Source</th>", "<th>Destination</th>", "<th>Confidence</th>", "batt-high"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("all view missing %q", want)
+		}
+	}
 	// The "all" nav tab is highlighted as active.
 	if !strings.Contains(body, `?status=all" class="active"`) {
 		t.Errorf("expected the 'all' nav tab to be marked active")
+	}
+}
+
+// TestUI_ReclassifySelected: posting selected fold_uuids re-runs the
+// classifier on them. rev-1 starts as Tier 4 (no match); with the seeded
+// firefly corpus the FTS vote re-tiers it. An empty selection is a
+// graceful no-op flash.
+func TestUI_ReclassifySelected(t *testing.T) {
+	u := newUITestHarness(t, AuthModeBypass)
+
+	form := url.Values{}
+	form.Set("fold_uuids", "rev-1")
+	form.Set("back", "/admin/ui/?status=needs_review")
+	resp := u.do(t, "POST", "/admin/ui/reclassify", form)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("expected 303, got %d", resp.StatusCode)
+	}
+	// rev-1 was Tier 4; reclassification should move it off 4 (FTS hits
+	// the seeded "Cake Palace" rows).
+	var tier sql.NullInt64
+	if err := u.db.DB.QueryRow(`SELECT classifier_tier FROM staged_fold_txns WHERE fold_uuid='rev-1'`).Scan(&tier); err != nil {
+		t.Fatal(err)
+	}
+	if !tier.Valid || tier.Int64 == 4 {
+		t.Errorf("rev-1 should have been re-tiered off Tier 4, got %v", tier)
+	}
+	var gotFlash bool
+	for _, c := range resp.Cookies() {
+		if c.Name == "tfe-flash" && strings.Contains(c.Value, "reclassified") {
+			gotFlash = true
+		}
+	}
+	if !gotFlash {
+		t.Errorf("expected a 'reclassified' flash")
+	}
+
+	// Empty selection → graceful flash, no error.
+	resp2 := u.do(t, "POST", "/admin/ui/reclassify", url.Values{"back": {"/admin/ui/?status=all"}})
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusSeeOther {
+		t.Fatalf("empty selection: expected 303, got %d", resp2.StatusCode)
 	}
 }
 

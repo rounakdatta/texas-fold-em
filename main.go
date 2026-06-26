@@ -180,6 +180,11 @@ func run() error {
 		if err != nil {
 			return fmt.Errorf("ui handler: %w", err)
 		}
+		// Public firefly URL (optional) → review UI deep-links pushed rows
+		// to their firefly transaction. Classifier wired so the UI can
+		// reclassify selected rows on demand.
+		uiHandler.SetFireflyPublicURL(cfg.FireflyPublicURL)
+		uiHandler.SetClassifier(cls)
 		srv.SetUI(uiHandler)
 
 		intLog.Info("integration ready",
