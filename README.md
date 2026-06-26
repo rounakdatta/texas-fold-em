@@ -191,6 +191,31 @@ make test         # go test -race ./...
 make build        # native binary
 ```
 
+## Local sandbox (fast classifier iteration)
+
+The classifier reads only the local SQLite mirror (`firefly_txns`,
+`merchant_lookup`, `fold_accounts`) — firefly, fold and the database are
+touched only by the syncer and pusher. So you can iterate on
+classification quality against *real* data without running any of them:
+just a snapshot of `staging.db` plus an LLM key.
+
+```bash
+# point kubectl at the cluster first (see the access-homelab skill), then:
+make sandbox            # pulls a staging.db snapshot + LLM key, runs tfe
+REFRESH=1 make sandbox  # re-pull the live snapshot before running
+```
+
+Then open `http://127.0.0.1:8099/admin/ui/` and, to iterate on one
+transaction end-to-end (reset → classify → inspect):
+
+```bash
+./scripts/reclassify-one.sh <fold_uuid>
+```
+
+The snapshot, LLM key and local state land in `./.local/` (gitignored —
+it holds real financial data and a live key). No firefly/fold/MySQL run;
+the broker is unseeded and the syncer/pusher never fire.
+
 ## License
 
 Personal project, do whatever you want.
