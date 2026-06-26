@@ -1,13 +1,13 @@
 // Package ui is the server-rendered admin UI for the integration.
 // HTML pages at /admin/ui/. The UI lets a human:
 //
-//	- list staged fold transactions filtered by status
-//	- inspect a row's classifier decision and evidence
-//	- edit the proposed firefly fields (destination, source, category,
-//	  budget, description, tags)
-//	- push to firefly (with the same idempotency safety as the JSON
-//	  endpoint — the Pusher is the same code path)
-//	- skip a transaction (excluded from firefly forever)
+//   - list staged fold transactions filtered by status
+//   - inspect a row's classifier decision and evidence
+//   - edit the proposed firefly fields (destination, source, category,
+//     budget, description, tags)
+//   - push to firefly (with the same idempotency safety as the JSON
+//     endpoint — the Pusher is the same code path)
+//   - skip a transaction (excluded from firefly forever)
 //
 // The UI is intentionally minimal — single-page detail view, dark-mode
 // CSS in the template. No client-side framework. No JS beyond what
@@ -64,22 +64,27 @@ const (
 // into one template, the last-parsed `content` definition would win
 // for every render.
 type Handler struct {
-	db          *sql.DB
-	pusher      *integration.Pusher
-	log         *slog.Logger
-	adminKey    string
-	auth        AuthMode
-	indexTmpl   *template.Template
-	detailTmpl  *template.Template
+	db         *sql.DB
+	pusher     *integration.Pusher
+	log        *slog.Logger
+	adminKey   string
+	auth       AuthMode
+	indexTmpl  *template.Template
+	detailTmpl *template.Template
 }
 
 // New constructs a UI Handler.
 func New(db *sql.DB, pusher *integration.Pusher, log *slog.Logger, adminKey string, auth AuthMode) (*Handler, error) {
-	indexTmpl, err := template.ParseFS(tmplFS, "templates/layout.html", "templates/index.html")
+	// filterURL is shared by the index pagination + filter controls so
+	// every link preserves the active filter set without hand-built
+	// querystrings. Registered on both templates for uniformity even
+	// though only the index references it today.
+	funcs := template.FuncMap{"filterURL": filterURL}
+	indexTmpl, err := template.New("layout.html").Funcs(funcs).ParseFS(tmplFS, "templates/layout.html", "templates/index.html")
 	if err != nil {
 		return nil, fmt.Errorf("parse index template: %w", err)
 	}
-	detailTmpl, err := template.ParseFS(tmplFS, "templates/layout.html", "templates/detail.html")
+	detailTmpl, err := template.New("layout.html").Funcs(funcs).ParseFS(tmplFS, "templates/layout.html", "templates/detail.html")
 	if err != nil {
 		return nil, fmt.Errorf("parse detail template: %w", err)
 	}
@@ -169,6 +174,60 @@ type indexRow struct {
 	TierLabel            string
 	Confidence           float64
 	ProposedCategoryName string
+	// SourceAccountName is the effective paying account (confirmed
+	// overrides proposed), resolved to a firefly name. Empty when the
+	// row has no source account yet (common for pending/needs_review).
+	SourceAccountName string
+}
+
+// listFilters is the set of WHERE constraints the index list honours.
+// It is the seed of a small filter framework: each dimension contributes
+// one optional predicate to where(), is preserved across pagination by
+// filterURL, and surfaces as one control in index.html. Adding a new
+// filter (mode, tier, txn type, destination/merchant) is three local
+// edits — a field here, a clause in where(), a control in the template —
+// and nothing else has to change.
+type listFilters struct {
+	Status        string // always set; the status tab
+	SourceAccount string // firefly account id (as string); "" = all accounts
+}
+
+// where renders the filter set into a SQL predicate (against the
+// staged_fold_txns alias `s`) plus its positional args. Always at least
+// the status clause; optional dimensions append when set.
+func (f listFilters) where() (string, []any) {
+	clauses := []string{"s.status = ?"}
+	args := []any{f.Status}
+	if f.SourceAccount != "" {
+		// Effective source = confirmed (human) overrides proposed
+		// (classifier) — the same precedence the Pusher uses when it
+		// resolves which account to send to firefly. A non-numeric value
+		// is dropped upstream in handleIndex, so ParseInt should succeed;
+		// guard anyway so a bad param degrades to "all" instead of erroring.
+		if id, err := strconv.ParseInt(f.SourceAccount, 10, 64); err == nil {
+			clauses = append(clauses, "COALESCE(s.confirmed_source_account_id, s.proposed_source_account_id) = ?")
+			args = append(args, id)
+		}
+	}
+	return strings.Join(clauses, " AND "), args
+}
+
+// filterURL builds an index URL that preserves the active filters and
+// targets a specific page. Registered as a template func so pagination
+// links and filter controls never hand-assemble query strings: add a
+// dimension to listFilters.where and to this builder, and every link
+// carries it. page <= 0 omits the page param (lands on page 1).
+func filterURL(f listFilters, perPage, page int) template.URL {
+	v := url.Values{}
+	v.Set("status", f.Status)
+	if f.SourceAccount != "" {
+		v.Set("account", f.SourceAccount)
+	}
+	v.Set("per_page", strconv.Itoa(perPage))
+	if page > 0 {
+		v.Set("page", strconv.Itoa(page))
+	}
+	return template.URL("/admin/ui/?" + v.Encode())
 }
 
 // defaultPerPage / maxPerPage bound the list query. 50 keeps the
@@ -184,13 +243,23 @@ func (h *Handler) handleIndex(w http.ResponseWriter, r *http.Request) {
 	if status == "" {
 		status = "needs_review"
 	}
+	// Ignore a non-numeric account param rather than erroring — a stale
+	// or hand-edited link just falls back to "all accounts".
+	account := strings.TrimSpace(r.URL.Query().Get("account"))
+	if account != "" {
+		if _, err := strconv.ParseInt(account, 10, 64); err != nil {
+			account = ""
+		}
+	}
+	filters := listFilters{Status: status, SourceAccount: account}
+
 	page := parsePositiveInt(r.URL.Query().Get("page"), 1)
 	perPage := parsePositiveInt(r.URL.Query().Get("per_page"), defaultPerPage)
 	if perPage > maxPerPage {
 		perPage = maxPerPage
 	}
 
-	total, err := h.countRows(r.Context(), status)
+	total, err := h.countRows(r.Context(), filters)
 	if err != nil {
 		h.log.Error("count rows", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -206,36 +275,53 @@ func (h *Handler) handleIndex(w http.ResponseWriter, r *http.Request) {
 		page = numPages
 	}
 
-	rows, err := h.listRows(r.Context(), status, perPage, (page-1)*perPage)
+	rows, err := h.listRows(r.Context(), filters, perPage, (page-1)*perPage)
 	if err != nil {
 		h.log.Error("list rows", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+
+	// Account filter dropdown — only accounts that actually appear on
+	// staged rows, so there are no dead options. Resolve the selected
+	// account's name for the heading too.
+	accountOptions, _ := h.listFilterAccounts(r.Context())
+	selectedAccountName := ""
+	for _, o := range accountOptions {
+		if strconv.FormatInt(o.ID, 10) == account {
+			selectedAccountName = o.Name
+			break
+		}
+	}
+
 	h.render(w, h.indexTmpl, map[string]any{
-		"Title":      "review",
-		"Status":     status,
-		"Rows":       rows,
-		"Page":       page,
-		"PerPage":    perPage,
-		"NumPages":   numPages,
-		"TotalCount": total,
-		"HasPrev":    page > 1,
-		"HasNext":    page < numPages,
-		"PrevPage":   page - 1,
-		"NextPage":   page + 1,
-		"Flash":      flashFromCookie(r, w),
+		"Title":               "review",
+		"Status":              status,
+		"Filters":             filters,
+		"AccountOptions":      accountOptions,
+		"SelectedAccount":     account,
+		"SelectedAccountName": selectedAccountName,
+		"Rows":                rows,
+		"Page":                page,
+		"PerPage":             perPage,
+		"NumPages":            numPages,
+		"TotalCount":          total,
+		"HasPrev":             page > 1,
+		"HasNext":             page < numPages,
+		"PrevPage":            page - 1,
+		"NextPage":            page + 1,
+		"Flash":               flashFromCookie(r, w),
 	})
 }
 
-// countRows returns the total number of staged_fold_txns rows in the
-// given status. Used to drive pagination — the prior implementation
-// truncated to 200 with no overflow indicator, hiding rows from the
-// operator when the queue got busy.
-func (h *Handler) countRows(ctx context.Context, status string) (int, error) {
+// countRows returns the total number of staged_fold_txns rows matching
+// the filter set. Drives pagination — must apply the exact same WHERE as
+// listRows or the page count drifts from the rows actually shown.
+func (h *Handler) countRows(ctx context.Context, f listFilters) (int, error) {
+	where, args := f.where()
 	var n int
 	err := h.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM staged_fold_txns WHERE status = ?`, status,
+		`SELECT COUNT(*) FROM staged_fold_txns s WHERE `+where, args...,
 	).Scan(&n)
 	return n, err
 }
@@ -253,18 +339,22 @@ func parsePositiveInt(s string, def int) int {
 	return n
 }
 
-func (h *Handler) listRows(ctx context.Context, status string, limit, offset int) ([]indexRow, error) {
+func (h *Handler) listRows(ctx context.Context, f listFilters, limit, offset int) ([]indexRow, error) {
+	where, args := f.where()
 	q := `
 		SELECT s.fold_uuid, s.txn_timestamp, s.amount_paise, s.currency, s.mode, s.type,
 		       COALESCE(s.merchant_extracted,''), s.status,
 		       s.classifier_tier, s.classifier_confidence,
 		       (SELECT category_name FROM firefly_txns
-		         WHERE category_id = s.proposed_category_id LIMIT 1)
+		         WHERE category_id = s.proposed_category_id LIMIT 1),
+		       (SELECT source_account_name FROM firefly_txns
+		         WHERE source_account_id = COALESCE(s.confirmed_source_account_id, s.proposed_source_account_id) LIMIT 1)
 		FROM staged_fold_txns s
-		WHERE s.status = ?
+		WHERE ` + where + `
 		ORDER BY s.txn_timestamp DESC
 		LIMIT ? OFFSET ?`
-	rows, err := h.db.QueryContext(ctx, q, status, limit, offset)
+	args = append(args, limit, offset)
+	rows, err := h.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -277,10 +367,11 @@ func (h *Handler) listRows(ctx context.Context, status string, limit, offset int
 			tier        sql.NullInt64
 			conf        sql.NullFloat64
 			catName     sql.NullString
+			srcName     sql.NullString
 			tsStr       string
 		)
 		if err := rows.Scan(&r.FoldUUID, &tsStr, &amountPaise, &r.Currency, &r.Mode, &r.Type,
-			&r.MerchantExtracted, &r.Status, &tier, &conf, &catName); err != nil {
+			&r.MerchantExtracted, &r.Status, &tier, &conf, &catName, &srcName); err != nil {
 			return nil, err
 		}
 		// Two views of the timestamp: a server-rendered fallback for
@@ -304,6 +395,9 @@ func (h *Handler) listRows(ctx context.Context, status string, limit, offset int
 		}
 		if catName.Valid {
 			r.ProposedCategoryName = catName.String
+		}
+		if srcName.Valid {
+			r.SourceAccountName = srcName.String
 		}
 		out = append(out, r)
 	}
@@ -374,17 +468,17 @@ func (h *Handler) handleDetail(w http.ResponseWriter, r *http.Request) {
 	suggested, _ := h.suggestedTagsForMerchant(r.Context(), merchantID)
 
 	h.render(w, h.detailTmpl, map[string]any{
-		"Title":          uuid,
-		"Row":            row,
-		"Edit":           edit,
-		"EvidencePretty": prettyJSON(evidence),
-		"Flash":          flashFromCookie(r, w),
-		"DestOptions":    destAccounts,
-		"SourceOptions":  srcAccounts,
+		"Title":           uuid,
+		"Row":             row,
+		"Edit":            edit,
+		"EvidencePretty":  prettyJSON(evidence),
+		"Flash":           flashFromCookie(r, w),
+		"DestOptions":     destAccounts,
+		"SourceOptions":   srcAccounts,
 		"CategoryOptions": categories,
-		"BudgetOptions":  budgets,
-		"TagLibrary":     allTags,
-		"SuggestedTags":  suggested,
+		"BudgetOptions":   budgets,
+		"TagLibrary":      allTags,
+		"SuggestedTags":   suggested,
 	})
 }
 

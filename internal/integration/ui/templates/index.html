@@ -1,12 +1,26 @@
 {{define "content"}}
 <h2>
   {{.Status}} ({{.TotalCount}})
+  {{if .SelectedAccountName}}<span style="color:var(--accent);font-weight:normal">· {{.SelectedAccountName}}</span>{{end}}
   {{if gt .NumPages 1}}
     <span style="color:var(--muted);font-weight:normal;font-size:0.7em">
       page {{.Page}} of {{.NumPages}} · {{.PerPage}}/page
     </span>
   {{end}}
 </h2>
+<form method="get" style="margin:-4px 0 18px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+  <input type="hidden" name="status" value="{{.Status}}">
+  <input type="hidden" name="per_page" value="{{.PerPage}}">
+  <span style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">account</span>
+  <select name="account" onchange="this.form.submit()" style="width:auto;min-width:200px">
+    <option value="">all accounts</option>
+    {{range .AccountOptions}}
+    <option value="{{.ID}}"{{if eq (printf "%d" .ID) $.SelectedAccount}} selected{{end}}>{{.Name}}</option>
+    {{end}}
+  </select>
+  {{if .SelectedAccount}}<a href="/admin/ui/?status={{.Status}}&amp;per_page={{.PerPage}}" style="font-size:12px">clear</a>{{end}}
+  <noscript><button class="btn btn-secondary" type="submit">apply</button></noscript>
+</form>
 {{if eq .TotalCount 0}}
   <p style="color:var(--muted)">No rows in this state. {{if eq .Status "needs_review"}}If everything's auto-classified, this is the goal — the active-learning loop is doing its job.{{end}}</p>
 {{else}}
@@ -17,6 +31,7 @@
         <th>Amount</th>
         <th>Mode</th>
         <th>Merchant</th>
+        <th>Account</th>
         <th>Tier</th>
         <th>Conf</th>
         <th>Proposed category</th>
@@ -32,6 +47,7 @@
         </td>
         <td><span class="pill pill-{{.Mode}}">{{.Mode}}</span></td>
         <td>{{.MerchantExtracted}}</td>
+        <td style="color:var(--muted)">{{.SourceAccountName}}</td>
         <td class="tier">{{.TierLabel}}</td>
         <td>{{if .Confidence}}{{printf "%.2f" .Confidence}}{{end}}</td>
         <td>{{.ProposedCategoryName}}</td>
@@ -43,20 +59,20 @@
   {{if gt .NumPages 1}}
     <nav style="margin-top:16px;display:flex;gap:12px;align-items:center;color:var(--muted)">
       {{if .HasPrev}}
-        <a href="/admin/ui/?status={{.Status}}&amp;page={{.PrevPage}}&amp;per_page={{.PerPage}}">← prev</a>
+        <a href="{{filterURL .Filters .PerPage .PrevPage}}">← prev</a>
       {{else}}
         <span style="opacity:0.4">← prev</span>
       {{end}}
       <span>page {{.Page}} / {{.NumPages}}</span>
       {{if .HasNext}}
-        <a href="/admin/ui/?status={{.Status}}&amp;page={{.NextPage}}&amp;per_page={{.PerPage}}">next →</a>
+        <a href="{{filterURL .Filters .PerPage .NextPage}}">next →</a>
       {{else}}
         <span style="opacity:0.4">next →</span>
       {{end}}
       <span style="margin-left:auto;font-size:0.85em">
         showing {{.PerPage}} per page · jump:
-        <a href="/admin/ui/?status={{.Status}}&amp;page=1&amp;per_page={{.PerPage}}">first</a> ·
-        <a href="/admin/ui/?status={{.Status}}&amp;page={{.NumPages}}&amp;per_page={{.PerPage}}">last</a>
+        <a href="{{filterURL .Filters .PerPage 1}}">first</a> ·
+        <a href="{{filterURL .Filters .PerPage .NumPages}}">last</a>
       </span>
     </nav>
   {{end}}
