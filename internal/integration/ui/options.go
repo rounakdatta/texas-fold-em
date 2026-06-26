@@ -48,6 +48,48 @@ func (h *Handler) listAccountsByKind(ctx context.Context, kind string) ([]nameOp
 	return out, rows.Err()
 }
 
+// listFilterAccounts returns the distinct source accounts that actually
+// appear on staged rows (effective source = confirmed ?? proposed),
+// resolved to display names and sorted alphabetically. This backs the
+// index account-filter dropdown — listing only filterable accounts so
+// there are no dead options, unlike a blanket scan of every firefly
+// source account (which would include long-gone payers). The set is
+// tiny (a handful of cards/banks), so the per-id name lookup is cheap.
+func (h *Handler) listFilterAccounts(ctx context.Context) ([]nameOption, error) {
+	rows, err := h.db.QueryContext(ctx, `
+		SELECT DISTINCT COALESCE(confirmed_source_account_id, proposed_source_account_id) AS aid
+		FROM staged_fold_txns
+		WHERE COALESCE(confirmed_source_account_id, proposed_source_account_id) IS NOT NULL
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]nameOption, 0, len(ids))
+	for _, id := range ids {
+		name := h.lookupAccountName(ctx, id)
+		if name == "" {
+			name = fmt.Sprintf("account #%d", id)
+		}
+		out = append(out, nameOption{ID: id, Name: name})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
+	})
+	return out, nil
+}
+
 // listCategories / listBudgets are siblings of listAccountsByKind for
 // the smaller dimension tables.
 func (h *Handler) listCategories(ctx context.Context) ([]nameOption, error) {

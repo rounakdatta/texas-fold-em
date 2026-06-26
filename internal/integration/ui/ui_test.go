@@ -231,6 +231,97 @@ func TestUI_IndexPagination(t *testing.T) {
 	}
 }
 
+// TestUI_IndexAccountFilter verifies the source-account filter narrows
+// the list to rows whose effective source account matches, that the
+// dropdown offers every account present on staged rows, and that the
+// unfiltered view still shows everything.
+func TestUI_IndexAccountFilter(t *testing.T) {
+	u := newUITestHarness(t, AuthModeBypass)
+
+	// A second asset account so id 2 resolves to a name in the dropdown.
+	if _, err := u.db.DB.Exec(`
+		INSERT INTO firefly_txns (firefly_id, group_id, txn_type, amount_paise, currency, date,
+		    source_account_id, source_account_name,
+		    destination_account_id, destination_account_name, destination_account_name_normalized,
+		    description, tags_json)
+		VALUES (910, 9100, 'withdrawal', 1000, 'INR', '2026-04-02',
+		        2, 'Amex Card', 13, 'Some Shop', 'some shop', 'seed amex', '[]')
+	`); err != nil {
+		t.Fatalf("seed firefly_txns: %v", err)
+	}
+
+	// Two ready_to_push rows with different effective source accounts:
+	// one on HDFC (id 1), one on Amex (id 2).
+	if _, err := u.db.DB.Exec(`
+		INSERT INTO staged_fold_txns (fold_uuid, raw_payload, amount_paise, currency, txn_timestamp,
+		    mode, type, narration, merchant_extracted, status, proposed_source_account_id)
+		VALUES ('acct-hdfc','{}',2500,'INR','2026-05-09T10:00:00Z','CARD','OUTGOING','x','zomato','ready_to_push',1),
+		       ('acct-amex','{}',3500,'INR','2026-05-09T11:00:00Z','CARD','OUTGOING','x','district','ready_to_push',2)
+	`); err != nil {
+		t.Fatalf("seed staged: %v", err)
+	}
+
+	// Filter to HDFC (id 1): the zomato row only.
+	resp := u.do(t, "GET", "/admin/ui/?status=ready_to_push&account=1", nil)
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	s, _ := io.ReadAll(resp.Body)
+	body := string(s)
+	if !strings.Contains(body, "zomato") {
+		t.Errorf("expected HDFC (zomato) row in filtered list")
+	}
+	if strings.Contains(body, "district") {
+		t.Errorf("did not expect Amex (district) row when filtering by HDFC")
+	}
+	if !strings.Contains(body, "ready_to_push (1)") {
+		t.Errorf("expected filtered count 1, got: %q", snippet(body, "ready_to_push"))
+	}
+	// The dropdown lists every account present on staged rows, regardless
+	// of the active filter.
+	if !strings.Contains(body, "HDFC Card") || !strings.Contains(body, "Amex Card") {
+		t.Errorf("expected both HDFC Card and Amex Card in the filter dropdown")
+	}
+
+	// A bogus (non-numeric) account param degrades to "all accounts".
+	respBad := u.do(t, "GET", "/admin/ui/?status=ready_to_push&account=not-a-number", nil)
+	defer respBad.Body.Close()
+	bodyBad, _ := io.ReadAll(respBad.Body)
+	if !strings.Contains(string(bodyBad), "ready_to_push (2)") {
+		t.Errorf("bad account param should show all rows, got: %q", snippet(string(bodyBad), "ready_to_push"))
+	}
+
+	// Unfiltered: both rows present, count 2.
+	resp2 := u.do(t, "GET", "/admin/ui/?status=ready_to_push", nil)
+	defer resp2.Body.Close()
+	s2, _ := io.ReadAll(resp2.Body)
+	body2 := string(s2)
+	if !strings.Contains(body2, "zomato") || !strings.Contains(body2, "district") {
+		t.Errorf("expected both rows in the unfiltered list")
+	}
+	if !strings.Contains(body2, "ready_to_push (2)") {
+		t.Errorf("expected unfiltered count 2, got: %q", snippet(body2, "ready_to_push"))
+	}
+}
+
+// TestFilterURL pins the link-builder contract the pagination controls
+// rely on: the active filter set (status + account) is preserved and the
+// page is appended. If a future filter dimension is added, this is where
+// to assert it carries through.
+func TestFilterURL(t *testing.T) {
+	// url.Values.Encode sorts keys, so the expected order is alphabetical.
+	if got, want := string(filterURL(listFilters{Status: "ready_to_push", SourceAccount: "7"}, 50, 3)),
+		"/admin/ui/?account=7&page=3&per_page=50&status=ready_to_push"; got != want {
+		t.Errorf("filterURL with account = %q, want %q", got, want)
+	}
+	// No account → no account param; page <= 0 omits the page param.
+	if got, want := string(filterURL(listFilters{Status: "pending"}, 50, 0)),
+		"/admin/ui/?per_page=50&status=pending"; got != want {
+		t.Errorf("filterURL without account = %q, want %q", got, want)
+	}
+}
+
 // snippet returns a 120-char window around a substring for error messages.
 func snippet(s, needle string) string {
 	i := strings.Index(s, needle)
