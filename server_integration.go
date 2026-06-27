@@ -175,6 +175,25 @@ func (s *Server) handleFoldAccountsSync(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, report)
 }
 
+// handleFireflyAccountsSync is the admin-gated handler for
+// POST /admin/firefly/accounts/sync. It mirrors firefly's OWN account
+// list (GET /api/v1/accounts) into firefly_accounts so the deterministic
+// source resolver can match a fold card against a firefly asset the user
+// just created — no transaction history required. Cheap: a page or two
+// of GETs for a typical book.
+func (s *Server) handleFireflyAccountsSync(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+
+	report, err := s.fireflyAccountsSyncer.Sync(ctx)
+	if err != nil {
+		s.log.Error("firefly accounts sync failed", "err", err)
+		writeErr(w, http.StatusBadGateway, "firefly accounts sync failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
+}
+
 // handleFoldSync is the admin-gated handler for POST /admin/fold/sync.
 // Pulls fold transactions into staged_fold_txns (idempotent on
 // fold_uuid). Stage-only: this endpoint never classifies, never pushes

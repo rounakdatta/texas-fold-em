@@ -27,10 +27,11 @@ type Server struct {
 	log           *slog.Logger
 	started       time.Time
 	integration        *integration.DB
-	fireflySyncer      *integration.Syncer
-	foldSyncer         *integration.FoldSyncer
-	foldAccountsSyncer *integration.FoldAccountsSyncer
-	classifier         *classifier.Classifier
+	fireflySyncer         *integration.Syncer
+	foldSyncer            *integration.FoldSyncer
+	foldAccountsSyncer    *integration.FoldAccountsSyncer
+	fireflyAccountsSyncer *integration.FireflyAccountsSyncer
+	classifier            *classifier.Classifier
 	pusher             *integration.Pusher
 	uiHandler          *ui.Handler
 }
@@ -64,6 +65,12 @@ func (s *Server) SetFoldSyncer(syncer *integration.FoldSyncer) { s.foldSyncer = 
 // set, the POST /admin/fold/accounts/sync endpoint is registered.
 func (s *Server) SetFoldAccountsSyncer(syncer *integration.FoldAccountsSyncer) {
 	s.foldAccountsSyncer = syncer
+}
+
+// SetFireflyAccountsSyncer attaches the firefly-accounts mirror syncer.
+// When set, the POST /admin/firefly/accounts/sync endpoint is registered.
+func (s *Server) SetFireflyAccountsSyncer(syncer *integration.FireflyAccountsSyncer) {
+	s.fireflyAccountsSyncer = syncer
 }
 
 // SetClassifier attaches the classifier. When set, the
@@ -107,6 +114,9 @@ func (s *Server) Handler() http.Handler {
 	}
 	if s.foldAccountsSyncer != nil {
 		mux.Handle("POST /admin/fold/accounts/sync", s.bearer(s.adminKey, s.handleFoldAccountsSync))
+	}
+	if s.fireflyAccountsSyncer != nil {
+		mux.Handle("POST /admin/firefly/accounts/sync", s.bearer(s.adminKey, s.handleFireflyAccountsSync))
 	}
 	if s.classifier != nil {
 		mux.Handle("POST /admin/classify", s.bearer(s.adminKey, s.handleClassify))

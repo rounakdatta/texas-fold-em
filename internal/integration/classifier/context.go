@@ -86,7 +86,13 @@ type AccountRef struct {
 }
 
 // listAssetAccounts returns the user's own bank/card/wallet accounts
-// — the asset side of the firefly book. We derive it as:
+// — the asset side of the firefly book.
+//
+// Preferred source is the firefly_accounts mirror (firefly's real
+// account list), which includes assets the user created but hasn't
+// transacted on yet. When that mirror is empty (fresh deploy before the
+// first accounts sync, or a test that doesn't seed it) we fall back to
+// deriving assets from transaction history:
 //
 //	source side of withdrawals  (user paid → user's account is source)
 //	+ destination side of deposits (someone paid user → user's account is destination)
@@ -94,6 +100,13 @@ type AccountRef struct {
 // Deduped by id. For a typical user this is ≤ 20 entries — small
 // enough to inline in every Tier-3 prompt.
 func listAssetAccounts(ctx context.Context, db *sql.DB) ([]AccountRef, error) {
+	if mirror, err := listDistinct(ctx, db, `
+		SELECT firefly_id, name FROM firefly_accounts
+		WHERE type = 'asset' AND active = 1
+		ORDER BY name COLLATE NOCASE
+	`); err == nil && len(mirror) > 0 {
+		return mirror, nil
+	}
 	rows, err := db.QueryContext(ctx, `
 		SELECT id, name FROM (
 		    SELECT source_account_id      AS id, source_account_name      AS name

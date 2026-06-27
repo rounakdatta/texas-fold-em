@@ -35,6 +35,7 @@ func PeriodicSync(
 	ctx context.Context,
 	foldSyncer *integration.FoldSyncer,
 	foldAccountsSyncer *integration.FoldAccountsSyncer,
+	fireflyAccountsSyncer *integration.FireflyAccountsSyncer,
 	cls *classifier.Classifier,
 	every time.Duration,
 	maxTotal int,
@@ -62,7 +63,7 @@ func PeriodicSync(
 			log.Info("periodic sync stopping", "reason", ctx.Err())
 			return
 		case <-tick.C:
-			runOneCycle(ctx, foldSyncer, foldAccountsSyncer, cls, maxTotal, log)
+			runOneCycle(ctx, foldSyncer, foldAccountsSyncer, fireflyAccountsSyncer, cls, maxTotal, log)
 			tick.Reset(every)
 		}
 	}
@@ -72,6 +73,7 @@ func runOneCycle(
 	ctx context.Context,
 	foldSyncer *integration.FoldSyncer,
 	foldAccountsSyncer *integration.FoldAccountsSyncer,
+	fireflyAccountsSyncer *integration.FireflyAccountsSyncer,
 	cls *classifier.Classifier,
 	maxTotal int,
 	log *slog.Logger,
@@ -84,6 +86,17 @@ func runOneCycle(
 			log.Warn("fold accounts sync error (cycle continues)", "err", err)
 		} else {
 			log.Info("periodic fold accounts sync", "fetched", report.Fetched, "upserted", report.Upserted)
+		}
+	}
+	// Refresh firefly's OWN account list too. This is what lets a firefly
+	// asset the user just *created* (no transactions on it yet) be matched
+	// as a transaction's source card within one tick — the gap that left
+	// "Ixigo AU Bank Credit Card" unmatched. Cheap (one or two GETs).
+	if fireflyAccountsSyncer != nil {
+		if report, err := fireflyAccountsSyncer.Sync(ctx); err != nil {
+			log.Warn("firefly accounts sync error (cycle continues)", "err", err)
+		} else {
+			log.Info("periodic firefly accounts sync", "fetched", report.Fetched, "assets", report.Assets)
 		}
 	}
 	if foldSyncer != nil {

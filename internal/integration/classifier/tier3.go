@@ -22,10 +22,13 @@ import (
 //     firefly source is a revenue-side payer and the destination is one
 //     of the user's asset accounts; OUTGOING is the inverse. The
 //     deterministic tiers don't reason about this — Tier 3 must.
-//   - Source-account inference is its primary value-add. The hints from
-//     Tiers 1+2 should be treated as "known-good destination + category"
-//     but the source pick is the LLM's responsibility — we trust the
-//     LLM to read mode/account_id/narration and pick the right card.
+//   - For an OUTGOING txn the source card is NOT the LLM's call. fold's
+//     account_id deterministically identifies the paying card, and the
+//     classifier resolves it to a firefly asset after the LLM returns
+//     (see matchFoldCardToFireflyAsset). Letting the LLM guess the source
+//     is what produced hallucinations like an "AU Ixigo" charge landing
+//     on "Axis Bank Ace". So the prompt tells it to leave source null for
+//     withdrawals; it focuses on destination, category, tags, description.
 const tier3SystemPrompt = `You are a personal-finance synthesiser mapping a fold.money transaction onto a firefly-iii transaction.
 
 You will be given:
@@ -58,7 +61,7 @@ Hard rules:
    - "withdrawal" — fold OUTGOING; source is a user ASSET account, destination is an EXPENSE account (merchant)
    - "deposit"    — fold INCOMING; source is a REVENUE account (payer), destination is a user ASSET account
    - "transfer"   — both source AND destination are the user's own ASSET accounts (e.g. savings → zerodha, credit-card-bill payment from savings to credit-card-account). Fold sees this as OUTGOING/INCOMING but it's a transfer if and only if BOTH endpoints are in the asset list.
-3. Pick the source account using fold's mode + account_id + narration signals — don't blindly copy a "modal source" hint if fold's signals point elsewhere (different card, different bank).
+3. SOURCE ACCOUNT: for a WITHDRAWAL, set source_account_id to null — do NOT try to pick it. The paying card is resolved deterministically from fold's account_id AFTER you return, so any source you guess is discarded; a wrong guess only adds noise. For a DEPOSIT the source is the revenue-side payer — pick the best-matching revenue account (or null if none fits). For a TRANSFER, source is the user asset the money left from — pick it.
 4. Use the historical examples to pick category, budget, and tags. If the user has previously tagged this merchant, mirror those tags.
 5. If the signals genuinely conflict, return confidence < 0.5 and explain in 'reasoning'.
 6. NEW destination accounts: for a WITHDRAWAL whose merchant has NO good match in the expense inventory, do NOT force-fit an unrelated id and do NOT dump it in a generic catch-all account. Instead set destination_account_id to null and put a clean, canonical merchant name in destination_name_suggestion (e.g. "United Airlines" — never the raw bank narration, never a guessed id). firefly creates the expense account on push. Always prefer an existing id when one genuinely fits; only suggest a new name when none does. For deposits and transfers, always use an existing id (do not invent names).
@@ -185,10 +188,15 @@ func (c *Classifier) tierThreeLLM(ctx context.Context, staged StagedRow, tier1Hi
 	}
 	hasDestination := llm.DestinationAccountID != nil || newDestName != ""
 
-	// Accept only when the LLM is reasonably confident, pinned a source,
-	// and has SOME destination (an existing id or a new name). Without a
-	// source + destination the firefly POST would 422.
-	if llm.Confidence < 0.5 || llm.SourceAccountID == nil || !hasDestination {
+	// Accept only when the LLM is reasonably confident and has SOME
+	// destination (an existing id or a new name). The SOURCE requirement
+	// is conditional: for an OUTGOING txn the paying card is resolved
+	// deterministically from fold's account_id after we return (see
+	// classifyAndApply), so we must NOT drop an otherwise-good withdrawal
+	// just because the LLM (correctly) left source null. For INCOMING the
+	// source is the revenue payer — the LLM's job — so keep requiring it.
+	requiresLLMSource := staged.Type != "OUTGOING"
+	if llm.Confidence < 0.5 || (requiresLLMSource && llm.SourceAccountID == nil) || !hasDestination {
 		// Structural decision rejected, but the LLM's description is
 		// independent of the structural confidence — it's based on
 		// STYLE SAMPLES and TIME CONTEXT, which are valid signals
@@ -216,7 +224,10 @@ func (c *Classifier) tierThreeLLM(ctx context.Context, staged StagedRow, tier1Hi
 	if llm.DestinationAccountID != nil {
 		destName = lookupName(inputs, "destination", *llm.DestinationAccountID)
 	}
-	srcName := lookupName(inputs, "source", *llm.SourceAccountID)
+	srcName := ""
+	if llm.SourceAccountID != nil {
+		srcName = lookupName(inputs, "source", *llm.SourceAccountID)
+	}
 	catName := ""
 	if llm.CategoryID != nil {
 		catName = lookupName(inputs, "category", *llm.CategoryID)

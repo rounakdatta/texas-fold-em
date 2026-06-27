@@ -34,7 +34,7 @@ func TestPeriodicSync_StopsOnContextCancel(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		// foldSyncer nil to skip the fold leg; classifier nil-friendly already.
-		PeriodicSync(ctx, nil, nil, cls, 50*time.Millisecond, 50,
+		PeriodicSync(ctx, nil, nil, nil, cls, 50*time.Millisecond, 50,
 			slog.New(slog.NewTextHandler(io.Discard, nil)))
 		close(done)
 	}()
@@ -119,7 +119,7 @@ func TestPeriodicSync_RunsCycleEndToEnd(t *testing.T) {
 		classifier.DefaultConfidenceThreshold, 10)
 
 	// Run one cycle directly (rather than fight a real ticker).
-	runOneCycle(context.Background(), foldSyncer, nil, cls, 50,
+	runOneCycle(context.Background(), foldSyncer, nil, nil, cls, 50,
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	// Assert: 1 staged row, status=ready_to_push (Tier 1 classified it).
