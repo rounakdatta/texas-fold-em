@@ -34,6 +34,7 @@ import (
 func PeriodicSync(
 	ctx context.Context,
 	foldSyncer *integration.FoldSyncer,
+	foldAccountsSyncer *integration.FoldAccountsSyncer,
 	cls *classifier.Classifier,
 	every time.Duration,
 	maxTotal int,
@@ -61,7 +62,7 @@ func PeriodicSync(
 			log.Info("periodic sync stopping", "reason", ctx.Err())
 			return
 		case <-tick.C:
-			runOneCycle(ctx, foldSyncer, cls, maxTotal, log)
+			runOneCycle(ctx, foldSyncer, foldAccountsSyncer, cls, maxTotal, log)
 			tick.Reset(every)
 		}
 	}
@@ -70,10 +71,21 @@ func PeriodicSync(
 func runOneCycle(
 	ctx context.Context,
 	foldSyncer *integration.FoldSyncer,
+	foldAccountsSyncer *integration.FoldAccountsSyncer,
 	cls *classifier.Classifier,
 	maxTotal int,
 	log *slog.Logger,
 ) {
+	// Refresh the fold-accounts mirror first so newly-used cards are known
+	// before we classify — otherwise source-account grounding misses any
+	// card added since the last manual sync. Cheap (a few GETs).
+	if foldAccountsSyncer != nil {
+		if report, err := foldAccountsSyncer.Sync(ctx); err != nil {
+			log.Warn("fold accounts sync error (cycle continues)", "err", err)
+		} else {
+			log.Info("periodic fold accounts sync", "fetched", report.Fetched, "upserted", report.Upserted)
+		}
+	}
 	if foldSyncer != nil {
 		report, err := foldSyncer.SyncSinceFirefly(ctx, maxTotal)
 		if err != nil {
