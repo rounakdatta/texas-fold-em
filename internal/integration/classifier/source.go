@@ -104,7 +104,14 @@ func matchFoldCardToFireflyAsset(fold *FoldAccountRef, assets []fireflyAsset) (i
 	}
 
 	// Tier 3 — distinctive-token overlap, strict unique winner.
-	foldTokens := tokenSet(strings.Join([]string{fold.Name, fold.Provider, fold.Network}, " "))
+	// Deliberately exclude fold.Network: the payment network (Visa/RuPay/…)
+	// is never part of a firefly asset name, so it contributes no matching
+	// signal — but as an extra token it inflates the denominator of the
+	// majority test below and can sink an otherwise-clean single-brand
+	// match (e.g. "Scapia ****1743 (Visa)" → "Scapia Federal Bank Credit
+	// Card"). Network words are also stopworded in case they appear in the
+	// name itself.
+	foldTokens := tokenSet(strings.Join([]string{fold.Name, fold.Provider}, " "))
 	if len(foldTokens) == 0 {
 		return 0, "", false
 	}
@@ -171,6 +178,11 @@ var accountStopwords = map[string]bool{
 	"deposits": true, "fund": true, "funds": true, "ltd": true, "limited": true,
 	"co": true, "corp": true, "india": true, "indian": true, "of": true,
 	"and": true, "debit": true, "wallet": true, "us": true,
+	// Payment networks — never part of a firefly asset name, pure noise
+	// for fold↔firefly matching.
+	"visa": true, "rupay": true, "mastercard": true, "master": true,
+	"amex": true, "maestro": true, "discover": true, "diners": true,
+	"dinersclub": true,
 }
 
 // tokenSet returns the distinctive (non-stopword, non-numeric) tokens of
