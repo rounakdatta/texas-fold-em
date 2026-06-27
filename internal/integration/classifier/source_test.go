@@ -39,10 +39,14 @@ func TestMatchFoldCardToFireflyAsset_RealData(t *testing.T) {
 		fold   FoldAccountRef
 		wantID int64
 	}{
-		{"scapia card", FoldAccountRef{Name: "Scapia Scapia ****1743", Provider: "Scapia", LastFour: "1743"}, 954},
+		// Networks are set as fold actually reports them. The Scapia case is
+		// the regression guard: with a "Visa" network token folded in, the
+		// single shared brand token ("scapia") must still win — networks must
+		// not count toward (or against) the match.
+		{"scapia card", FoldAccountRef{Name: "Scapia Scapia ****1743", Provider: "Scapia", Network: "Visa", LastFour: "1743"}, 954},
 		{"tata neu card", FoldAccountRef{Name: "HDFC Tata Neu Plus ****8943", Provider: "HDFC", Network: "RuPay", LastFour: "8943"}, 476},
-		{"axis ace card", FoldAccountRef{Name: "AXIS Ace ****2895", Provider: "AXIS", LastFour: "2895"}, 163},
-		{"au ixigo card", FoldAccountRef{Name: "AU Ixigo ****9179", Provider: "AU", LastFour: "9179"}, 1314},
+		{"axis ace card", FoldAccountRef{Name: "AXIS Ace ****2895", Provider: "AXIS", Network: "Visa", LastFour: "2895"}, 163},
+		{"au ixigo card", FoldAccountRef{Name: "AU Ixigo ****9179", Provider: "AU", Network: "Visa", LastFour: "9179"}, 1314},
 		{"hdfc bank (last4)", FoldAccountRef{Name: "HDFC Bank ****5684", Provider: "HDFC Bank", LastFour: "5684"}, 12},
 		{"axis bank (exact name)", FoldAccountRef{Name: "Axis Bank ****7037", Provider: "Axis Bank", LastFour: "7037"}, 4},
 	}
