@@ -632,9 +632,14 @@ func (c *Classifier) ApplyDecision(ctx context.Context, foldUUID string, d Decis
 	if newDestination {
 		proposedDestName = strings.TrimSpace(d.DestinationAccountName)
 	}
+	// Always persist the source name when we have one — not just for a
+	// new-name source. A source that RESOLVED to a freshly-created firefly
+	// asset has an id but NO transaction history, so the display-time join
+	// (firefly_txns → name) finds nothing; storing the name here is what
+	// makes "Ixigo AU Bank Credit Card" render the moment it's matched.
 	var proposedSrcName any
-	if newSource {
-		proposedSrcName = strings.TrimSpace(d.SourceAccountName)
+	if s := strings.TrimSpace(d.SourceAccountName); s != "" {
+		proposedSrcName = s
 	}
 	evidenceJSON, err := json.Marshal(d.Evidence)
 	if err != nil {
@@ -907,14 +912,29 @@ func (c *Classifier) classifyAndApply(ctx context.Context, s StagedRow, report *
 		c.log.Warn("classify one failed; skipping", "fold_uuid", s.FoldUUID, "err", err)
 		return nil
 	}
-	// Deterministic source baseline: for an OUTGOING txn fold's account_id
-	// IS the paying (source) card. If no tier pinned a firefly source
-	// asset, surface the fold-side card name so the source is never blank
-	// when fold knows the card. (For INCOMING the account_id is the
-	// receiving account — a destination concern — so we leave source be.)
-	if s.Type == "OUTGOING" && d.SourceAccountID == nil && strings.TrimSpace(d.SourceAccountName) == "" {
+	// Deterministic source resolution: for an OUTGOING txn fold's
+	// account_id IS the paying (source) card — that's ground truth, not a
+	// judgment call. We resolve it deterministically and OVERRIDE whatever
+	// any tier (LLM included, and Tier-1's modal source) guessed. This is
+	// what makes a hallucinated source — an "AU Ixigo" charge shown on
+	// "Axis Bank Ace" — structurally impossible: no tier gets a vote on
+	// the card.
+	//   - fold card → unique firefly asset ⇒ resolved id (pushable)
+	//   - fold card → no confident match   ⇒ propose the fold card name,
+	//       which ApplyDecision routes to review as a new/unmatched card
+	//       (never a wrong existing asset)
+	// For INCOMING the account_id is the *receiving* account — a
+	// destination concern — so we leave source to the LLM's revenue pick.
+	if s.Type == "OUTGOING" {
 		if fa, _ := lookupFoldAccountForStaged(ctx, c.db, s.RawPayload); fa != nil && fa.Name != "" {
-			d.SourceAccountName = fa.Name
+			assets, _ := listFireflyAssetsFromMirror(ctx, c.db)
+			if id, name, ok := matchFoldCardToFireflyAsset(fa, assets); ok {
+				d.SourceAccountID = &id
+				d.SourceAccountName = name
+			} else {
+				d.SourceAccountID = nil
+				d.SourceAccountName = fa.Name
+			}
 		}
 	}
 	if err := c.ApplyDecision(ctx, s.FoldUUID, d); err != nil {

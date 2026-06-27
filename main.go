@@ -114,6 +114,13 @@ func run() error {
 		fireflySyncer := integration.NewSyncer(intDB, fireflyClient, intLog)
 		srv.SetFireflySyncer(fireflySyncer)
 
+		// Firefly accounts mirror — firefly's real asset/expense/revenue
+		// account list. Feeds the deterministic source resolver so a card
+		// the user just created in firefly is matchable with no transaction
+		// history. Refreshed each cron tick and via POST /admin/firefly/accounts/sync.
+		fireflyAccountsSyncer := integration.NewFireflyAccountsSyncer(intDB, fireflyClient, intLog)
+		srv.SetFireflyAccountsSyncer(fireflyAccountsSyncer)
+
 		// Fold read-side client + staging syncer. Bridges the broker's
 		// access tokens into the data-side fold endpoint via a closure;
 		// keeps the broker's auth-side client and the integration's
@@ -199,6 +206,7 @@ func run() error {
 			"periodic_sync_every", cfg.PeriodicSyncEvery,
 			"endpoints", []string{
 				"POST /admin/firefly/sync",
+				"POST /admin/firefly/accounts/sync",
 				"POST /admin/fold/sync",
 				"POST /admin/fold/accounts/sync",
 				"POST /admin/classify",
@@ -214,7 +222,7 @@ func run() error {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				cron.PeriodicSync(rootCtx, foldSyncer, foldAccountsSyncer, cls, cfg.PeriodicSyncEvery, cfg.PeriodicSyncLimit, intLog)
+				cron.PeriodicSync(rootCtx, foldSyncer, foldAccountsSyncer, fireflyAccountsSyncer, cls, cfg.PeriodicSyncEvery, cfg.PeriodicSyncLimit, intLog)
 			}()
 		}
 	}

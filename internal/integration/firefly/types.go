@@ -113,6 +113,10 @@ type AccountAttribs struct {
 	Active         bool   `json:"active"`
 	CurrencyCode   string `json:"currency_code"`
 	AccountRole    string `json:"account_role"`
+	// AccountNumber often holds the card/account number; for the
+	// deterministic source resolver this is where a card's last-four
+	// digits live (firefly asset *names* rarely carry them).
+	AccountNumber  string `json:"account_number"`
 }
 
 type AccountListResponse struct {

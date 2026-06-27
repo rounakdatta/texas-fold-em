@@ -313,6 +313,66 @@ func TestClassify_SourceNameFromFoldAccount(t *testing.T) {
 	}
 }
 
+// TestClassify_SourceResolvesFromFireflyMirror is the definitive
+// regression test for the source-hallucination bug. The fold card
+// (AU Ixigo) exists as a firefly asset in the mirror; the row's merchant
+// (zomato) has a Tier-1 lookup whose modal source is a DIFFERENT card
+// ("HDFC Card", id 1). The deterministic resolver must OVERRIDE that and
+// set the source to the AU asset (1314) the card actually maps to — never
+// the merchant's usual card, never the Axis decoy.
+func TestClassify_SourceResolvesFromFireflyMirror(t *testing.T) {
+	db := seedTestDB(t)
+	c := New(db, slog.Default(), DefaultConfidenceThreshold, 10) // no LLM
+
+	// fold card the charge was actually made on.
+	if _, err := db.Exec(`
+		INSERT INTO fold_accounts (fold_account_id, kind, name, provider, network, last_four, raw_payload, is_closed)
+		VALUES ('au-test','CREDIT_CARD','AU Ixigo ****9179','AU','Visa','9179','{}',0)`); err != nil {
+		t.Fatalf("seed fold_accounts: %v", err)
+	}
+	// firefly's real asset list (mirror) — incl. the AU card plus decoys.
+	if _, err := db.Exec(`
+		INSERT INTO firefly_accounts (firefly_id, name, type, account_role, account_number, active, raw_payload)
+		VALUES (1314,'Ixigo AU Bank Credit Card','asset','ccAsset','40697750350291',1,'{}'),
+		       (163,'Axis Bank Ace Credit Card','asset','ccAsset','47001101015328',1,'{}'),
+		       (954,'Scapia Federal Bank Credit Card','asset','ccAsset','40298600009717',1,'{}')`); err != nil {
+		t.Fatalf("seed firefly_accounts: %v", err)
+	}
+	// A zomato charge (Tier-1 will claim it, modal source = HDFC Card id 1)
+	// but paid on the AU card per fold's account_id.
+	if _, err := db.Exec(`
+		INSERT INTO staged_fold_txns (fold_uuid, raw_payload, amount_paise, currency, txn_timestamp,
+		    mode, type, narration, merchant_extracted, status)
+		VALUES ('mirror-1','{"account_id":"au-test"}',5000,'INR','2026-06-26T15:19:00Z',
+		    'CARD','OUTGOING','CARD/x/Zomato/Rs/50/OUTGOING','zomato','pending')`); err != nil {
+		t.Fatalf("seed staged: %v", err)
+	}
+
+	if _, err := c.ClassifyPending(context.Background()); err != nil {
+		t.Fatalf("ClassifyPending: %v", err)
+	}
+
+	var srcID sql.NullInt64
+	var srcName sql.NullString
+	var destID sql.NullInt64
+	if err := db.QueryRow(`
+		SELECT proposed_source_account_id, proposed_source_account_name, proposed_destination_account_id
+		FROM staged_fold_txns WHERE fold_uuid='mirror-1'`).Scan(&srcID, &srcName, &destID); err != nil {
+		t.Fatal(err)
+	}
+	if !srcID.Valid || srcID.Int64 != 1314 {
+		t.Errorf("source id = %v, want 1314 (Ixigo AU) — deterministic resolver must override Tier-1's modal source", srcID)
+	}
+	if srcName.String != "Ixigo AU Bank Credit Card" {
+		t.Errorf("source name = %q, want %q", srcName.String, "Ixigo AU Bank Credit Card")
+	}
+	// Tier-1's destination (Zomato, id 11) must be preserved — only the
+	// source is overridden.
+	if !destID.Valid || destID.Int64 != 11 {
+		t.Errorf("destination id = %v, want 11 (Tier-1 Zomato preserved)", destID)
+	}
+}
+
 // TestReclassifyUUIDs re-runs the classifier on a specific row set:
 // non-pushed rows are reprocessed, pushed rows are skipped (terminal,
 // already in firefly), and unknown ids are ignored.
