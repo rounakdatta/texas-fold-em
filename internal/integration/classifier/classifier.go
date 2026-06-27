@@ -621,12 +621,20 @@ func (c *Classifier) ApplyDecision(ctx context.Context, foldUUID string, d Decis
 	// name) always goes to review: pushing it will CREATE a firefly
 	// expense account, so a human should eyeball the name first.
 	newDestination := d.DestinationAccountID == nil && strings.TrimSpace(d.DestinationAccountName) != ""
-	if d.Tier == TierHumanReview || d.Confidence < c.threshold || newDestination {
+	// A new-name source (no firefly asset, just the fold card name) also
+	// goes to review: pushing it find-or-creates a firefly asset account,
+	// so a human should eyeball it first.
+	newSource := d.SourceAccountID == nil && strings.TrimSpace(d.SourceAccountName) != ""
+	if d.Tier == TierHumanReview || d.Confidence < c.threshold || newDestination || newSource {
 		status = "needs_review"
 	}
 	var proposedDestName any
 	if newDestination {
 		proposedDestName = strings.TrimSpace(d.DestinationAccountName)
+	}
+	var proposedSrcName any
+	if newSource {
+		proposedSrcName = strings.TrimSpace(d.SourceAccountName)
 	}
 	evidenceJSON, err := json.Marshal(d.Evidence)
 	if err != nil {
@@ -646,6 +654,7 @@ func (c *Classifier) ApplyDecision(ctx context.Context, foldUUID string, d Decis
 		    classifier_confidence             = ?,
 		    classifier_evidence_json          = ?,
 		    proposed_source_account_id        = ?,
+		    proposed_source_account_name      = ?,
 		    proposed_destination_account_id   = ?,
 		    proposed_destination_account_name = ?,
 		    proposed_category_id              = ?,
@@ -662,6 +671,7 @@ func (c *Classifier) ApplyDecision(ctx context.Context, foldUUID string, d Decis
 		d.Confidence,
 		string(evidenceJSON),
 		nullableInt64(d.SourceAccountID),
+		proposedSrcName,
 		nullableInt64(d.DestinationAccountID),
 		proposedDestName,
 		nullableInt64(d.CategoryID),
@@ -896,6 +906,16 @@ func (c *Classifier) classifyAndApply(ctx context.Context, s StagedRow, report *
 		}
 		c.log.Warn("classify one failed; skipping", "fold_uuid", s.FoldUUID, "err", err)
 		return nil
+	}
+	// Deterministic source baseline: for an OUTGOING txn fold's account_id
+	// IS the paying (source) card. If no tier pinned a firefly source
+	// asset, surface the fold-side card name so the source is never blank
+	// when fold knows the card. (For INCOMING the account_id is the
+	// receiving account — a destination concern — so we leave source be.)
+	if s.Type == "OUTGOING" && d.SourceAccountID == nil && strings.TrimSpace(d.SourceAccountName) == "" {
+		if fa, _ := lookupFoldAccountForStaged(ctx, c.db, s.RawPayload); fa != nil && fa.Name != "" {
+			d.SourceAccountName = fa.Name
+		}
 	}
 	if err := c.ApplyDecision(ctx, s.FoldUUID, d); err != nil {
 		return fmt.Errorf("apply %s: %w", s.FoldUUID, err)

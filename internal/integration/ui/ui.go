@@ -432,8 +432,12 @@ func (h *Handler) listRows(ctx context.Context, f listFilters, limit, offset int
 		       s.classifier_tier, s.classifier_confidence,
 		       (SELECT category_name FROM firefly_txns
 		         WHERE category_id = s.proposed_category_id LIMIT 1),
-		       (SELECT source_account_name FROM firefly_txns
-		         WHERE source_account_id = COALESCE(s.confirmed_source_account_id, s.proposed_source_account_id) LIMIT 1),
+		       COALESCE(
+		         (SELECT source_account_name FROM firefly_txns
+		           WHERE source_account_id = COALESCE(s.confirmed_source_account_id, s.proposed_source_account_id) LIMIT 1),
+		         NULLIF(s.confirmed_source_account_name, ''),
+		         NULLIF(s.proposed_source_account_name, '')
+		       ),
 		       COALESCE(
 		         (SELECT destination_account_name FROM firefly_txns
 		           WHERE destination_account_id = COALESCE(s.confirmed_destination_account_id, s.proposed_destination_account_id) LIMIT 1),
@@ -599,6 +603,7 @@ func (h *Handler) fetchDetail(ctx context.Context, uuid string) (detailRow, edit
 		cSrcID, cDestID, cCatID, cBudID sql.NullInt64
 		cDesc, cTags                    sql.NullString
 		cDestName, pDestName            sql.NullString
+		cSrcName, pSrcName              sql.NullString
 		pSrcID, pDestID, pCatID, pBudID sql.NullInt64
 		pDesc                           sql.NullString
 	)
@@ -611,7 +616,8 @@ func (h *Handler) fetchDetail(ctx context.Context, uuid string) (detailRow, edit
 		       confirmed_description, confirmed_tags_json,
 		       proposed_source_account_id, proposed_destination_account_id,
 		       proposed_category_id, proposed_budget_id, proposed_description,
-		       confirmed_destination_account_name, proposed_destination_account_name
+		       confirmed_destination_account_name, proposed_destination_account_name,
+		       confirmed_source_account_name, proposed_source_account_name
 		FROM staged_fold_txns
 		WHERE fold_uuid = ?
 	`, uuid).Scan(
@@ -620,6 +626,7 @@ func (h *Handler) fetchDetail(ctx context.Context, uuid string) (detailRow, edit
 		&cSrcID, &cDestID, &cCatID, &cBudID, &cDesc, &cTags,
 		&pSrcID, &pDestID, &pCatID, &pBudID, &pDesc,
 		&cDestName, &pDestName,
+		&cSrcName, &pSrcName,
 	)
 	if err != nil {
 		return r, editForm{}, "", err
@@ -667,6 +674,11 @@ func (h *Handler) fetchDetail(ctx context.Context, uuid string) (detailRow, edit
 	}
 	if id, ok := parseInt(edit.SourceAccountID); ok {
 		edit.SourceAccountName = h.lookupAccountName(ctx, id)
+	} else if name := nullableStringValue(cSrcName, pSrcName); name != "" {
+		// Name-only source: fold knows the paying card but firefly has no
+		// asset for it yet. Pre-fill so the human sees the card and can
+		// create/map the asset.
+		edit.SourceAccountName = name
 	}
 	if id, ok := parseInt(edit.CategoryID); ok {
 		edit.CategoryName = h.lookupCategoryName(ctx, id)

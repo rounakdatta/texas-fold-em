@@ -214,7 +214,7 @@ func run() error {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				cron.PeriodicSync(rootCtx, foldSyncer, cls, cfg.PeriodicSyncEvery, cfg.PeriodicSyncLimit, intLog)
+				cron.PeriodicSync(rootCtx, foldSyncer, foldAccountsSyncer, cls, cfg.PeriodicSyncEvery, cfg.PeriodicSyncLimit, intLog)
 			}()
 		}
 	}

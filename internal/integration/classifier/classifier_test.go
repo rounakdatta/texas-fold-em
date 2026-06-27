@@ -266,6 +266,53 @@ func TestClassifyPending_OrchestratesAndPersists(t *testing.T) {
 	}
 }
 
+// TestClassify_SourceNameFromFoldAccount: for an OUTGOING txn whose
+// fold account_id maps to a known card but no firefly asset matches (and
+// no tier pins a source), the classifier surfaces the fold card name as
+// the proposed source — never blank — and routes the row to review.
+func TestClassify_SourceNameFromFoldAccount(t *testing.T) {
+	db := seedTestDB(t)
+	c := New(db, slog.Default(), DefaultConfidenceThreshold, 10) // no LLM
+
+	// A card the user has on fold, with NO matching firefly asset.
+	if _, err := db.Exec(`
+		INSERT INTO fold_accounts (fold_account_id, kind, name, provider, network, last_four, raw_payload, is_closed)
+		VALUES ('au-test','CREDIT_CARD','AU Ixigo ****9179','AU','Visa','9179','{}',0)`); err != nil {
+		t.Fatalf("seed fold_accounts: %v", err)
+	}
+	// An OUTGOING txn paid on that card; merchant matches nothing in the
+	// corpus → no Tier-1/2 hit, no LLM → Tier 4 with no source.
+	if _, err := db.Exec(`
+		INSERT INTO staged_fold_txns (fold_uuid, raw_payload, amount_paise, currency, txn_timestamp,
+		    mode, type, narration, merchant_extracted, status)
+		VALUES ('src-1','{"account_id":"au-test"}',21200,'USD','2026-06-26T15:19:00Z',
+		    'CARD','OUTGOING','CARD/x/DEEPSEEK/USD/2.12/OUTGOING','deepseek','pending')`); err != nil {
+		t.Fatalf("seed staged: %v", err)
+	}
+
+	if _, err := c.ClassifyPending(context.Background()); err != nil {
+		t.Fatalf("ClassifyPending: %v", err)
+	}
+
+	var status string
+	var srcID sql.NullInt64
+	var srcName sql.NullString
+	if err := db.QueryRow(`
+		SELECT status, proposed_source_account_id, proposed_source_account_name
+		FROM staged_fold_txns WHERE fold_uuid='src-1'`).Scan(&status, &srcID, &srcName); err != nil {
+		t.Fatal(err)
+	}
+	if srcID.Valid {
+		t.Errorf("expected no source id (no firefly asset exists), got %d", srcID.Int64)
+	}
+	if srcName.String != "AU Ixigo ****9179" {
+		t.Errorf("proposed_source_account_name=%q, want the fold card name", srcName.String)
+	}
+	if status != "needs_review" {
+		t.Errorf("status=%q, want needs_review (new-name source)", status)
+	}
+}
+
 // TestReclassifyUUIDs re-runs the classifier on a specific row set:
 // non-pushed rows are reprocessed, pushed rows are skipped (terminal,
 // already in firefly), and unknown ids are ignored.
