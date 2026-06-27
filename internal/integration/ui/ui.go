@@ -666,19 +666,26 @@ func (h *Handler) fetchDetail(ctx context.Context, uuid string) (detailRow, edit
 	// Resolve the human-readable names from firefly_txns for display next to id inputs.
 	if id, ok := parseInt(edit.DestinationAccountID); ok {
 		edit.DestinationAccountName = h.lookupAccountName(ctx, id)
-	} else if name := nullableStringValue(cDestName, pDestName); name != "" {
-		// Name-only destination: a novel merchant the classifier proposed
-		// for firefly to create on push. Pre-fill so the human sees and
-		// can confirm/edit the name before it becomes a real account.
-		edit.DestinationAccountName = name
+	}
+	if edit.DestinationAccountName == "" {
+		// Either a name-only destination (a novel merchant the classifier
+		// proposed for firefly to create on push), or an id whose name the
+		// lookup couldn't resolve. Fall back to the stored name so the human
+		// always sees something to confirm/edit.
+		if name := nullableStringValue(cDestName, pDestName); name != "" {
+			edit.DestinationAccountName = name
+		}
 	}
 	if id, ok := parseInt(edit.SourceAccountID); ok {
 		edit.SourceAccountName = h.lookupAccountName(ctx, id)
-	} else if name := nullableStringValue(cSrcName, pSrcName); name != "" {
-		// Name-only source: fold knows the paying card but firefly has no
-		// asset for it yet. Pre-fill so the human sees the card and can
-		// create/map the asset.
-		edit.SourceAccountName = name
+	}
+	if edit.SourceAccountName == "" {
+		// Either a name-only source (fold knows the paying card but firefly
+		// has no asset for it yet) or a resolved id with no display name yet
+		// (a freshly-created asset). Either way, show the stored name.
+		if name := nullableStringValue(cSrcName, pSrcName); name != "" {
+			edit.SourceAccountName = name
+		}
 	}
 	if id, ok := parseInt(edit.CategoryID); ok {
 		edit.CategoryName = h.lookupCategoryName(ctx, id)
@@ -1048,6 +1055,15 @@ func (h *Handler) lookupAccountName(ctx context.Context, id int64) string {
 		UNION SELECT source_account_name FROM firefly_txns WHERE source_account_id = ?
 		LIMIT 1
 	`, id, id).Scan(&name)
+	if name.Valid && name.String != "" {
+		return name.String
+	}
+	// No transaction history for this account yet — e.g. a firefly asset the
+	// user just created ("Ixigo AU Bank Credit Card"). Fall back to the
+	// firefly_accounts mirror, which holds firefly's real account list
+	// independent of whether anything has been booked against it.
+	_ = h.db.QueryRowContext(ctx,
+		`SELECT name FROM firefly_accounts WHERE firefly_id = ? LIMIT 1`, id).Scan(&name)
 	if name.Valid {
 		return name.String
 	}

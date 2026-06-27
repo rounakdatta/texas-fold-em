@@ -421,6 +421,63 @@ func TestUI_Detail_Renders(t *testing.T) {
 	}
 }
 
+// TestUI_Detail_SourceNameFromMirrorNoHistory is the regression test for
+// the blank-source display bug: a source resolved to a freshly-created
+// firefly asset (id 1314) has NO firefly_txns history, so the id→name
+// lookup must fall back to the firefly_accounts mirror. Even with the
+// stored proposed_source_account_name left empty, the detail page must
+// render "Ixigo AU Bank Credit Card", not blank.
+func TestUI_Detail_SourceNameFromMirrorNoHistory(t *testing.T) {
+	u := newUITestHarness(t, AuthModeBypass)
+	// The AU asset exists in the firefly mirror but has NO transactions.
+	if _, err := u.db.DB.Exec(`
+		INSERT INTO firefly_accounts (firefly_id, name, type, account_role, account_number, active, raw_payload)
+		VALUES (1314,'Ixigo AU Bank Credit Card','asset','ccAsset','4069775035029179',1,'{}')`); err != nil {
+		t.Fatalf("seed firefly_accounts: %v", err)
+	}
+	// A staged row whose source resolved to 1314 by id, with the name column
+	// deliberately left empty — forcing resolution through the mirror.
+	if _, err := u.db.DB.Exec(`
+		INSERT INTO staged_fold_txns (fold_uuid, raw_payload, amount_paise, currency, txn_timestamp,
+		    mode, type, narration, merchant_extracted, status,
+		    classifier_tier, classifier_confidence, classifier_evidence_json,
+		    proposed_source_account_id, proposed_destination_account_name, proposed_category_id)
+		VALUES ('au-row','{}',21200,'USD','2026-06-26T15:19:00Z',
+		        'CARD','OUTGOING','CARD/x/DeepSeek/USD/2.12/OUTGOING','deepseek','needs_review',
+		        3, 0.8, '{"tier":3}', 1314, 'DeepSeek', NULL)`); err != nil {
+		t.Fatalf("seed staged: %v", err)
+	}
+
+	resp := u.do(t, "GET", "/admin/ui/staged/au-row", nil)
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), `name="source_name" value="Ixigo AU Bank Credit Card"`) {
+		t.Errorf("expected source to render 'Ixigo AU Bank Credit Card' from the mirror; got blank or wrong.\nbody excerpt: %s",
+			excerptAround(string(body), "source_name"))
+	}
+}
+
+// excerptAround returns a short window around the first occurrence of
+// needle, for readable test failures.
+func excerptAround(s, needle string) string {
+	i := strings.Index(s, needle)
+	if i < 0 {
+		return "(needle not found)"
+	}
+	start := i - 40
+	if start < 0 {
+		start = 0
+	}
+	end := i + 80
+	if end > len(s) {
+		end = len(s)
+	}
+	return s[start:end]
+}
+
 // TestUI_Save_PersistsAndBumpsStatus verifies the save handler resolves
 // names → IDs and transitions status from needs_review → ready_to_push.
 func TestUI_Save_PersistsAndBumpsStatus(t *testing.T) {
