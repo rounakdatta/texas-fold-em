@@ -478,6 +478,38 @@ func excerptAround(s, needle string) string {
 	return s[start:end]
 }
 
+// TestUI_Save_ResolvesSourceFromMirrorNoHistory is the regression test for
+// the push-abort bug: a source whose firefly asset was just created (no
+// transaction history) must still resolve to its id via the firefly_accounts
+// mirror, instead of coming back unresolved and aborting the push.
+func TestUI_Save_ResolvesSourceFromMirrorNoHistory(t *testing.T) {
+	u := newUITestHarness(t, AuthModeBypass)
+	// AU asset exists in the mirror only — no firefly_txns reference it.
+	if _, err := u.db.DB.Exec(`
+		INSERT INTO firefly_accounts (firefly_id, name, type, account_role, account_number, active, raw_payload)
+		VALUES (1314,'Ixigo AU Bank Credit Card','asset','ccAsset','4069775035029179',1,'{}')`); err != nil {
+		t.Fatalf("seed firefly_accounts: %v", err)
+	}
+	form := url.Values{}
+	form.Set("destination_name", "Cake Palace") // resolves via firefly_txns (id 12)
+	form.Set("source_name", "Ixigo AU Bank Credit Card")
+	form.Set("category_name", "Snacks")
+	form.Set("description", "test")
+	resp := u.do(t, "POST", "/admin/ui/staged/rev-1/save", form)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("expected 303, got %d", resp.StatusCode)
+	}
+	var srcID sql.NullInt64
+	if err := u.db.DB.QueryRow(
+		`SELECT confirmed_source_account_id FROM staged_fold_txns WHERE fold_uuid='rev-1'`).Scan(&srcID); err != nil {
+		t.Fatal(err)
+	}
+	if !srcID.Valid || srcID.Int64 != 1314 {
+		t.Errorf("source resolved to %v, want 1314 (from the mirror, no txn history)", srcID)
+	}
+}
+
 // TestUI_Save_PersistsAndBumpsStatus verifies the save handler resolves
 // names → IDs and transitions status from needs_review → ready_to_push.
 func TestUI_Save_PersistsAndBumpsStatus(t *testing.T) {
