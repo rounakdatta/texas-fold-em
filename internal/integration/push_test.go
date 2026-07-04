@@ -2,6 +2,7 @@ package integration
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/rounakdatta/texas-fold-em/internal/integration/firefly"
 )
@@ -451,5 +453,55 @@ func TestFoldTypeToFireflyType(t *testing.T) {
 		if got := foldTypeToFireflyType(in); got != want {
 			t.Errorf("foldTypeToFireflyType(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// TestBuildCreateRequest_ForeignCurrency verifies a cross-currency row is
+// pushed as INR primary + the original charge as foreign_amount /
+// foreign_currency_code — the shape firefly requires (and rejects when the
+// foreign currency is sent as the primary currency_code).
+func TestBuildCreateRequest_ForeignCurrency(t *testing.T) {
+	row := pushableRow{
+		FoldUUID:           "u-aed",
+		AmountPaise:        14327, // ₹143.27 home
+		Currency:           "INR",
+		ForeignAmountPaise: sql.NullInt64{Int64: 599, Valid: true}, // AED 5.99
+		ForeignCurrency:    sql.NullString{String: "AED", Valid: true},
+		TxnTimestamp:       time.Now().UTC(),
+		Type:               "OUTGOING",
+		ProposedSourceAccountID:      sql.NullInt64{Int64: 1314, Valid: true},
+		ProposedDestinationAccountID: sql.NullInt64{Int64: 900, Valid: true},
+	}
+	req := (&Pusher{}).buildCreateRequest(row)
+	if len(req.Transactions) != 1 {
+		t.Fatalf("want 1 line, got %d", len(req.Transactions))
+	}
+	line := req.Transactions[0]
+	if line.Amount != "143.27" || line.CurrencyCode != "INR" {
+		t.Errorf("primary = %s %s, want 143.27 INR", line.Amount, line.CurrencyCode)
+	}
+	if line.ForeignAmount != "5.99" || line.ForeignCurrencyCode != "AED" {
+		t.Errorf("foreign = %s %s, want 5.99 AED", line.ForeignAmount, line.ForeignCurrencyCode)
+	}
+}
+
+// TestBuildCreateRequest_DomesticNoForeign: a domestic row carries no
+// foreign fields.
+func TestBuildCreateRequest_DomesticNoForeign(t *testing.T) {
+	row := pushableRow{
+		FoldUUID:                     "u-inr",
+		AmountPaise:                  50000,
+		Currency:                     "INR",
+		TxnTimestamp:                 time.Now().UTC(),
+		Type:                         "OUTGOING",
+		ProposedSourceAccountID:      sql.NullInt64{Int64: 12, Valid: true},
+		ProposedDestinationAccountID: sql.NullInt64{Int64: 900, Valid: true},
+	}
+	line := (&Pusher{}).buildCreateRequest(row).Transactions[0]
+	if line.ForeignAmount != "" || line.ForeignCurrencyCode != "" {
+		t.Errorf("domestic row must have no foreign fields, got %q %q", line.ForeignAmount, line.ForeignCurrencyCode)
+	}
+	if line.CurrencyCode != "INR" {
+		t.Errorf("currency = %q, want INR", line.CurrencyCode)
 	}
 }

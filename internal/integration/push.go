@@ -91,6 +91,11 @@ type pushableRow struct {
 	FoldUUID     string
 	AmountPaise  int64
 	Currency     string
+	// Foreign side of a cross-currency charge (e.g. AED 5.99) — set when the
+	// original charge currency differs from the home currency. NULL for
+	// domestic transactions.
+	ForeignAmountPaise sql.NullInt64
+	ForeignCurrency    sql.NullString
 	TxnTimestamp time.Time
 	Type         string // INCOMING | OUTGOING
 	Status       string
@@ -192,6 +197,19 @@ func (p *Pusher) Push(ctx context.Context, foldUUID string, confirm bool) (PushR
 		}, nil
 	}
 
+	// Ensure the foreign currency exists+enabled in firefly before create.
+	// An abroad charge in a currency the user's firefly has never enabled
+	// (e.g. AED) would 422 otherwise; we create-or-enable it on demand, the
+	// same spirit as firefly auto-creating a new expense account on push.
+	if len(body.Transactions) > 0 {
+		if fcur := body.Transactions[0].ForeignCurrencyCode; fcur != "" {
+			if err := p.fc.EnsureCurrency(ctx, fcur); err != nil {
+				p.audit(ctx, "firefly_ensure_currency_error", row.FoldUUID, 0, body, statusFromErr(err), err.Error())
+				return PushReport{}, fmt.Errorf("firefly ensure currency %s: %w", fcur, err)
+			}
+		}
+	}
+
 	// Real create.
 	resp, err := p.fc.CreateTransaction(ctx, body)
 	if err != nil {
@@ -261,7 +279,8 @@ func (p *Pusher) Push(ctx context.Context, foldUUID string, confirm bool) (PushR
 func (p *Pusher) fetchPushableRow(ctx context.Context, foldUUID string) (pushableRow, error) {
 	var r pushableRow
 	err := p.db.QueryRowContext(ctx, `
-		SELECT fold_uuid, amount_paise, currency, txn_timestamp, type, status,
+		SELECT fold_uuid, amount_paise, currency, foreign_amount_paise, foreign_currency,
+		       txn_timestamp, type, status,
 		       confirmed_source_account_id, confirmed_destination_account_id, confirmed_destination_account_name,
 		       confirmed_category_id, confirmed_budget_id,
 		       confirmed_description, confirmed_tags_json, confirmed_txn_type,
@@ -272,7 +291,8 @@ func (p *Pusher) fetchPushableRow(ctx context.Context, foldUUID string) (pushabl
 		FROM staged_fold_txns
 		WHERE fold_uuid = ?
 	`, foldUUID).Scan(
-		&r.FoldUUID, &r.AmountPaise, &r.Currency, &r.TxnTimestamp, &r.Type, &r.Status,
+		&r.FoldUUID, &r.AmountPaise, &r.Currency, &r.ForeignAmountPaise, &r.ForeignCurrency,
+		&r.TxnTimestamp, &r.Type, &r.Status,
 		&r.ConfirmedSourceAccountID, &r.ConfirmedDestinationAccountID, &r.ConfirmedDestinationAccountName,
 		&r.ConfirmedCategoryID, &r.ConfirmedBudgetID,
 		&r.ConfirmedDescription, &r.ConfirmedTagsJSON, &r.ConfirmedTxnType,
@@ -350,6 +370,15 @@ func (p *Pusher) buildCreateRequest(row pushableRow) firefly.CreateTransactionRe
 		// friendlier description. The narration is what classification
 		// was performed on; preserving it here closes the audit loop.
 		Notes: row.Narration,
+	}
+	// Cross-currency: record the original charge (e.g. AED 5.99) as the
+	// foreign amount alongside the INR primary. Only when it genuinely
+	// differs from the home currency. firefly requires the foreign currency
+	// to exist — Push calls EnsureCurrency before the create.
+	if row.ForeignCurrency.Valid && row.ForeignCurrency.String != "" &&
+		row.ForeignCurrency.String != row.Currency && row.ForeignAmountPaise.Valid {
+		line.ForeignAmount = paiseToDecimal(row.ForeignAmountPaise.Int64)
+		line.ForeignCurrencyCode = row.ForeignCurrency.String
 	}
 	if srcID != 0 {
 		line.SourceID = strconv.FormatInt(srcID, 10)
