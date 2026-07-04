@@ -326,9 +326,10 @@ func latestFireflyTxnDate(ctx context.Context, db *sql.DB) (time.Time, error) {
 // return inserted=true only when RowsAffected == 1.
 const insertStagedFoldTxnSQL = `
 INSERT OR IGNORE INTO staged_fold_txns (
-    fold_uuid, raw_payload, amount_paise, currency, txn_timestamp,
+    fold_uuid, raw_payload, amount_paise, currency,
+    foreign_amount_paise, foreign_currency, txn_timestamp,
     mode, type, narration, merchant_extracted, status
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
 `
 
 // refreshRawPayloadSQL refreshes only raw_payload on an existing row.
@@ -368,11 +369,29 @@ func (s *FoldSyncer) insertStaged(ctx context.Context, stmt *sql.Stmt, t fold.Tr
 	}
 	merchant := NormalizeMerchant(fold.ExtractMerchant(t.Narration, t.Mode))
 
+	// fold gives BOTH the home-currency amount (Amount/Currency = INR) and
+	// the original charge (SourceAmount/SourceCurrency). The primary firefly
+	// amount must be the home (INR) side; the foreign side is recorded
+	// separately and only when it genuinely differs (an abroad charge).
+	// Degenerate older payloads without a home currency fall back to the
+	// source side so we still store something.
+	primaryAmt, primaryCur := t.Amount, t.Currency
+	if primaryCur == "" {
+		primaryAmt, primaryCur = t.SourceAmount, t.SourceCurrency
+	}
+	var foreignPaise, foreignCur any
+	if t.SourceCurrency != "" && t.SourceCurrency != primaryCur {
+		foreignPaise = amountToPaise(t.SourceAmount)
+		foreignCur = t.SourceCurrency
+	}
+
 	res, err := stmt.ExecContext(ctx,
 		t.UUID,
 		rawStr,
-		amountToPaise(t.SourceAmount),
-		nullIfEmpty(t.SourceCurrency),
+		amountToPaise(primaryAmt),
+		nullIfEmpty(primaryCur),
+		foreignPaise,
+		foreignCur,
 		ts,
 		t.Mode,
 		t.Type,

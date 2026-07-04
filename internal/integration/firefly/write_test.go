@@ -142,3 +142,68 @@ func TestSearchByExternalID_Empty(t *testing.T) {
 		t.Errorf("expected empty, got %v", ids)
 	}
 }
+
+// TestEnsureCurrency covers the three states: create-when-404,
+// enable-when-disabled, and no-op-when-enabled.
+func TestEnsureCurrency(t *testing.T) {
+	cases := []struct {
+		name        string
+		code        string
+		getStatus   int
+		getEnabled  bool
+		wantCreate  bool // expect POST /currencies
+		wantEnable  bool // expect POST /currencies/{code}/enable
+	}{
+		{"create when not defined", "AED", http.StatusNotFound, false, true, false},
+		{"enable when disabled", "THB", http.StatusOK, false, false, true},
+		{"noop when enabled", "USD", http.StatusOK, true, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var createHit, enableHit bool
+			var createBody map[string]any
+			mux := http.NewServeMux()
+			mux.HandleFunc("/api/v1/currencies/"+tc.code, func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/vnd.api+json")
+				if tc.getStatus != http.StatusOK {
+					w.WriteHeader(tc.getStatus)
+					_, _ = w.Write([]byte(`{"message":"Resource not found"}`))
+					return
+				}
+				_, _ = w.Write([]byte(`{"data":{"attributes":{"enabled":` + boolStr(tc.getEnabled) + `}}}`))
+			})
+			mux.HandleFunc("/api/v1/currencies/"+tc.code+"/enable", func(w http.ResponseWriter, r *http.Request) {
+				enableHit = true
+				_, _ = w.Write([]byte(`{"data":{}}`))
+			})
+			mux.HandleFunc("/api/v1/currencies", func(w http.ResponseWriter, r *http.Request) {
+				createHit = true
+				_ = json.NewDecoder(r.Body).Decode(&createBody)
+				_, _ = w.Write([]byte(`{"data":{}}`))
+			})
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+
+			c := NewClient(srv.URL, "p", srv.Client())
+			if err := c.EnsureCurrency(context.Background(), tc.code); err != nil {
+				t.Fatalf("EnsureCurrency: %v", err)
+			}
+			if createHit != tc.wantCreate {
+				t.Errorf("createHit=%v want %v", createHit, tc.wantCreate)
+			}
+			if enableHit != tc.wantEnable {
+				t.Errorf("enableHit=%v want %v", enableHit, tc.wantEnable)
+			}
+			if tc.wantCreate && createBody["code"] != tc.code {
+				t.Errorf("create body code=%v want %s", createBody["code"], tc.code)
+			}
+		})
+	}
+}
+
+func boolStr(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
+}

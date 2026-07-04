@@ -481,3 +481,78 @@ func newFakeFoldAPI(t *testing.T, userUUID string, txns []fold.Transaction) *htt
 	}))
 	return srv
 }
+
+// TestFoldSync_ForeignCurrency verifies the home-currency (INR) amount is
+// stored as the primary while the original foreign charge (AED) is captured
+// separately — and that a domestic txn gets no foreign side.
+func TestFoldSync_ForeignCurrency(t *testing.T) {
+	ctx := context.Background()
+	transactions := []fold.Transaction{
+		{
+			UUID:           "u-foreign-aed",
+			Amount:         143.27, // INR billed
+			Currency:       "INR",
+			SourceAmount:   5.99, // AED charged
+			SourceCurrency: "AED",
+			TxnTimestamp:   "2026-07-03T10:12:47Z",
+			Mode:           "CARD",
+			Type:           "OUTGOING",
+			Narration:      "CARD/x/CARREFOUR CITY BURJUMA/AED/5.99/OUTGOING/03-07-2026",
+		},
+		{
+			UUID:           "u-domestic-inr",
+			Amount:         500,
+			Currency:       "INR",
+			SourceAmount:   500,
+			SourceCurrency: "INR",
+			TxnTimestamp:   "2026-07-02T10:00:00Z",
+			Mode:           "CARD",
+			Type:           "OUTGOING",
+			Narration:      "CARD/x/BLINKIT/Rs./500/OUTGOING/02-07-2026",
+		},
+	}
+	srv := newFakeFoldAPI(t, "user-123", transactions)
+	t.Cleanup(srv.Close)
+	db, err := Open(ctx, filepath.Join(t.TempDir(), "staging.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	tokens := func(_ context.Context) (fold.AccessToken, error) {
+		return fold.AccessToken{AccessToken: "a", DeviceHash: "d", UserUUID: "user-123", ExpiresAt: time.Now().Add(time.Hour)}, nil
+	}
+	syncer := NewFoldSyncer(db, fold.NewClient(srv.URL, tokens, srv.Client()), slog.Default())
+	if _, err := syncer.SyncRecent(ctx, 5); err != nil {
+		t.Fatalf("SyncRecent: %v", err)
+	}
+
+	// Foreign row: INR primary + AED foreign.
+	var amt int64
+	var cur string
+	var famt sql.NullInt64
+	var fcur sql.NullString
+	if err := db.QueryRowContext(ctx, `
+		SELECT amount_paise, currency, foreign_amount_paise, foreign_currency
+		FROM staged_fold_txns WHERE fold_uuid='u-foreign-aed'`).Scan(&amt, &cur, &famt, &fcur); err != nil {
+		t.Fatal(err)
+	}
+	if amt != 14327 || cur != "INR" {
+		t.Errorf("primary = %d %s, want 14327 INR", amt, cur)
+	}
+	if !famt.Valid || famt.Int64 != 599 || !fcur.Valid || fcur.String != "AED" {
+		t.Errorf("foreign = %v/%v, want 599/AED", famt, fcur)
+	}
+
+	// Domestic row: no foreign side.
+	if err := db.QueryRowContext(ctx, `
+		SELECT amount_paise, currency, foreign_amount_paise, foreign_currency
+		FROM staged_fold_txns WHERE fold_uuid='u-domestic-inr'`).Scan(&amt, &cur, &famt, &fcur); err != nil {
+		t.Fatal(err)
+	}
+	if amt != 50000 || cur != "INR" {
+		t.Errorf("domestic primary = %d %s, want 50000 INR", amt, cur)
+	}
+	if famt.Valid || fcur.Valid {
+		t.Errorf("domestic must have no foreign side, got %v/%v", famt, fcur)
+	}
+}
