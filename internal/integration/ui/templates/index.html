@@ -58,7 +58,7 @@
         <td>{{.DestinationName}}{{if .Description}}<br><span style="color:var(--muted); font-weight:normal; font-size:0.9em">{{.Description}}</span>{{end}}</td>
         <td>{{.ProposedCategoryName}}</td>
         <td>{{confidenceBar .Confidence}}</td>
-        <td><a href="/admin/ui/staged/{{.FoldUUID}}">review →</a>{{if .FireflyURL}} · <a href="{{.FireflyURL}}" target="_blank" rel="noopener">firefly ↗</a>{{end}}</td>
+        <td><a href="/admin/ui/staged/{{.FoldUUID}}?back={{filterURL $.Filters $.PerPage $.Page | urlquery}}">review →</a>{{if .FireflyURL}} · <a href="{{.FireflyURL}}" target="_blank" rel="noopener">firefly ↗</a>{{end}}</td>
       </tr>
       {{end}}
     </tbody>

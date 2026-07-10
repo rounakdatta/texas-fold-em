@@ -1,5 +1,5 @@
 {{define "content"}}
-<p><a href="/admin/ui/?status={{.Row.Status}}">← back to {{.Row.Status}}</a></p>
+<p><a href="{{.Back}}">← back</a></p>
 
 <div class="card">
   <h2>fold transaction</h2>
@@ -34,6 +34,7 @@
 </form>
 
 <form method="post" action="/admin/ui/staged/{{.Row.FoldUUID}}/save">
+  <input type="hidden" name="back" value="{{.Back}}">
   <div class="card">
     <h2>review &amp; edit</h2>
     <div class="grid">

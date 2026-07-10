@@ -596,10 +596,20 @@ func (h *Handler) handleDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	suggested, _ := h.suggestedTagsForMerchant(r.Context(), merchantID)
 
+	// Where to return after save&push / skip: the exact list (status +
+	// filters + page) the user came from, passed as ?back=. Falls back to
+	// this row's status list when opened directly. Validated to our own UI
+	// paths so it can't be an open redirect.
+	back := r.URL.Query().Get("back")
+	if !strings.HasPrefix(back, "/admin/ui/") {
+		back = "/admin/ui/?status=" + row.Status
+	}
+
 	h.render(w, h.detailTmpl, map[string]any{
 		"Title":           uuid,
 		"Status":          row.Status, // for the shared nav's active-state highlight
 		"Row":             row,
+		"Back":            back,
 		"Edit":            edit,
 		"EvidencePretty":  prettyJSON(evidence),
 		"Flash":           flashFromCookie(r, w),
@@ -759,6 +769,10 @@ func (h *Handler) handlePush(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad form", http.StatusBadRequest)
 		return
 	}
+	// On success, return to the list the user came from (the hidden "back"
+	// field carries the origin list URL); on any failure we stay on the
+	// detail page so they can fix and retry.
+	back := backOr(r.FormValue("back"), "/admin/ui/?status=pushed")
 	unresolved, err := h.saveEdits(r.Context(), uuid, r.Form)
 	if err != nil {
 		h.flashErr(w, "save failed before push: "+err.Error())
@@ -778,7 +792,16 @@ func (h *Handler) handlePush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.flashOk(w, fmt.Sprintf("pushed (%s) — firefly id %d", report.Action, report.FireflyTxnID))
-	http.Redirect(w, r, "/admin/ui/?status=pushed", http.StatusSeeOther)
+	http.Redirect(w, r, back, http.StatusSeeOther)
+}
+
+// backOr returns back when it's a safe in-app UI path, else the fallback.
+// Guards against open redirects (only our own /admin/ui/ paths).
+func backOr(back, fallback string) string {
+	if strings.HasPrefix(back, "/admin/ui/") {
+		return back
+	}
+	return fallback
 }
 
 // handleSkip sets status='skipped' so this row is excluded from
@@ -786,6 +809,8 @@ func (h *Handler) handlePush(w http.ResponseWriter, r *http.Request) {
 // (form field "skip_reason" optional).
 func (h *Handler) handleSkip(w http.ResponseWriter, r *http.Request) {
 	uuid := r.PathValue("fold_uuid")
+	_ = r.ParseForm()
+	back := backOr(r.FormValue("back"), "/admin/ui/?status=needs_review")
 	_, err := h.db.ExecContext(r.Context(), `
 		UPDATE staged_fold_txns
 		SET status='skipped', updated_at=CURRENT_TIMESTAMP
@@ -797,7 +822,7 @@ func (h *Handler) handleSkip(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.flashOk(w, "marked skipped")
-	http.Redirect(w, r, "/admin/ui/?status=needs_review", http.StatusSeeOther)
+	http.Redirect(w, r, back, http.StatusSeeOther)
 }
 
 // handleSyncAccounts refreshes the firefly_accounts mirror on demand — the
