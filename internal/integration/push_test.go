@@ -640,3 +640,25 @@ func TestBuildCreateRequest_ConfirmedNewNameOverridesProposedID(t *testing.T) {
 		t.Errorf("destination_name=%q, want the corrected new-account name", line.DestinationName)
 	}
 }
+
+// TestBuildCreateRequest_DepositNewRevenueSourceByName: a deposit whose
+// source (payer) is a NEW name-only account sends source_name so firefly
+// creates the revenue account — mirroring a withdrawal's new expense dest.
+func TestBuildCreateRequest_DepositNewRevenueSourceByName(t *testing.T) {
+	row := pushableRow{
+		FoldUUID: "u-dep", AmountPaise: 3500000, Currency: "INR", Type: "INCOMING",
+		ConfirmedSourceAccountName:    sql.NullString{String: "Neha Ananthan", Valid: true},
+		ConfirmedDestinationAccountID: sql.NullInt64{Int64: 12, Valid: true}, // asset (bank)
+		TxnTimestamp:                  time.Now().UTC(),
+	}
+	line := (&Pusher{}).buildCreateRequest(context.Background(), row).Transactions[0]
+	if line.Type != "deposit" {
+		t.Errorf("type=%q, want deposit", line.Type)
+	}
+	if line.SourceID != "" {
+		t.Errorf("source_id=%q, want empty (name-only new revenue account)", line.SourceID)
+	}
+	if line.SourceName != "Neha Ananthan" {
+		t.Errorf("source_name=%q, want 'Neha Ananthan'", line.SourceName)
+	}
+}

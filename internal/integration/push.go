@@ -101,6 +101,7 @@ type pushableRow struct {
 	Status       string
 
 	ConfirmedSourceAccountID        sql.NullInt64
+	ConfirmedSourceAccountName      sql.NullString
 	ConfirmedDestinationAccountID   sql.NullInt64
 	ConfirmedDestinationAccountName sql.NullString
 	ConfirmedCategoryID             sql.NullInt64
@@ -112,6 +113,7 @@ type pushableRow struct {
 
 	// Fall-through: when confirmed_* is null we use proposed_* (auto-classified).
 	ProposedSourceAccountID        sql.NullInt64
+	ProposedSourceAccountName      sql.NullString
 	ProposedDestinationAccountID   sql.NullInt64
 	ProposedDestinationAccountName sql.NullString
 	ProposedCategoryID             sql.NullInt64
@@ -286,10 +288,12 @@ func (p *Pusher) fetchPushableRow(ctx context.Context, foldUUID string) (pushabl
 	err := p.db.QueryRowContext(ctx, `
 		SELECT fold_uuid, amount_paise, currency, foreign_amount_paise, foreign_currency,
 		       txn_timestamp, type, status,
-		       confirmed_source_account_id, confirmed_destination_account_id, confirmed_destination_account_name,
+		       confirmed_source_account_id, confirmed_source_account_name,
+		       confirmed_destination_account_id, confirmed_destination_account_name,
 		       confirmed_category_id, confirmed_budget_id,
 		       confirmed_description, confirmed_tags_json, confirmed_txn_type,
-		       proposed_source_account_id, proposed_destination_account_id, proposed_destination_account_name,
+		       proposed_source_account_id, proposed_source_account_name,
+		       proposed_destination_account_id, proposed_destination_account_name,
 		       proposed_category_id, proposed_budget_id, proposed_description,
 		       proposed_txn_type,
 		       narration, COALESCE(merchant_extracted, ''), firefly_txn_id,
@@ -300,10 +304,12 @@ func (p *Pusher) fetchPushableRow(ctx context.Context, foldUUID string) (pushabl
 	`, foldUUID).Scan(
 		&r.FoldUUID, &r.AmountPaise, &r.Currency, &r.ForeignAmountPaise, &r.ForeignCurrency,
 		&r.TxnTimestamp, &r.Type, &r.Status,
-		&r.ConfirmedSourceAccountID, &r.ConfirmedDestinationAccountID, &r.ConfirmedDestinationAccountName,
+		&r.ConfirmedSourceAccountID, &r.ConfirmedSourceAccountName,
+		&r.ConfirmedDestinationAccountID, &r.ConfirmedDestinationAccountName,
 		&r.ConfirmedCategoryID, &r.ConfirmedBudgetID,
 		&r.ConfirmedDescription, &r.ConfirmedTagsJSON, &r.ConfirmedTxnType,
-		&r.ProposedSourceAccountID, &r.ProposedDestinationAccountID, &r.ProposedDestinationAccountName,
+		&r.ProposedSourceAccountID, &r.ProposedSourceAccountName,
+		&r.ProposedDestinationAccountID, &r.ProposedDestinationAccountName,
 		&r.ProposedCategoryID, &r.ProposedBudgetID, &r.ProposedDescription,
 		&r.ProposedTxnType,
 		&r.Narration, &r.MerchantExtracted, &r.FireflyTxnID, &r.FireflyGroupID,
@@ -325,7 +331,23 @@ func (p *Pusher) fetchPushableRow(ctx context.Context, foldUUID string) (pushabl
 // human never edited anything) is pushable directly with whatever the
 // classifier proposed.
 func (p *Pusher) buildCreateRequest(ctx context.Context, row pushableRow) firefly.CreateTransactionRequest {
-	srcID := pickInt64(row.ConfirmedSourceAccountID, row.ProposedSourceAccountID)
+	// Source resolved as a UNIT (same rule as destination): a confirmed
+	// choice fully overrides the proposal, including a name-only NEW account.
+	// A name-only source is the DEPOSIT payer — firefly creates the REVENUE
+	// account from the name, exactly as it creates an expense account for a
+	// withdrawal's destination.
+	var srcID int64
+	var srcName string
+	switch {
+	case row.ConfirmedSourceAccountID.Valid:
+		srcID = row.ConfirmedSourceAccountID.Int64
+	case strings.TrimSpace(row.ConfirmedSourceAccountName.String) != "":
+		srcName = strings.TrimSpace(row.ConfirmedSourceAccountName.String)
+	case row.ProposedSourceAccountID.Valid:
+		srcID = row.ProposedSourceAccountID.Int64
+	default:
+		srcName = strings.TrimSpace(row.ProposedSourceAccountName.String)
+	}
 	// Destination resolved as a UNIT: a human correction (confirmed) fully
 	// overrides the classifier's proposal — crucially including a name-only
 	// NEW account, which must NOT fall back to the stale proposed id. That
@@ -428,6 +450,10 @@ func (p *Pusher) buildCreateRequest(ctx context.Context, row pushableRow) firefl
 	}
 	if srcID != 0 {
 		line.SourceID = strconv.FormatInt(srcID, 10)
+	} else if srcName != "" {
+		// Name-only source: a deposit's payer that firefly find-or-creates as
+		// a revenue account by name.
+		line.SourceName = srcName
 	}
 	if destID != 0 {
 		line.DestinationID = strconv.FormatInt(destID, 10)
