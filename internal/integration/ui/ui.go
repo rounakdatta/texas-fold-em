@@ -448,17 +448,33 @@ func (h *Handler) listRows(ctx context.Context, f listFilters, limit, offset int
 		       s.classifier_tier, s.classifier_confidence,
 		       (SELECT category_name FROM firefly_txns
 		         WHERE category_id = s.proposed_category_id LIMIT 1),
+		       -- Source name, resolved to match what's actually in firefly:
+		       --  1. pushed rows → the pushed journal's live source (via the
+		       --     firefly_txns mirror by journal id) so the list mirrors
+		       --     firefly (incl. corrections/manual edits);
+		       --  2. else the human's confirmed choice as a UNIT (id → name,
+		       --     else a name-only account) — never falling back to a stale
+		       --     proposed id when a name was confirmed;
+		       --  3. else the classifier's proposal as a unit.
 		       COALESCE(
-		         (SELECT source_account_name FROM firefly_txns
-		           WHERE source_account_id = COALESCE(s.confirmed_source_account_id, s.proposed_source_account_id) LIMIT 1),
-		         NULLIF(s.confirmed_source_account_name, ''),
-		         NULLIF(s.proposed_source_account_name, '')
+		         CASE WHEN s.status='pushed'
+		              THEN (SELECT f.source_account_name FROM firefly_txns f WHERE f.firefly_id = s.firefly_txn_id LIMIT 1) END,
+		         CASE WHEN s.confirmed_source_account_id IS NOT NULL
+		              THEN (SELECT f.source_account_name FROM firefly_txns f WHERE f.source_account_id = s.confirmed_source_account_id LIMIT 1)
+		              ELSE NULLIF(s.confirmed_source_account_name, '') END,
+		         CASE WHEN s.proposed_source_account_id IS NOT NULL
+		              THEN (SELECT f.source_account_name FROM firefly_txns f WHERE f.source_account_id = s.proposed_source_account_id LIMIT 1)
+		              ELSE NULLIF(s.proposed_source_account_name, '') END
 		       ),
 		       COALESCE(
-		         (SELECT destination_account_name FROM firefly_txns
-		           WHERE destination_account_id = COALESCE(s.confirmed_destination_account_id, s.proposed_destination_account_id) LIMIT 1),
-		         NULLIF(s.confirmed_destination_account_name, ''),
-		         NULLIF(s.proposed_destination_account_name, ''),
+		         CASE WHEN s.status='pushed'
+		              THEN (SELECT f.destination_account_name FROM firefly_txns f WHERE f.firefly_id = s.firefly_txn_id LIMIT 1) END,
+		         CASE WHEN s.confirmed_destination_account_id IS NOT NULL
+		              THEN (SELECT f.destination_account_name FROM firefly_txns f WHERE f.destination_account_id = s.confirmed_destination_account_id LIMIT 1)
+		              ELSE NULLIF(s.confirmed_destination_account_name, '') END,
+		         CASE WHEN s.proposed_destination_account_id IS NOT NULL
+		              THEN (SELECT f.destination_account_name FROM firefly_txns f WHERE f.destination_account_id = s.proposed_destination_account_id LIMIT 1)
+		              ELSE NULLIF(s.proposed_destination_account_name, '') END,
 		         NULLIF(s.merchant_extracted, '')
 		       ),
 		       COALESCE(NULLIF(s.confirmed_description, ''), NULLIF(s.proposed_description, ''), ''),
@@ -709,43 +725,43 @@ func (h *Handler) fetchDetail(ctx context.Context, uuid string) (detailRow, edit
 		r.Confidence = conf.Float64
 	}
 
-	// Edit form values: confirmed_* takes precedence, fall back to proposed_*.
 	edit := editForm{
-		DestinationAccountID: nullableInt64Str(cDestID, pDestID),
-		SourceAccountID:      nullableInt64Str(cSrcID, pSrcID),
-		CategoryID:           nullableInt64Str(cCatID, pCatID),
-		BudgetID:             nullableInt64Str(cBudID, pBudID),
-		Description:          nullableStringValue(cDesc, pDesc),
+		CategoryID:  nullableInt64Str(cCatID, pCatID),
+		BudgetID:    nullableInt64Str(cBudID, pBudID),
+		Description: nullableStringValue(cDesc, pDesc),
+	}
+	// Destination & source resolve as a UNIT so a name-only correction
+	// (confirmed name, null id) is never displayed — nor re-saved — as the
+	// stale proposed account: confirmed id → its firefly name; else the
+	// confirmed name-only; else proposed id → its name; else proposed name.
+	switch {
+	case cDestID.Valid:
+		edit.DestinationAccountID = strconv.FormatInt(cDestID.Int64, 10)
+		edit.DestinationAccountName = h.lookupAccountName(ctx, cDestID.Int64)
+	case strings.TrimSpace(cDestName.String) != "":
+		edit.DestinationAccountName = strings.TrimSpace(cDestName.String)
+	case pDestID.Valid:
+		edit.DestinationAccountID = strconv.FormatInt(pDestID.Int64, 10)
+		edit.DestinationAccountName = h.lookupAccountName(ctx, pDestID.Int64)
+	default:
+		edit.DestinationAccountName = strings.TrimSpace(pDestName.String)
+	}
+	switch {
+	case cSrcID.Valid:
+		edit.SourceAccountID = strconv.FormatInt(cSrcID.Int64, 10)
+		edit.SourceAccountName = h.lookupAccountName(ctx, cSrcID.Int64)
+	case strings.TrimSpace(cSrcName.String) != "":
+		edit.SourceAccountName = strings.TrimSpace(cSrcName.String)
+	case pSrcID.Valid:
+		edit.SourceAccountID = strconv.FormatInt(pSrcID.Int64, 10)
+		edit.SourceAccountName = h.lookupAccountName(ctx, pSrcID.Int64)
+	default:
+		edit.SourceAccountName = strings.TrimSpace(pSrcName.String)
 	}
 	if cTags.Valid {
 		var tags []string
 		_ = json.Unmarshal([]byte(cTags.String), &tags)
 		edit.Tags = strings.Join(tags, ", ")
-	}
-
-	// Resolve the human-readable names from firefly_txns for display next to id inputs.
-	if id, ok := parseInt(edit.DestinationAccountID); ok {
-		edit.DestinationAccountName = h.lookupAccountName(ctx, id)
-	}
-	if edit.DestinationAccountName == "" {
-		// Either a name-only destination (a novel merchant the classifier
-		// proposed for firefly to create on push), or an id whose name the
-		// lookup couldn't resolve. Fall back to the stored name so the human
-		// always sees something to confirm/edit.
-		if name := nullableStringValue(cDestName, pDestName); name != "" {
-			edit.DestinationAccountName = name
-		}
-	}
-	if id, ok := parseInt(edit.SourceAccountID); ok {
-		edit.SourceAccountName = h.lookupAccountName(ctx, id)
-	}
-	if edit.SourceAccountName == "" {
-		// Either a name-only source (fold knows the paying card but firefly
-		// has no asset for it yet) or a resolved id with no display name yet
-		// (a freshly-created asset). Either way, show the stored name.
-		if name := nullableStringValue(cSrcName, pSrcName); name != "" {
-			edit.SourceAccountName = name
-		}
 	}
 	if id, ok := parseInt(edit.CategoryID); ok {
 		edit.CategoryName = h.lookupCategoryName(ctx, id)

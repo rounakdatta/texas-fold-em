@@ -884,3 +884,46 @@ func mustGet(t *testing.T, u *uiTestHarness, path string) io.Reader {
 	}
 	return resp.Body
 }
+
+// TestUI_List_PushedShowsFireflyActualNotStaleProposed is the regression for
+// "the list shows differently than what's actually inside": a pushed row that
+// was corrected to a NEW (name-only) account must display firefly's actual
+// destination, never the stale proposed account id.
+func TestUI_List_PushedShowsFireflyActualNotStaleProposed(t *testing.T) {
+	u := newUITestHarness(t, AuthModeBypass)
+	// firefly_txns: the STALE proposed account (684 = Savoury Express) with
+	// history, and the PUSHED journal (9999) whose destination is the
+	// corrected "Magic Savoury Restaurant".
+	if _, err := u.db.DB.Exec(`
+		INSERT INTO firefly_txns (firefly_id, group_id, txn_type, amount_paise, currency, date,
+		    source_account_id, source_account_name,
+		    destination_account_id, destination_account_name, destination_account_name_normalized,
+		    category_id, category_name, budget_id, budget_name, description, tags_json)
+		VALUES
+		 (684, 6840, 'withdrawal', 59796, 'INR', '2026-07-01',
+		  50, 'Ixigo AU Bank Credit Card', 684, 'Savoury Express, Jeevan Bima Nagar', 'savoury express jeevan bima nagar',
+		  5, 'Food', NULL, NULL, 'old', '[]'),
+		 (9999, 9990, 'withdrawal', 59796, 'INR', '2026-07-08',
+		  50, 'Ixigo AU Bank Credit Card', 900, 'Magic Savoury Restaurant, Union, Dubai', 'magic savoury restaurant union dubai',
+		  5, 'Food', NULL, NULL, 'Charcoal-grilled Half Chicken', '[]')`); err != nil {
+		t.Fatalf("seed firefly_txns: %v", err)
+	}
+	// Pushed staged row: stale proposed dest 684, corrected to a name-only
+	// "Magic Savoury Restaurant", pushed as journal 9999.
+	if _, err := u.db.DB.Exec(`
+		INSERT INTO staged_fold_txns (fold_uuid, raw_payload, amount_paise, currency, txn_timestamp,
+		    mode, type, narration, merchant_extracted, status, firefly_txn_id,
+		    proposed_destination_account_id, confirmed_destination_account_name)
+		VALUES ('fix-1','{}',59796,'INR','2026-07-08T00:04:00Z','CARD','OUTGOING','x','savoury express','pushed',9999,
+		        684,'Magic Savoury Restaurant, Union, Dubai')`); err != nil {
+		t.Fatalf("seed staged: %v", err)
+	}
+	body, _ := io.ReadAll(mustGet(t, u, "/admin/ui/?status=all&limit=100"))
+	s := string(body)
+	if !strings.Contains(s, "Magic Savoury Restaurant, Union, Dubai") {
+		t.Error("list should show firefly's actual destination (Magic Savoury Restaurant)")
+	}
+	if strings.Contains(s, "Savoury Express, Jeevan Bima Nagar") {
+		t.Error("list must NOT show the stale proposed account (Savoury Express)")
+	}
+}
