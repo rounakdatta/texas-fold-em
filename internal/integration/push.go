@@ -131,6 +131,11 @@ type pushableRow struct {
 	MerchantExtracted string
 
 	FireflyTxnID sql.NullInt64
+	// FireflyGroupID is the transaction GROUP id — needed to UPDATE an
+	// already-pushed transaction in place (PUT /transactions/{group}).
+	// Resolved from the stored column, falling back to the firefly_txns
+	// mirror for rows pushed before we persisted it.
+	FireflyGroupID sql.NullInt64
 }
 
 // Push runs the full push pipeline. confirm=false runs in dry-run /
@@ -287,7 +292,9 @@ func (p *Pusher) fetchPushableRow(ctx context.Context, foldUUID string) (pushabl
 		       proposed_source_account_id, proposed_destination_account_id, proposed_destination_account_name,
 		       proposed_category_id, proposed_budget_id, proposed_description,
 		       proposed_txn_type,
-		       narration, COALESCE(merchant_extracted, ''), firefly_txn_id
+		       narration, COALESCE(merchant_extracted, ''), firefly_txn_id,
+		       COALESCE(firefly_group_id,
+		                (SELECT group_id FROM firefly_txns WHERE firefly_id = staged_fold_txns.firefly_txn_id LIMIT 1))
 		FROM staged_fold_txns
 		WHERE fold_uuid = ?
 	`, foldUUID).Scan(
@@ -299,7 +306,7 @@ func (p *Pusher) fetchPushableRow(ctx context.Context, foldUUID string) (pushabl
 		&r.ProposedSourceAccountID, &r.ProposedDestinationAccountID, &r.ProposedDestinationAccountName,
 		&r.ProposedCategoryID, &r.ProposedBudgetID, &r.ProposedDescription,
 		&r.ProposedTxnType,
-		&r.Narration, &r.MerchantExtracted, &r.FireflyTxnID,
+		&r.Narration, &r.MerchantExtracted, &r.FireflyTxnID, &r.FireflyGroupID,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return r, fmt.Errorf("%w: %s", PushNotFoundError, foldUUID)
@@ -363,22 +370,18 @@ func (p *Pusher) buildCreateRequest(ctx context.Context, row pushableRow) firefl
 	// override whatever type was proposed. The classifier's LLM transfer
 	// detection is best-effort and a manual edit can change the endpoints,
 	// so this push-time check is the authoritative guard.
-	if txnType != "transfer" && p.isAsset(ctx, srcID) && p.isAsset(ctx, destID) {
+	// asset ↔ asset ⇒ transfer. Resolve each endpoint to an asset id (itself
+	// when it's already an asset, or a same-named asset twin of a duplicate
+	// expense payee). Only when BOTH resolve to assets do we flip to a
+	// transfer and use those asset ids — so a normal purchase (asset →
+	// expense merchant, which has no asset twin) stays a withdrawal, while a
+	// credit-card repayment / inter-account move (asset → asset, even when
+	// the destination resolved to the card's duplicate EXPENSE twin) is
+	// corrected. firefly rejects an asset as a withdrawal/deposit endpoint,
+	// so this override is what lets such rows push at all.
+	if sa, da := p.assetTwin(ctx, srcID), p.assetTwin(ctx, destID); sa != 0 && da != 0 {
 		txnType = "transfer"
-	}
-	// A transfer's endpoints must both be the user's own ASSET accounts.
-	// A card commonly exists in firefly as BOTH an asset and a same-named
-	// expense payee (a duplicate); a bill payment whose destination
-	// resolved to the expense twin (e.g. "Tata Neu HDFC Bank Credit Card"
-	// as expense id 1222 vs asset id 476) 422s on a transfer. Remap each
-	// endpoint to its asset twin so the transfer is valid.
-	if txnType == "transfer" {
-		if a := p.assetTwin(ctx, destID); a != 0 {
-			destID = a
-		}
-		if a := p.assetTwin(ctx, srcID); a != 0 {
-			srcID = a
-		}
+		srcID, destID = sa, da
 	}
 
 	line := firefly.CreateTransactionLine{
@@ -430,6 +433,121 @@ func (p *Pusher) buildCreateRequest(ctx context.Context, row pushableRow) firefl
 }
 
 // markPushed updates staged_fold_txns to terminal pushed state.
+// FireflyTxnView is the current state of a firefly transaction, as names,
+// for pre-filling the edit form when correcting an already-pushed row.
+type FireflyTxnView struct {
+	Type            string
+	SourceName      string
+	DestinationName string
+	CategoryName    string
+	BudgetName      string
+	Description     string
+	Tags            []string
+}
+
+// CurrentFireflyView pulls the LIVE firefly transaction for a pushed row and
+// returns its current field values, so the review form can be pre-filled
+// from firefly's actual state (including edits made directly in firefly)
+// before the operator corrects it — the "pull remote first" half of a safe
+// update. Re-mirrors the pulled journal locally too. ok=false when the row
+// isn't pushed, has no group id, or the fetch fails (caller falls back to
+// the stored proposal).
+func (p *Pusher) CurrentFireflyView(ctx context.Context, foldUUID string) (FireflyTxnView, bool) {
+	row, err := p.fetchPushableRow(ctx, foldUUID)
+	if err != nil || !row.FireflyGroupID.Valid || row.FireflyGroupID.Int64 == 0 {
+		return FireflyTxnView{}, false
+	}
+	group, err := p.fc.GetTransaction(ctx, row.FireflyGroupID.Int64)
+	if err != nil || len(group.Data.Attributes.Transactions) == 0 {
+		return FireflyTxnView{}, false
+	}
+	j := group.Data.Attributes.Transactions[0]
+	if p.eagerSyncer != nil {
+		_ = p.eagerSyncer.MirrorJournal(ctx, j, row.FireflyGroupID.Int64)
+	}
+	return FireflyTxnView{
+		Type:            j.Type,
+		SourceName:      j.SourceName,
+		DestinationName: j.DestinationName,
+		CategoryName:    j.CategoryName,
+		BudgetName:      j.BudgetName,
+		Description:     j.Description,
+		Tags:            j.Tags,
+	}, true
+}
+
+// Update applies a re-classified row's corrected fields to its EXISTING
+// firefly transaction, in place (PUT — no duplicate). The row must already
+// be pushed and carry a group id. It re-mirrors the updated group afterward
+// so the local corpus stays current.
+func (p *Pusher) Update(ctx context.Context, foldUUID string) (PushReport, error) {
+	if p.readOnly {
+		return PushReport{}, fmt.Errorf("push: read-only mode is on")
+	}
+	row, err := p.fetchPushableRow(ctx, foldUUID)
+	if err != nil {
+		return PushReport{}, err
+	}
+	if !row.FireflyGroupID.Valid || row.FireflyGroupID.Int64 == 0 {
+		return PushReport{}, fmt.Errorf("update: row has no firefly group id")
+	}
+	groupID := row.FireflyGroupID.Int64
+
+	body := p.buildCreateRequest(ctx, row)
+	if len(body.Transactions) == 0 {
+		return PushReport{}, fmt.Errorf("update: empty transaction body")
+	}
+	// Target the existing journal so firefly updates it in place.
+	if row.FireflyTxnID.Valid {
+		body.Transactions[0].TransactionJournalID = strconv.FormatInt(row.FireflyTxnID.Int64, 10)
+	}
+	if fcur := body.Transactions[0].ForeignCurrencyCode; fcur != "" {
+		if err := p.fc.EnsureCurrency(ctx, fcur); err != nil {
+			p.audit(ctx, "firefly_ensure_currency_error", foldUUID, 0, body, statusFromErr(err), err.Error())
+			return PushReport{}, fmt.Errorf("firefly ensure currency %s: %w", fcur, err)
+		}
+	}
+	resp, err := p.fc.UpdateTransaction(ctx, groupID, body)
+	if err != nil {
+		p.audit(ctx, "firefly_update_error", foldUUID, nullableInt64Value(row.FireflyTxnID), body, statusFromErr(err), err.Error())
+		return PushReport{}, fmt.Errorf("firefly update: %w", err)
+	}
+	journalID := nullableInt64Value(row.FireflyTxnID)
+	if len(resp.JournalIDs) > 0 {
+		journalID = resp.JournalIDs[0]
+	}
+	if err := p.markPushed(ctx, foldUUID, journalID, groupID); err != nil {
+		return PushReport{}, fmt.Errorf("mark updated: %w", err)
+	}
+	p.audit(ctx, "firefly_update", foldUUID, journalID, body, 200, "")
+
+	if p.eagerSyncer != nil {
+		if group, gerr := p.fc.GetTransaction(ctx, groupID); gerr == nil {
+			for _, j := range group.Data.Attributes.Transactions {
+				_ = p.eagerSyncer.MirrorJournal(ctx, j, groupID)
+			}
+		}
+	}
+	if p.learner != nil {
+		_ = p.learner.LearnFromPushed(ctx, foldUUID)
+	}
+	return PushReport{
+		FoldUUID:       foldUUID,
+		Action:         "updated",
+		FireflyTxnID:   journalID,
+		FireflyGroupID: groupID,
+		PushedAt:       time.Now().UTC(),
+	}, nil
+}
+
+// nullableInt64Value returns the int64 or 0.
+func nullableInt64Value(n sql.NullInt64) int64 {
+	if n.Valid {
+		return n.Int64
+	}
+	return 0
+}
+
 // isAsset reports whether a firefly account id is one of the user's own
 // asset accounts, per the firefly_accounts mirror. Used to detect
 // asset→asset transfers at push time. Returns false when the id is 0, the

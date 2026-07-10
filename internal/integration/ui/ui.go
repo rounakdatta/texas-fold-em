@@ -137,6 +137,7 @@ func (h *Handler) Mount(mux *http.ServeMux) {
 	mux.Handle("GET /admin/ui/staged/{fold_uuid}", h.withAuth(h.handleDetail))
 	mux.Handle("POST /admin/ui/staged/{fold_uuid}/save", h.withAuth(h.handleSave))
 	mux.Handle("POST /admin/ui/staged/{fold_uuid}/push", h.withAuth(h.handlePush))
+	mux.Handle("POST /admin/ui/staged/{fold_uuid}/update", h.withAuth(h.handleUpdate))
 	mux.Handle("POST /admin/ui/staged/{fold_uuid}/skip", h.withAuth(h.handleSkip))
 	mux.Handle("POST /admin/ui/reclassify", h.withAuth(h.handleReclassify))
 	mux.Handle("POST /admin/ui/sync-accounts", h.withAuth(h.handleSyncAccounts))
@@ -605,11 +606,35 @@ func (h *Handler) handleDetail(w http.ResponseWriter, r *http.Request) {
 		back = "/admin/ui/?status=" + row.Status
 	}
 
+	// Correcting an already-pushed row: pull firefly's CURRENT transaction
+	// and pre-fill the form from it, so the correction builds on firefly's
+	// truth (including edits made directly in firefly). Saving then UPDATES
+	// the transaction in place rather than creating a duplicate.
+	isPushed := row.Status == "pushed"
+	fireflyPulled := false
+	if isPushed && h.pusher != nil {
+		if v, ok := h.pusher.CurrentFireflyView(r.Context(), uuid); ok {
+			edit.DestinationAccountName = v.DestinationName
+			edit.SourceAccountName = v.SourceName
+			edit.CategoryName = v.CategoryName
+			edit.BudgetName = v.BudgetName
+			if v.Description != "" {
+				edit.Description = v.Description
+			}
+			if len(v.Tags) > 0 {
+				edit.Tags = strings.Join(v.Tags, ", ")
+			}
+			fireflyPulled = true
+		}
+	}
+
 	h.render(w, h.detailTmpl, map[string]any{
 		"Title":           uuid,
 		"Status":          row.Status, // for the shared nav's active-state highlight
 		"Row":             row,
 		"Back":            back,
+		"IsPushed":        isPushed,
+		"FireflyPulled":   fireflyPulled,
 		"Edit":            edit,
 		"EvidencePretty":  prettyJSON(evidence),
 		"Flash":           flashFromCookie(r, w),
@@ -802,6 +827,46 @@ func backOr(back, fallback string) string {
 		return back
 	}
 	return fallback
+}
+
+// handleUpdate corrects an ALREADY-PUSHED row: it saves the edited fields
+// then UPDATES the existing firefly transaction in place (PUT) instead of
+// creating a duplicate. The detail page pre-filled the form from firefly's
+// current state, so this "clubs" the operator's correction with firefly's
+// live values (including manual edits made there). Failures keep the
+// operator on the detail page.
+func (h *Handler) handleUpdate(w http.ResponseWriter, r *http.Request) {
+	uuid := r.PathValue("fold_uuid")
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	back := backOr(r.FormValue("back"), "/admin/ui/?status=pushed")
+	if h.pusher == nil {
+		h.flashErr(w, "update is unavailable")
+		http.Redirect(w, r, "/admin/ui/staged/"+uuid, http.StatusSeeOther)
+		return
+	}
+	unresolved, err := h.saveEdits(r.Context(), uuid, r.Form)
+	if err != nil {
+		h.flashErr(w, "save failed before update: "+err.Error())
+		http.Redirect(w, r, "/admin/ui/staged/"+uuid, http.StatusSeeOther)
+		return
+	}
+	if len(unresolved) > 0 {
+		h.flashErr(w, "update aborted — couldn't resolve: "+strings.Join(unresolved, "; ")+
+			". Edits were saved; fix the unresolved names and try again.")
+		http.Redirect(w, r, "/admin/ui/staged/"+uuid, http.StatusSeeOther)
+		return
+	}
+	report, err := h.pusher.Update(r.Context(), uuid)
+	if err != nil {
+		h.flashErr(w, "firefly update failed: "+err.Error())
+		http.Redirect(w, r, "/admin/ui/staged/"+uuid, http.StatusSeeOther)
+		return
+	}
+	h.flashOk(w, fmt.Sprintf("updated firefly transaction in place (id %d)", report.FireflyTxnID))
+	http.Redirect(w, r, back, http.StatusSeeOther)
 }
 
 // handleSkip sets status='skipped' so this row is excluded from
