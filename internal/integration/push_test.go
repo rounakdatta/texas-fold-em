@@ -541,3 +541,33 @@ func TestBuildCreateRequest_AssetToAssetIsTransfer(t *testing.T) {
 		t.Errorf("type=%q, want transfer (both endpoints are assets)", line.Type)
 	}
 }
+
+// TestBuildCreateRequest_TransferRemapsExpenseTwinToAsset: a bill-payment
+// transfer whose destination resolved to a same-named EXPENSE duplicate
+// (Tata Neu card as expense 1222) must be remapped to the ASSET twin (476),
+// else firefly 422s ("no valid destination account for id 1222").
+func TestBuildCreateRequest_TransferRemapsExpenseTwinToAsset(t *testing.T) {
+	s := newPushTestSetup(t)
+	if _, err := s.db.DB.Exec(`
+		INSERT INTO firefly_accounts (firefly_id, name, type, account_role, active, raw_payload)
+		VALUES (12,'HDFC Bank','asset','savingAsset',1,'{}'),
+		       (476,'Tata Neu HDFC Bank Credit Card','asset','ccAsset',1,'{}'),
+		       (1222,'Tata Neu HDFC Bank Credit Card','expense','',1,'{}')`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	p := NewPusher(s.db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), false)
+	row := pushableRow{
+		FoldUUID: "u-billpay", AmountPaise: 1592000, Currency: "INR", Type: "OUTGOING",
+		ProposedTxnType:              sql.NullString{String: "transfer", Valid: true},
+		ProposedSourceAccountID:      sql.NullInt64{Int64: 12, Valid: true},
+		ProposedDestinationAccountID: sql.NullInt64{Int64: 1222, Valid: true}, // the expense duplicate
+		TxnTimestamp:                 time.Now().UTC(),
+	}
+	line := p.buildCreateRequest(context.Background(), row).Transactions[0]
+	if line.Type != "transfer" {
+		t.Errorf("type=%q, want transfer", line.Type)
+	}
+	if line.DestinationID != "476" {
+		t.Errorf("destination_id=%q, want 476 (asset twin), not the expense 1222", line.DestinationID)
+	}
+}
