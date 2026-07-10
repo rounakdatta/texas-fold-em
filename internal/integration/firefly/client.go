@@ -76,18 +76,18 @@ func (c *Client) ListTransactions(ctx context.Context, page, limit int) (Transac
 	return resp, nil
 }
 
-// GetTransaction fetches a single transaction group by journal id. Used
+// GetTransaction fetches a single transaction GROUP by its group id. Used
 // for the eager-mirror codepath: right after we push, we pull the
 // just-created group back into firefly_txns so the very next
 // classification benefits from the latest correction without waiting
 // for the periodic /admin/firefly/sync cycle.
 //
-// Firefly's GET /transactions/{id} accepts either a group id or a
-// journal id; we always pass the journal id we got back from the create
-// response.
-func (c *Client) GetTransaction(ctx context.Context, journalID int64) (TransactionGroupResponse, error) {
+// IMPORTANT: firefly's GET /transactions/{id} takes the transaction GROUP
+// id, NOT a journal id — passing a journal id 404s. The create response's
+// data.id is the group id; pass that (resp.GroupID).
+func (c *Client) GetTransaction(ctx context.Context, groupID int64) (TransactionGroupResponse, error) {
 	var resp TransactionGroupResponse
-	path := fmt.Sprintf("/api/v1/transactions/%d", journalID)
+	path := fmt.Sprintf("/api/v1/transactions/%d", groupID)
 	if err := c.get(ctx, path, nil, &resp); err != nil {
 		return TransactionGroupResponse{}, err
 	}

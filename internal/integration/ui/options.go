@@ -23,15 +23,31 @@ type nameOption struct {
 // usually <10). Sorted alphabetically.
 func (h *Handler) listAccountsByKind(ctx context.Context, kind string) ([]nameOption, error) {
 	idCol, nameCol := "destination_account_id", "destination_account_name"
+	// A destination may be an expense (merchant) or an asset (transfer
+	// target); a source is always one of the user's own assets.
+	mirrorTypes := "'expense','asset'"
 	if kind == "source" {
 		idCol, nameCol = "source_account_id", "source_account_name"
+		mirrorTypes = "'asset'"
 	}
+	// UNION the firefly_accounts mirror (firefly's real account list) with
+	// the transaction-derived names, so an account the user JUST created in
+	// firefly — which has no transaction history yet — still shows up in the
+	// autocomplete. Without this, a fresh "Millennium Supermarket" expense
+	// account is unselectable until it has a transaction.
 	q := fmt.Sprintf(`
-		SELECT DISTINCT %s, %s
-		FROM firefly_txns
-		WHERE %s IS NOT NULL AND %s IS NOT NULL AND %s <> ''
-		ORDER BY %s COLLATE NOCASE
-	`, idCol, nameCol, idCol, nameCol, nameCol, nameCol)
+		SELECT id, name FROM (
+			SELECT %s AS id, %s AS name
+			FROM firefly_txns
+			WHERE %s IS NOT NULL AND %s IS NOT NULL AND %s <> ''
+			UNION
+			SELECT firefly_id AS id, name AS name
+			FROM firefly_accounts
+			WHERE type IN (%s) AND active = 1 AND name <> ''
+		)
+		GROUP BY id
+		ORDER BY name COLLATE NOCASE
+	`, idCol, nameCol, idCol, nameCol, nameCol, mirrorTypes)
 	rows, err := h.db.QueryContext(ctx, q)
 	if err != nil {
 		return nil, err

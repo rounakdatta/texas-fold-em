@@ -9,7 +9,7 @@
       <strong>when:</strong> <time datetime="{{.Row.TxnTimestampUTC}}">{{.Row.TxnTimestamp}}</time><br>
       <strong>mode:</strong> <span class="pill pill-{{.Row.Mode}}">{{.Row.Mode}}</span><br>
       <strong>type:</strong> {{.Row.Type}}<br>
-      <strong>amount:</strong> <span class="amount {{if eq .Row.Type "OUTGOING"}}amount-out{{else}}amount-in{{end}}">{{if eq .Row.Type "OUTGOING"}}-{{else}}+{{end}}{{.Row.Currency}} {{.Row.AmountDisplay}}</span>
+      <strong>amount:</strong> <span class="amount {{if eq .Row.Type "OUTGOING"}}amount-out{{else}}amount-in{{end}}">{{if eq .Row.Type "OUTGOING"}}-{{else}}+{{end}}{{.Row.Currency}} {{.Row.AmountDisplay}}</span>{{if .Row.ForeignDisplay}} <span style="color:var(--muted)">(charged {{.Row.ForeignDisplay}})</span>{{end}}
     </div>
     <div>
       <strong>extracted merchant:</strong> {{if .Row.MerchantExtracted}}{{.Row.MerchantExtracted}}{{else}}<span style="color:var(--muted)">—</span>{{end}}<br>
@@ -26,6 +26,12 @@
   </div>
   {{if .EvidencePretty}}<pre>{{.EvidencePretty}}</pre>{{end}}
 </div>
+
+<form method="post" action="/admin/ui/sync-accounts" style="margin:0 0 10px">
+  <input type="hidden" name="back" value="/admin/ui/staged/{{.Row.FoldUUID}}">
+  <button type="submit" class="btn" style="font-size:0.85em">↻ sync accounts from firefly</button>
+  <small class="hint">just created an account in firefly? sync so it appears in the pickers below</small>
+</form>
 
 <form method="post" action="/admin/ui/staged/{{.Row.FoldUUID}}/save">
   <div class="card">

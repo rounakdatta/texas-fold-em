@@ -291,10 +291,11 @@ func TestPush_NotFound(t *testing.T) {
 func TestPush_EagerMirror(t *testing.T) {
 	s := newPushTestSetup(t)
 
-	// Augment the fake to handle GET /api/v1/transactions/7951 — the
-	// just-created journal. Returns the same shape the real firefly
-	// does, including notes (the raw fold narration we push on every
-	// transaction now).
+	// Augment the fake to handle GET /api/v1/transactions/7950 — the
+	// just-created GROUP (firefly's /transactions/{id} takes the group id,
+	// which is the create response's data.id; a journal id would 404).
+	// Returns the same shape the real firefly does, including notes (the
+	// raw fold narration we push on every transaction now).
 	var getCalls atomic.Int32
 	s.fakeFirefly.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/vnd.api+json")
@@ -302,7 +303,7 @@ func TestPush_EagerMirror(t *testing.T) {
 		case strings.HasSuffix(r.URL.Path, "/search/transactions"):
 			s.searchCalls.Add(1)
 			_, _ = w.Write([]byte(`{"data":[]}`))
-		case r.URL.Path == "/api/v1/transactions/7951":
+		case r.URL.Path == "/api/v1/transactions/7950":
 			getCalls.Add(1)
 			_, _ = w.Write([]byte(`{"data":{"id":"7950","type":"transactions","attributes":{"group_title":"","transactions":[{
 				"transaction_journal_id":"7951","type":"withdrawal","amount":"70.00","currency_code":"INR",
@@ -335,7 +336,16 @@ func TestPush_EagerMirror(t *testing.T) {
 		t.Errorf("firefly_txn_id=%d, want 7951", report.FireflyTxnID)
 	}
 	if getCalls.Load() != 1 {
-		t.Errorf("expected exactly 1 GET /transactions/7951 (eager mirror), got %d", getCalls.Load())
+		t.Errorf("expected exactly 1 GET /transactions/7950 (eager mirror by group id), got %d", getCalls.Load())
+	}
+	// The group id must be persisted on the staged row so the firefly
+	// deep-link works without depending on the mirror.
+	var gid sql.NullInt64
+	if err := s.db.DB.QueryRow(`SELECT firefly_group_id FROM staged_fold_txns WHERE fold_uuid='u1'`).Scan(&gid); err != nil {
+		t.Fatalf("read firefly_group_id: %v", err)
+	}
+	if !gid.Valid || gid.Int64 != 7950 {
+		t.Errorf("firefly_group_id=%v, want 7950", gid)
 	}
 
 	// The just-pushed journal must now be in firefly_txns with notes

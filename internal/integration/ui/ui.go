@@ -80,6 +80,10 @@ type Handler struct {
 	// cls enables the reclassify-selected action. Optional; when nil the
 	// review list's reclassify button reports it's unavailable.
 	cls *classifier.Classifier
+	// fireflyAccounts enables the "sync accounts from firefly" button, which
+	// refreshes the firefly_accounts mirror on demand so an account the user
+	// just created in firefly is immediately selectable. Optional.
+	fireflyAccounts *integration.FireflyAccountsSyncer
 }
 
 // SetFireflyPublicURL sets the user-facing firefly base used to link
@@ -89,6 +93,10 @@ func (h *Handler) SetFireflyPublicURL(u string) { h.fireflyPublicURL = strings.T
 // SetClassifier wires the classifier so the review UI can reclassify
 // selected rows on demand. Optional.
 func (h *Handler) SetClassifier(c *classifier.Classifier) { h.cls = c }
+
+// SetFireflyAccountsSyncer wires the firefly-accounts mirror syncer so the
+// review UI can refresh it on demand (the "sync accounts" button). Optional.
+func (h *Handler) SetFireflyAccountsSyncer(s *integration.FireflyAccountsSyncer) { h.fireflyAccounts = s }
 
 // New constructs a UI Handler.
 func New(db *sql.DB, pusher *integration.Pusher, log *slog.Logger, adminKey string, auth AuthMode) (*Handler, error) {
@@ -131,6 +139,7 @@ func (h *Handler) Mount(mux *http.ServeMux) {
 	mux.Handle("POST /admin/ui/staged/{fold_uuid}/push", h.withAuth(h.handlePush))
 	mux.Handle("POST /admin/ui/staged/{fold_uuid}/skip", h.withAuth(h.handleSkip))
 	mux.Handle("POST /admin/ui/reclassify", h.withAuth(h.handleReclassify))
+	mux.Handle("POST /admin/ui/sync-accounts", h.withAuth(h.handleSyncAccounts))
 	if h.auth == AuthModeCookie {
 		mux.HandleFunc("GET /admin/ui/login", h.handleLogin)
 	}
@@ -185,6 +194,7 @@ type indexRow struct {
 	TxnTimestampUTC      string
 	AmountDisplay        string
 	Currency             string
+	ForeignDisplay       string // e.g. "AED 25.00"; empty for domestic
 	Mode                 string
 	Type                 string
 	MerchantExtracted    string
@@ -427,7 +437,8 @@ func parsePositiveInt(s string, def int) int {
 func (h *Handler) listRows(ctx context.Context, f listFilters, limit, offset int) ([]indexRow, error) {
 	where, args := f.where()
 	q := `
-		SELECT s.fold_uuid, s.txn_timestamp, s.amount_paise, s.currency, s.mode, s.type,
+		SELECT s.fold_uuid, s.txn_timestamp, s.amount_paise, s.currency,
+		       s.foreign_amount_paise, s.foreign_currency, s.mode, s.type,
 		       COALESCE(s.merchant_extracted,''), s.status,
 		       s.classifier_tier, s.classifier_confidence,
 		       (SELECT category_name FROM firefly_txns
@@ -445,7 +456,8 @@ func (h *Handler) listRows(ctx context.Context, f listFilters, limit, offset int
 		         NULLIF(s.proposed_destination_account_name, ''),
 		         NULLIF(s.merchant_extracted, '')
 		       ),
-		       (SELECT group_id FROM firefly_txns WHERE firefly_id = s.firefly_txn_id LIMIT 1)
+		       COALESCE(s.firefly_group_id,
+		                (SELECT group_id FROM firefly_txns WHERE firefly_id = s.firefly_txn_id LIMIT 1))
 		FROM staged_fold_txns s
 		WHERE ` + where + `
 		ORDER BY s.txn_timestamp DESC
@@ -461,6 +473,8 @@ func (h *Handler) listRows(ctx context.Context, f listFilters, limit, offset int
 		var (
 			r           indexRow
 			amountPaise int64
+			fAmt        sql.NullInt64
+			fCur        sql.NullString
 			tier        sql.NullInt64
 			conf        sql.NullFloat64
 			catName     sql.NullString
@@ -469,10 +483,11 @@ func (h *Handler) listRows(ctx context.Context, f listFilters, limit, offset int
 			groupID     sql.NullInt64
 			tsStr       string
 		)
-		if err := rows.Scan(&r.FoldUUID, &tsStr, &amountPaise, &r.Currency, &r.Mode, &r.Type,
+		if err := rows.Scan(&r.FoldUUID, &tsStr, &amountPaise, &r.Currency, &fAmt, &fCur, &r.Mode, &r.Type,
 			&r.MerchantExtracted, &r.Status, &tier, &conf, &catName, &srcName, &destName, &groupID); err != nil {
 			return nil, err
 		}
+		r.ForeignDisplay = foreignDisplay(fAmt, fCur)
 		// Two views of the timestamp: a server-rendered fallback for
 		// no-JS clients, and a canonical RFC3339 UTC string for the
 		// client-side <time datetime="..."> conversion to local zone.
@@ -521,6 +536,7 @@ type detailRow struct {
 	TxnTimestampUTC   string
 	AmountDisplay     string
 	Currency          string
+	ForeignDisplay    string // e.g. "AED 25.00"; empty for domestic
 	Mode              string
 	Type              string
 	MerchantExtracted string
@@ -606,9 +622,12 @@ func (h *Handler) fetchDetail(ctx context.Context, uuid string) (detailRow, edit
 		cSrcName, pSrcName              sql.NullString
 		pSrcID, pDestID, pCatID, pBudID sql.NullInt64
 		pDesc                           sql.NullString
+		fAmt                            sql.NullInt64
+		fCur                            sql.NullString
 	)
 	err := h.db.QueryRowContext(ctx, `
-		SELECT fold_uuid, narration, txn_timestamp, amount_paise, currency, mode, type,
+		SELECT fold_uuid, narration, txn_timestamp, amount_paise, currency,
+		       foreign_amount_paise, foreign_currency, mode, type,
 		       COALESCE(merchant_extracted,''), status,
 		       classifier_tier, classifier_confidence, classifier_evidence_json,
 		       confirmed_source_account_id, confirmed_destination_account_id,
@@ -621,7 +640,7 @@ func (h *Handler) fetchDetail(ctx context.Context, uuid string) (detailRow, edit
 		FROM staged_fold_txns
 		WHERE fold_uuid = ?
 	`, uuid).Scan(
-		&r.FoldUUID, &r.Narration, &tsStr, &amountPaise, &r.Currency, &r.Mode, &r.Type,
+		&r.FoldUUID, &r.Narration, &tsStr, &amountPaise, &r.Currency, &fAmt, &fCur, &r.Mode, &r.Type,
 		&r.MerchantExtracted, &r.Status, &tier, &conf, &evidence,
 		&cSrcID, &cDestID, &cCatID, &cBudID, &cDesc, &cTags,
 		&pSrcID, &pDestID, &pCatID, &pBudID, &pDesc,
@@ -642,6 +661,7 @@ func (h *Handler) fetchDetail(ctx context.Context, uuid string) (detailRow, edit
 		r.TxnTimestamp = tsStr
 	}
 	r.AmountDisplay = paiseToDecimal(amountPaise)
+	r.ForeignDisplay = foreignDisplay(fAmt, fCur)
 	if tier.Valid {
 		r.TierLabel = tierLabel(int(tier.Int64))
 	}
@@ -773,6 +793,33 @@ func (h *Handler) handleSkip(w http.ResponseWriter, r *http.Request) {
 	}
 	h.flashOk(w, "marked skipped")
 	http.Redirect(w, r, "/admin/ui/?status=needs_review", http.StatusSeeOther)
+}
+
+// handleSyncAccounts refreshes the firefly_accounts mirror on demand — the
+// "sync accounts from firefly" button — so an account the user JUST created
+// in firefly becomes selectable in the destination/source autocompletes
+// without waiting for the hourly cron refresh.
+func (h *Handler) handleSyncAccounts(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	back := r.FormValue("back")
+	if !strings.HasPrefix(back, "/admin/ui/") {
+		back = "/admin/ui/"
+	}
+	if h.fireflyAccounts == nil {
+		h.flashErr(w, "account sync is unavailable (no syncer configured)")
+		http.Redirect(w, r, back, http.StatusSeeOther)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+	report, err := h.fireflyAccounts.Sync(ctx)
+	if err != nil {
+		h.flashErr(w, "account sync failed: "+err.Error())
+		http.Redirect(w, r, back, http.StatusSeeOther)
+		return
+	}
+	h.flashOk(w, fmt.Sprintf("synced %d firefly accounts (%d assets) — new ones are now selectable", report.Upserted, report.Assets))
+	http.Redirect(w, r, back, http.StatusSeeOther)
 }
 
 // handleReclassify re-runs the classifier on the selected fold_uuids —
@@ -977,6 +1024,16 @@ func paiseToDecimal(p int64) string {
 		p = -p
 	}
 	return fmt.Sprintf("%d.%02d", p/100, p%100)
+}
+
+// foreignDisplay formats the original foreign charge for display, e.g.
+// "AED 25.00". Returns "" for a domestic transaction (no foreign side), so
+// templates can render it conditionally.
+func foreignDisplay(paise sql.NullInt64, currency sql.NullString) string {
+	if !paise.Valid || !currency.Valid || currency.String == "" {
+		return ""
+	}
+	return currency.String + " " + paiseToDecimal(paise.Int64)
 }
 
 func nullableInt64Str(confirmed, proposed sql.NullInt64) string {
