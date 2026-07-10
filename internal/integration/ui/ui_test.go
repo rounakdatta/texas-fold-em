@@ -846,3 +846,41 @@ func TestUI_Push_BackDefaultsWhenAbsent(t *testing.T) {
 		t.Errorf("valid back = %q, want it preserved", got)
 	}
 }
+
+// TestUI_AllView_DimsPushedAndScrolls: in the "all" view pushed rows are
+// dimmed (row-pushed), non-pushed rows carry the scroll anchor, and the
+// auto-scroll script is present. The pushed tab must NOT dim.
+func TestUI_AllView_DimsPushedAndScrolls(t *testing.T) {
+	u := newUITestHarness(t, AuthModeBypass)
+	if _, err := u.db.DB.Exec(`INSERT INTO staged_fold_txns
+		(fold_uuid, raw_payload, amount_paise, currency, txn_timestamp, mode, type, narration, merchant_extracted, status)
+		VALUES ('pushed-1','{}',5000,'INR','2026-07-01T10:00:00Z','CARD','OUTGOING','x','zomato','pushed')`); err != nil {
+		t.Fatal(err)
+	}
+	all, _ := io.ReadAll(mustGet(t, u, "/admin/ui/?status=all"))
+	s := string(all)
+	if !strings.Contains(s, `class="row-pushed"`) {
+		t.Error("all view: expected pushed rows dimmed (row-pushed)")
+	}
+	if !strings.Contains(s, `data-unpushed="1"`) {
+		t.Error("all view: expected non-pushed rows marked data-unpushed")
+	}
+	if !strings.Contains(s, "querySelector('tr[data-unpushed]')") {
+		t.Error("all view: expected the auto-scroll script")
+	}
+	// The pushed tab should not dim (row-pushed only applies in the all view).
+	pushed, _ := io.ReadAll(mustGet(t, u, "/admin/ui/?status=pushed"))
+	if strings.Contains(string(pushed), `class="row-pushed"`) {
+		t.Error("pushed tab must not dim its rows")
+	}
+}
+
+func mustGet(t *testing.T, u *uiTestHarness, path string) io.Reader {
+	t.Helper()
+	resp := u.do(t, "GET", path, nil)
+	t.Cleanup(func() { resp.Body.Close() })
+	if resp.StatusCode != 200 {
+		t.Fatalf("GET %s: status %d", path, resp.StatusCode)
+	}
+	return resp.Body
+}

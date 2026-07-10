@@ -18,6 +18,10 @@
     th, td { padding:8px 10px; text-align:left; border-bottom:1px solid var(--border); font-size:13px; vertical-align:top; }
     th { color:var(--muted); font-weight:500; text-transform:uppercase; font-size:11px; letter-spacing:.05em; }
     tr:hover { background:var(--row); }
+    /* Already-pushed rows in the "all" view are dimmed — done, not the
+       focus. Full opacity on hover so they're still readable when needed. */
+    tr.row-pushed { opacity:0.45; }
+    tr.row-pushed:hover { opacity:1; }
     .pill { padding:2px 8px; border-radius:99px; font-size:11px; font-weight:500; display:inline-block; }
     .pill-pending { background:#33333a; color:var(--muted); }
     .pill-needs_review { background:rgba(255,180,84,0.15); color:var(--warn); }
