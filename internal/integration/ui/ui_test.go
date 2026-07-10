@@ -927,3 +927,35 @@ func TestUI_List_PushedShowsFireflyActualNotStaleProposed(t *testing.T) {
 		t.Error("list must NOT show the stale proposed account (Savoury Express)")
 	}
 }
+
+// TestUI_SaveEdits_DepositNewRevenueSource: on a deposit, an unresolved
+// source name is kept as a NEW revenue account (confirmed_source_account_name),
+// not flagged unresolved.
+func TestUI_SaveEdits_DepositNewRevenueSource(t *testing.T) {
+	u := newUITestHarness(t, AuthModeBypass)
+	if _, err := u.db.DB.Exec(`
+		INSERT INTO staged_fold_txns (fold_uuid, raw_payload, amount_paise, currency, txn_timestamp,
+		    mode, type, narration, merchant_extracted, status, proposed_destination_account_id)
+		VALUES ('dep-1','{}',3500000,'INR','2026-07-08T13:16:00Z','OTHERS','INCOMING','x','neha a','needs_review',12)`); err != nil {
+		t.Fatal(err)
+	}
+	form := url.Values{}
+	form.Set("destination_name", "Cake Palace") // resolves to asset-ish id 12
+	form.Set("source_name", "Neha Ananthan")     // NEW revenue payer (not in firefly)
+	resp := u.do(t, "POST", "/admin/ui/staged/dep-1/save", form)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	var srcName sql.NullString
+	var status string
+	if err := u.db.DB.QueryRow(`SELECT confirmed_source_account_name, status FROM staged_fold_txns WHERE fold_uuid='dep-1'`).Scan(&srcName, &status); err != nil {
+		t.Fatal(err)
+	}
+	if !srcName.Valid || srcName.String != "Neha Ananthan" {
+		t.Errorf("confirmed_source_account_name=%v, want 'Neha Ananthan' (kept as new revenue, not unresolved)", srcName)
+	}
+	if status != "ready_to_push" {
+		t.Errorf("status=%q, want ready_to_push (source was resolved, not unresolved)", status)
+	}
+}

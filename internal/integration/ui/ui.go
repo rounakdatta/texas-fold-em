@@ -1007,7 +1007,8 @@ func (h *Handler) saveEdits(ctx context.Context, uuid string, form url.Values) (
 		FROM staged_fold_txns WHERE fold_uuid = ?`, uuid).Scan(&effType)
 
 	var dstID, srcID, catID, budID any
-	var dstName any // set instead of dstID for a new expense account (withdrawal)
+	var dstName any    // set instead of dstID for a new expense account (withdrawal)
+	var srcNameVal any // set instead of srcID for a new revenue account (deposit)
 	if destName != "" {
 		if id := h.resolveAccountID(ctx, "destination", destName); id != 0 {
 			dstID = id
@@ -1022,6 +1023,12 @@ func (h *Handler) saveEdits(ctx context.Context, uuid string, form url.Values) (
 	if srcName != "" {
 		if id := h.resolveAccountID(ctx, "source", srcName); id != 0 {
 			srcID = id
+		} else if effType == "deposit" {
+			// Deposit payer: keep the typed name so the push creates the
+			// firefly REVENUE account by that name — symmetric to a
+			// withdrawal's new expense destination. (A withdrawal/transfer
+			// source must be an existing asset, so there it stays unresolved.)
+			srcNameVal = srcName
 		} else {
 			unresolved = append(unresolved, fmt.Sprintf("source %q", srcName))
 		}
@@ -1058,6 +1065,7 @@ func (h *Handler) saveEdits(ctx context.Context, uuid string, form url.Values) (
 	_, err = h.db.ExecContext(ctx, `
 		UPDATE staged_fold_txns
 		SET confirmed_source_account_id        = ?,
+		    confirmed_source_account_name      = ?,
 		    confirmed_destination_account_id   = ?,
 		    confirmed_destination_account_name = ?,
 		    confirmed_category_id              = ?,
@@ -1068,7 +1076,7 @@ func (h *Handler) saveEdits(ctx context.Context, uuid string, form url.Values) (
 		    updated_at                         = CURRENT_TIMESTAMP,
 		    status = CASE WHEN status='needs_review' THEN 'ready_to_push' ELSE status END
 		WHERE fold_uuid = ?
-	`, srcID, dstID, dstName, catID, budID, nullableStrFromForm(desc), tagsJSON, uuid)
+	`, srcID, srcNameVal, dstID, dstName, catID, budID, nullableStrFromForm(desc), tagsJSON, uuid)
 	return unresolved, err
 }
 
