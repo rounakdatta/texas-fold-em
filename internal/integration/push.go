@@ -165,7 +165,7 @@ func (p *Pusher) Push(ctx context.Context, foldUUID string, confirm bool) (PushR
 		}, nil
 	}
 
-	body := p.buildCreateRequest(row)
+	body := p.buildCreateRequest(ctx, row)
 
 	if !confirm {
 		return PushReport{
@@ -317,7 +317,7 @@ func (p *Pusher) fetchPushableRow(ctx context.Context, foldUUID string) (pushabl
 // back to proposed_*. This means an auto-classified row (where the
 // human never edited anything) is pushable directly with whatever the
 // classifier proposed.
-func (p *Pusher) buildCreateRequest(row pushableRow) firefly.CreateTransactionRequest {
+func (p *Pusher) buildCreateRequest(ctx context.Context, row pushableRow) firefly.CreateTransactionRequest {
 	srcID := pickInt64(row.ConfirmedSourceAccountID, row.ProposedSourceAccountID)
 	destID := pickInt64(row.ConfirmedDestinationAccountID, row.ProposedDestinationAccountID)
 	catID := pickInt64(row.ConfirmedCategoryID, row.ProposedCategoryID)
@@ -354,6 +354,17 @@ func (p *Pusher) buildCreateRequest(row pushableRow) firefly.CreateTransactionRe
 	txnType := pickString(row.ConfirmedTxnType, row.ProposedTxnType)
 	if txnType == "" {
 		txnType = foldTypeToFireflyType(row.Type)
+	}
+	// asset → asset ⇒ transfer. firefly rejects an asset account as a
+	// withdrawal/deposit endpoint, so a credit-card repayment (HDFC Bank →
+	// Scapia CC, both the user's own assets) pushed as a "withdrawal" 422s
+	// with "could not find a valid destination account for id 954". Both
+	// endpoints being assets is the deterministic signal for a transfer —
+	// override whatever type was proposed. The classifier's LLM transfer
+	// detection is best-effort and a manual edit can change the endpoints,
+	// so this push-time check is the authoritative guard.
+	if txnType != "transfer" && p.isAsset(ctx, srcID) && p.isAsset(ctx, destID) {
+		txnType = "transfer"
 	}
 
 	line := firefly.CreateTransactionLine{
@@ -405,6 +416,21 @@ func (p *Pusher) buildCreateRequest(row pushableRow) firefly.CreateTransactionRe
 }
 
 // markPushed updates staged_fold_txns to terminal pushed state.
+// isAsset reports whether a firefly account id is one of the user's own
+// asset accounts, per the firefly_accounts mirror. Used to detect
+// asset→asset transfers at push time. Returns false when the id is 0, the
+// mirror lacks the row, or there's no db — all of which safely keep the
+// default (non-transfer) behaviour.
+func (p *Pusher) isAsset(ctx context.Context, id int64) bool {
+	if p.db == nil || id == 0 {
+		return false
+	}
+	var n int
+	err := p.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM firefly_accounts WHERE firefly_id = ? AND type = 'asset' AND active = 1`, id).Scan(&n)
+	return err == nil && n > 0
+}
+
 func (p *Pusher) markPushed(ctx context.Context, foldUUID string, journalID, groupID int64) error {
 	// Persist BOTH the journal id (firefly_txn_id) and the group id. The
 	// group id backs the review UI's firefly deep-link directly, so the link

@@ -482,7 +482,7 @@ func TestBuildCreateRequest_ForeignCurrency(t *testing.T) {
 		ProposedSourceAccountID:      sql.NullInt64{Int64: 1314, Valid: true},
 		ProposedDestinationAccountID: sql.NullInt64{Int64: 900, Valid: true},
 	}
-	req := (&Pusher{}).buildCreateRequest(row)
+	req := (&Pusher{}).buildCreateRequest(context.Background(), row)
 	if len(req.Transactions) != 1 {
 		t.Fatalf("want 1 line, got %d", len(req.Transactions))
 	}
@@ -507,11 +507,37 @@ func TestBuildCreateRequest_DomesticNoForeign(t *testing.T) {
 		ProposedSourceAccountID:      sql.NullInt64{Int64: 12, Valid: true},
 		ProposedDestinationAccountID: sql.NullInt64{Int64: 900, Valid: true},
 	}
-	line := (&Pusher{}).buildCreateRequest(row).Transactions[0]
+	line := (&Pusher{}).buildCreateRequest(context.Background(), row).Transactions[0]
 	if line.ForeignAmount != "" || line.ForeignCurrencyCode != "" {
 		t.Errorf("domestic row must have no foreign fields, got %q %q", line.ForeignAmount, line.ForeignCurrencyCode)
 	}
 	if line.CurrencyCode != "INR" {
 		t.Errorf("currency = %q, want INR", line.CurrencyCode)
+	}
+}
+
+// TestBuildCreateRequest_AssetToAssetIsTransfer: a credit-card repayment
+// (both endpoints are the user's own asset accounts) must be pushed as a
+// transfer, even when the proposed type is "withdrawal" — otherwise firefly
+// 422s ("no valid destination account for id 954", an asset).
+func TestBuildCreateRequest_AssetToAssetIsTransfer(t *testing.T) {
+	s := newPushTestSetup(t)
+	if _, err := s.db.DB.Exec(`
+		INSERT INTO firefly_accounts (firefly_id, name, type, account_role, active, raw_payload)
+		VALUES (12,'HDFC Bank','asset','savingAsset',1,'{}'),
+		       (954,'Scapia Federal Bank Credit Card','asset','ccAsset',1,'{}')`); err != nil {
+		t.Fatalf("seed accounts: %v", err)
+	}
+	p := NewPusher(s.db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), false)
+	row := pushableRow{
+		FoldUUID: "u-repay", AmountPaise: 289900, Currency: "INR", Type: "OUTGOING",
+		ProposedTxnType:              sql.NullString{String: "withdrawal", Valid: true},
+		ProposedSourceAccountID:      sql.NullInt64{Int64: 12, Valid: true},
+		ProposedDestinationAccountID: sql.NullInt64{Int64: 954, Valid: true},
+		TxnTimestamp:                 time.Now().UTC(),
+	}
+	line := p.buildCreateRequest(context.Background(), row).Transactions[0]
+	if line.Type != "transfer" {
+		t.Errorf("type=%q, want transfer (both endpoints are assets)", line.Type)
 	}
 }
