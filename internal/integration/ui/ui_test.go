@@ -800,3 +800,15 @@ func TestUI_Push_HappyPath(t *testing.T) {
 		t.Errorf("firefly_txn_id=%d, want 7951", fid)
 	}
 }
+
+// TestUI_Index_ShowsDescription: the list renders the transaction title
+// (proposed_description) so rows are scannable by their human title.
+func TestUI_Index_ShowsDescription(t *testing.T) {
+	u := newUITestHarness(t, AuthModeBypass)
+	resp := u.do(t, "GET", "/admin/ui/?status=needs_review", nil)
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "Snack at cake palace") {
+		t.Errorf("expected the row's description 'Snack at cake palace' in the list")
+	}
+}

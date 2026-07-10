@@ -210,6 +210,10 @@ type indexRow struct {
 	// destination account name, else a C2 proposed-new-account name, else
 	// the raw extracted merchant as a fallback.
 	DestinationName string
+	// Description is the transaction title (confirmed edit else the LLM's
+	// proposed title). Shown in the list so rows are scannable by their
+	// human title, not just merchant/amount. Empty when neither is set.
+	Description string
 	// FireflyURL deep-links a pushed row to the firefly transaction it
 	// created. Empty unless the row is pushed, the public firefly URL is
 	// configured, and the group id is resolvable from the mirror.
@@ -456,6 +460,7 @@ func (h *Handler) listRows(ctx context.Context, f listFilters, limit, offset int
 		         NULLIF(s.proposed_destination_account_name, ''),
 		         NULLIF(s.merchant_extracted, '')
 		       ),
+		       COALESCE(NULLIF(s.confirmed_description, ''), NULLIF(s.proposed_description, ''), ''),
 		       COALESCE(s.firefly_group_id,
 		                (SELECT group_id FROM firefly_txns WHERE firefly_id = s.firefly_txn_id LIMIT 1))
 		FROM staged_fold_txns s
@@ -484,7 +489,7 @@ func (h *Handler) listRows(ctx context.Context, f listFilters, limit, offset int
 			tsStr       string
 		)
 		if err := rows.Scan(&r.FoldUUID, &tsStr, &amountPaise, &r.Currency, &fAmt, &fCur, &r.Mode, &r.Type,
-			&r.MerchantExtracted, &r.Status, &tier, &conf, &catName, &srcName, &destName, &groupID); err != nil {
+			&r.MerchantExtracted, &r.Status, &tier, &conf, &catName, &srcName, &destName, &r.Description, &groupID); err != nil {
 			return nil, err
 		}
 		r.ForeignDisplay = foreignDisplay(fAmt, fCur)
