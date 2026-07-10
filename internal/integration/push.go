@@ -366,6 +366,20 @@ func (p *Pusher) buildCreateRequest(ctx context.Context, row pushableRow) firefl
 	if txnType != "transfer" && p.isAsset(ctx, srcID) && p.isAsset(ctx, destID) {
 		txnType = "transfer"
 	}
+	// A transfer's endpoints must both be the user's own ASSET accounts.
+	// A card commonly exists in firefly as BOTH an asset and a same-named
+	// expense payee (a duplicate); a bill payment whose destination
+	// resolved to the expense twin (e.g. "Tata Neu HDFC Bank Credit Card"
+	// as expense id 1222 vs asset id 476) 422s on a transfer. Remap each
+	// endpoint to its asset twin so the transfer is valid.
+	if txnType == "transfer" {
+		if a := p.assetTwin(ctx, destID); a != 0 {
+			destID = a
+		}
+		if a := p.assetTwin(ctx, srcID); a != 0 {
+			srcID = a
+		}
+	}
 
 	line := firefly.CreateTransactionLine{
 		Type:         txnType,
@@ -429,6 +443,32 @@ func (p *Pusher) isAsset(ctx context.Context, id int64) bool {
 	err := p.db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM firefly_accounts WHERE firefly_id = ? AND type = 'asset' AND active = 1`, id).Scan(&n)
 	return err == nil && n > 0
+}
+
+// assetTwin returns an asset-account id for a transfer endpoint: the id
+// itself when it's already an asset, otherwise a same-named asset account
+// (the "asset twin" of a duplicate expense/payee account), else 0 (leave
+// the endpoint as-is). Case-insensitive name match.
+func (p *Pusher) assetTwin(ctx context.Context, id int64) int64 {
+	if id == 0 || p.db == nil {
+		return 0
+	}
+	if p.isAsset(ctx, id) {
+		return id
+	}
+	var name string
+	if err := p.db.QueryRowContext(ctx,
+		`SELECT name FROM firefly_accounts WHERE firefly_id = ?`, id).Scan(&name); err != nil || name == "" {
+		return 0
+	}
+	var twin sql.NullInt64
+	_ = p.db.QueryRowContext(ctx,
+		`SELECT firefly_id FROM firefly_accounts WHERE LOWER(name) = LOWER(?) AND type = 'asset' AND active = 1 LIMIT 1`,
+		name).Scan(&twin)
+	if twin.Valid {
+		return twin.Int64
+	}
+	return 0
 }
 
 func (p *Pusher) markPushed(ctx context.Context, foldUUID string, journalID, groupID int64) error {
