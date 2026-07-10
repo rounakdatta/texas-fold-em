@@ -46,7 +46,7 @@
     </thead>
     <tbody>
       {{range .Rows}}
-      <tr>
+      <tr{{if ne .Status "pushed"}} data-unpushed="1"{{else if eq $.Status "all"}} class="row-pushed"{{end}}>
         <td>{{if ne .Status "pushed"}}<input type="checkbox" name="fold_uuids" value="{{.FoldUUID}}">{{end}}</td>
         <td>{{statusBadge .Status}}</td>
         <td><time datetime="{{.TxnTimestampUTC}}">{{.TxnTimestamp}}</time></td>
@@ -83,6 +83,16 @@
         <a href="{{filterURL .Filters .PerPage .NumPages}}">last</a>
       </span>
     </nav>
+  {{end}}
+  {{if eq .Status "all"}}
+  <script>
+    // Land the operator on the work: scroll to the first not-yet-pushed
+    // row so the already-pushed (dimmed) ones above are skipped.
+    (function () {
+      var el = document.querySelector('tr[data-unpushed]');
+      if (el) { el.scrollIntoView({ block: 'center' }); }
+    })();
+  </script>
   {{end}}
 {{end}}
 {{end}}
