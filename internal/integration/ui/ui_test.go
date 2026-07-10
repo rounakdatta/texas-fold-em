@@ -812,3 +812,37 @@ func TestUI_Index_ShowsDescription(t *testing.T) {
 		t.Errorf("expected the row's description 'Snack at cake palace' in the list")
 	}
 }
+
+// TestUI_Push_RedirectsToBack: a successful push returns the user to the
+// list they came from (the "back" field), not a hardcoded ?status=pushed.
+func TestUI_Push_RedirectsToBack(t *testing.T) {
+	u := newUITestHarness(t, AuthModeBypass)
+	form := url.Values{}
+	form.Set("destination_name", "Cake Palace") // resolves to id 12
+	form.Set("source_name", "HDFC Card")         // resolves to id 1
+	form.Set("category_name", "Snacks")
+	form.Set("description", "test")
+	form.Set("back", "/admin/ui/?status=all&per_page=50")
+	resp := u.do(t, "POST", "/admin/ui/staged/rev-1/push", form)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	if loc := resp.Header.Get("Location"); loc != "/admin/ui/?status=all&per_page=50" {
+		t.Errorf("Location=%q, want the origin list (back)", loc)
+	}
+}
+
+// TestUI_Push_BackDefaultsWhenAbsent: no back → falls back to the pushed list
+// (and an off-site back is rejected as an open-redirect guard).
+func TestUI_Push_BackDefaultsWhenAbsent(t *testing.T) {
+	if got := backOr("", "/admin/ui/?status=pushed"); got != "/admin/ui/?status=pushed" {
+		t.Errorf("empty back = %q, want fallback", got)
+	}
+	if got := backOr("https://evil.example/x", "/admin/ui/?status=pushed"); got != "/admin/ui/?status=pushed" {
+		t.Errorf("off-site back = %q, want fallback (open-redirect guard)", got)
+	}
+	if got := backOr("/admin/ui/?status=all", "/admin/ui/?status=pushed"); got != "/admin/ui/?status=all" {
+		t.Errorf("valid back = %q, want it preserved", got)
+	}
+}
