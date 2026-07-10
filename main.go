@@ -192,6 +192,7 @@ func run() error {
 		// reclassify selected rows on demand.
 		uiHandler.SetFireflyPublicURL(cfg.FireflyPublicURL)
 		uiHandler.SetClassifier(cls)
+		uiHandler.SetFireflyAccountsSyncer(fireflyAccountsSyncer)
 		srv.SetUI(uiHandler)
 
 		intLog.Info("integration ready",

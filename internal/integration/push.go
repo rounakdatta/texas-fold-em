@@ -231,11 +231,11 @@ func (p *Pusher) Push(ctx context.Context, foldUUID string, confirm bool) (PushR
 	// /admin/firefly/sync. Latency drops from ≤1h to ~2s. Failures are
 	// logged-not-fatal so a degraded mirror never breaks the push
 	// itself; the periodic sync will reconcile on its next pass.
-	if p.eagerSyncer != nil && journalID > 0 {
-		group, err := p.fc.GetTransaction(ctx, journalID)
+	if p.eagerSyncer != nil && resp.GroupID > 0 {
+		group, err := p.fc.GetTransaction(ctx, resp.GroupID)
 		if err != nil {
 			p.log.Warn("eager mirror: GetTransaction failed (push still succeeded)",
-				"fold_uuid", row.FoldUUID, "journal_id", journalID, "err", err)
+				"fold_uuid", row.FoldUUID, "group_id", resp.GroupID, "err", err)
 		} else if groupID, perr := strconv.ParseInt(group.Data.ID, 10, 64); perr != nil {
 			p.log.Warn("eager mirror: parse group id failed",
 				"fold_uuid", row.FoldUUID, "group_id_raw", group.Data.ID, "err", perr)
@@ -406,14 +406,22 @@ func (p *Pusher) buildCreateRequest(row pushableRow) firefly.CreateTransactionRe
 
 // markPushed updates staged_fold_txns to terminal pushed state.
 func (p *Pusher) markPushed(ctx context.Context, foldUUID string, journalID, groupID int64) error {
+	// Persist BOTH the journal id (firefly_txn_id) and the group id. The
+	// group id backs the review UI's firefly deep-link directly, so the link
+	// no longer depends on the firefly_txns mirror having caught up.
+	var gid any
+	if groupID > 0 {
+		gid = groupID
+	}
 	_, err := p.db.ExecContext(ctx, `
 		UPDATE staged_fold_txns
 		SET status = 'pushed',
 		    firefly_txn_id = ?,
+		    firefly_group_id = ?,
 		    pushed_at = CURRENT_TIMESTAMP,
 		    updated_at = CURRENT_TIMESTAMP
 		WHERE fold_uuid = ?
-	`, journalID, foldUUID)
+	`, journalID, gid, foldUUID)
 	return err
 }
 

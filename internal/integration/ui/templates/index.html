@@ -52,6 +52,7 @@
         <td><time datetime="{{.TxnTimestampUTC}}">{{.TxnTimestamp}}</time></td>
         <td class="amount {{if eq .Type "OUTGOING"}}amount-out{{else}}amount-in{{end}}">
           {{if eq .Type "OUTGOING"}}-{{else}}+{{end}}{{.Currency}} {{.AmountDisplay}}
+          {{if .ForeignDisplay}}<br><span style="color:var(--muted); font-weight:normal">{{.ForeignDisplay}}</span>{{end}}
         </td>
         <td style="color:var(--muted)">{{.SourceAccountName}}</td>
         <td>{{.DestinationName}}</td>
