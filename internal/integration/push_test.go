@@ -571,3 +571,52 @@ func TestBuildCreateRequest_TransferRemapsExpenseTwinToAsset(t *testing.T) {
 		t.Errorf("destination_id=%q, want 476 (asset twin), not the expense 1222", line.DestinationID)
 	}
 }
+
+// TestPush_Update corrects an already-pushed row: it PUTs the corrected
+// fields onto the existing firefly group (in place, action="updated"),
+// not a fresh create.
+func TestPush_Update(t *testing.T) {
+	s := newPushTestSetup(t)
+	// u1 is already pushed with a known group + a corrected asset→asset
+	// (transfer) classification; seed the two asset accounts.
+	if _, err := s.db.DB.Exec(`UPDATE staged_fold_txns
+		SET status='pushed', firefly_txn_id=7951, firefly_group_id=7950,
+		    confirmed_source_account_id=12, confirmed_destination_account_id=476,
+		    confirmed_txn_type='transfer'
+		WHERE fold_uuid='u1'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.DB.Exec(`INSERT INTO firefly_accounts (firefly_id,name,type,active,raw_payload) VALUES
+		(12,'HDFC Bank','asset',1,'{}'),(476,'Tata Neu HDFC Bank Credit Card','asset',1,'{}')`); err != nil {
+		t.Fatal(err)
+	}
+	var putHit bool
+	s.fakeFirefly.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/api/v1/transactions/7950":
+			putHit = true
+			_, _ = w.Write([]byte(`{"data":{"id":"7950","attributes":{"transactions":[{"transaction_journal_id":"7951"}]}}}`))
+		case r.URL.Path == "/api/v1/transactions/7950": // GET for re-mirror
+			_, _ = w.Write([]byte(`{"data":{"id":"7950","attributes":{"transactions":[{"transaction_journal_id":"7951","type":"transfer","amount":"70.00","currency_code":"INR","source_id":"12","source_name":"HDFC Bank","destination_id":"476","destination_name":"Tata Neu HDFC Bank Credit Card","description":"x","tags":[]}]}}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	fc := firefly.NewClient(s.fakeFirefly.URL, "p", s.fakeFirefly.Client())
+	p := NewPusher(s.db, fc, slog.New(slog.NewTextHandler(io.Discard, nil)), false)
+	p.SetEagerSyncer(NewSyncer(s.db, fc, slog.New(slog.NewTextHandler(io.Discard, nil))))
+	report, err := p.Update(context.Background(), "u1")
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if report.Action != "updated" {
+		t.Errorf("action=%q, want updated", report.Action)
+	}
+	if !putHit {
+		t.Error("expected a PUT to /api/v1/transactions/7950 (update in place)")
+	}
+	if s.createCalls.Load() != 0 {
+		t.Errorf("update must NOT create; create calls=%d", s.createCalls.Load())
+	}
+}

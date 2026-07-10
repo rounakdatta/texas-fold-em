@@ -275,22 +275,22 @@ func (h *Handler) resolveAccountID(ctx context.Context, kind, name string) int64
 	if id.Valid {
 		return id.Int64
 	}
-	// Fall back to firefly's real account list (the mirror) so a source that
-	// resolved to a freshly-created asset — no transaction history yet, e.g.
-	// "Ixigo AU Bank Credit Card" — still resolves at push time instead of
-	// aborting as "unresolved". A source is always an ASSET, so scope the
-	// match to type='asset': that also avoids a name that exists on both
-	// sides (a credit card can be both your asset AND an expense payee)
-	// resolving to the wrong account.
+	// Fall back to firefly's real account list (the mirror) so an account
+	// with no transaction history still resolves (e.g. a freshly-created
+	// "Ixigo AU Bank Credit Card", or a card picked as a transfer's
+	// destination). A SOURCE is always an asset. A DESTINATION is usually an
+	// expense but may be an asset (a transfer / credit-card repayment) —
+	// prefer the asset when the name exists as both, which is the repayment
+	// signal; assetTwin at push time relies on this resolving to a real id.
+	var mq string
 	if kind == "source" {
-		_ = h.db.QueryRowContext(ctx, `
-			SELECT firefly_id FROM firefly_accounts
-			WHERE LOWER(name) = LOWER(?) AND type = 'asset' AND active = 1
-			ORDER BY firefly_id LIMIT 1
-		`, name).Scan(&id)
-		if id.Valid {
-			return id.Int64
-		}
+		mq = `SELECT firefly_id FROM firefly_accounts WHERE LOWER(name)=LOWER(?) AND type='asset' AND active=1 ORDER BY firefly_id LIMIT 1`
+	} else {
+		mq = `SELECT firefly_id FROM firefly_accounts WHERE LOWER(name)=LOWER(?) AND active=1 ORDER BY (type='asset') DESC, firefly_id LIMIT 1`
+	}
+	_ = h.db.QueryRowContext(ctx, mq, name).Scan(&id)
+	if id.Valid {
+		return id.Int64
 	}
 	return 0
 }

@@ -42,6 +42,10 @@ type CreateTransactionRequest struct {
 
 // CreateTransactionLine is one journal line.
 type CreateTransactionLine struct {
+	// TransactionJournalID targets an existing journal on an UPDATE (PUT).
+	// Omitted on create. Including it makes firefly update that journal in
+	// place rather than replacing the group's journals.
+	TransactionJournalID string `json:"transaction_journal_id,omitempty"`
 	Type            string   `json:"type"` // withdrawal | deposit | transfer
 	Date            string   `json:"date"` // RFC3339
 	Amount          string   `json:"amount"`
@@ -96,6 +100,28 @@ type createEnvelope struct {
 //   - Logging to audit_log on success and failure (the caller is
 //     orchestrating; this client is just the wire layer).
 func (c *Client) CreateTransaction(ctx context.Context, req CreateTransactionRequest) (CreateTransactionResponse, error) {
+	return c.writeTransaction(ctx, http.MethodPost, "/api/v1/transactions", req)
+}
+
+// UpdateTransaction updates an EXISTING transaction group in place via PUT
+// /api/v1/transactions/{groupID}. This is how a row already pushed to
+// firefly gets corrected (a re-classification) WITHOUT creating a
+// duplicate. Same body shape as create; include TransactionJournalID on
+// each line so firefly updates that journal rather than replacing it.
+//
+// Like CreateTransaction this is a WRITE (see the file header) — it is the
+// only other mutating transaction call and lives here deliberately.
+func (c *Client) UpdateTransaction(ctx context.Context, groupID int64, req CreateTransactionRequest) (CreateTransactionResponse, error) {
+	if groupID <= 0 {
+		return CreateTransactionResponse{}, fmt.Errorf("firefly: update requires a group id")
+	}
+	return c.writeTransaction(ctx, http.MethodPut, fmt.Sprintf("/api/v1/transactions/%d", groupID), req)
+}
+
+// writeTransaction is the shared create/update wire path. method is POST
+// (create) or PUT (update); path is the endpoint. Returns the group +
+// journal ids parsed from firefly's response envelope.
+func (c *Client) writeTransaction(ctx context.Context, method, path string, req CreateTransactionRequest) (CreateTransactionResponse, error) {
 	if c.base == "" {
 		return CreateTransactionResponse{}, fmt.Errorf("firefly: base URL is empty")
 	}
@@ -108,12 +134,12 @@ func (c *Client) CreateTransaction(ctx context.Context, req CreateTransactionReq
 
 	body, err := json.Marshal(req)
 	if err != nil {
-		return CreateTransactionResponse{}, fmt.Errorf("firefly: marshal create request: %w", err)
+		return CreateTransactionResponse{}, fmt.Errorf("firefly: marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/api/v1/transactions", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, method, c.base+path, bytes.NewReader(body))
 	if err != nil {
-		return CreateTransactionResponse{}, fmt.Errorf("firefly: build create request: %w", err)
+		return CreateTransactionResponse{}, fmt.Errorf("firefly: build request: %w", err)
 	}
 	httpReq.Header.Set("Authorization", "Bearer "+c.pat)
 	httpReq.Header.Set("Content-Type", "application/json")
@@ -122,25 +148,21 @@ func (c *Client) CreateTransaction(ctx context.Context, req CreateTransactionReq
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		return CreateTransactionResponse{}, fmt.Errorf("firefly: POST /api/v1/transactions: %w", err)
+		return CreateTransactionResponse{}, fmt.Errorf("firefly: %s %s: %w", method, path, err)
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return CreateTransactionResponse{}, fmt.Errorf("firefly: read create response: %w", err)
+		return CreateTransactionResponse{}, fmt.Errorf("firefly: read response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return CreateTransactionResponse{}, &Error{
-			Status: resp.StatusCode,
-			Path:   "/api/v1/transactions",
-			Body:   string(respBody),
-		}
+		return CreateTransactionResponse{}, &Error{Status: resp.StatusCode, Path: path, Body: string(respBody)}
 	}
 
 	var env createEnvelope
 	if err := json.Unmarshal(respBody, &env); err != nil {
-		return CreateTransactionResponse{}, fmt.Errorf("firefly: decode create response: %w", err)
+		return CreateTransactionResponse{}, fmt.Errorf("firefly: decode response: %w", err)
 	}
 
 	out := CreateTransactionResponse{}

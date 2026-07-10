@@ -207,3 +207,28 @@ func boolStr(b bool) string {
 	}
 	return "false"
 }
+
+// TestUpdateTransaction verifies UpdateTransaction PUTs to the group path
+// and parses the returned ids.
+func TestUpdateTransaction(t *testing.T) {
+	var method, path string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method, path = r.Method, r.URL.Path
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		_, _ = w.Write([]byte(`{"data":{"id":"7950","attributes":{"transactions":[{"transaction_journal_id":"7951"}]}}}`))
+	}))
+	defer srv.Close()
+	c := NewClient(srv.URL, "p", srv.Client())
+	resp, err := c.UpdateTransaction(context.Background(), 7950, CreateTransactionRequest{
+		Transactions: []CreateTransactionLine{{Type: "transfer", Amount: "10.00", Description: "x", TransactionJournalID: "7951"}},
+	})
+	if err != nil {
+		t.Fatalf("UpdateTransaction: %v", err)
+	}
+	if method != http.MethodPut || path != "/api/v1/transactions/7950" {
+		t.Errorf("got %s %s, want PUT /api/v1/transactions/7950", method, path)
+	}
+	if resp.GroupID != 7950 {
+		t.Errorf("group=%d, want 7950", resp.GroupID)
+	}
+}

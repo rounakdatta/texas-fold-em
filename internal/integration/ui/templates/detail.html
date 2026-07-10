@@ -37,6 +37,7 @@
   <input type="hidden" name="back" value="{{.Back}}">
   <div class="card">
     <h2>review &amp; edit</h2>
+    {{if .IsPushed}}<p style="color:var(--warn); margin-top:0">⚠ already pushed to firefly.{{if .FireflyPulled}} The current firefly values were pulled in below —{{end}} saving will <strong>update the existing transaction in place</strong> (no duplicate).</p>{{end}}
     <div class="grid">
       <div>
         <label>destination account</label>
@@ -71,9 +72,13 @@
     {{end}}
 
     <div class="actions">
+      {{if .IsPushed}}
+      <button type="submit" formaction="/admin/ui/staged/{{.Row.FoldUUID}}/update" class="btn btn-warn">save &amp; update firefly</button>
+      {{else}}
       <button type="submit" class="btn">save edits</button>
       <button type="submit" formaction="/admin/ui/staged/{{.Row.FoldUUID}}/push" class="btn btn-warn">save &amp; push to firefly</button>
       <button type="submit" formaction="/admin/ui/staged/{{.Row.FoldUUID}}/skip" class="btn btn-err" formnovalidate>skip (don't push)</button>
+      {{end}}
     </div>
   </div>
 
