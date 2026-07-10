@@ -620,3 +620,23 @@ func TestPush_Update(t *testing.T) {
 		t.Errorf("update must NOT create; create calls=%d", s.createCalls.Load())
 	}
 }
+
+// TestBuildCreateRequest_ConfirmedNewNameOverridesProposedID is the
+// regression test for "my correction to a NEW account isn't honoured":
+// a confirmed name-only destination must win over a stale proposed id.
+func TestBuildCreateRequest_ConfirmedNewNameOverridesProposedID(t *testing.T) {
+	row := pushableRow{
+		FoldUUID: "u-newdest", AmountPaise: 10000, Currency: "INR", Type: "OUTGOING",
+		ProposedSourceAccountID:         sql.NullInt64{Int64: 12, Valid: true},
+		ProposedDestinationAccountID:    sql.NullInt64{Int64: 684, Valid: true}, // stale wrong id
+		ConfirmedDestinationAccountName: sql.NullString{String: "Magic Savoury Restaurant, Union, Dubai", Valid: true},
+		TxnTimestamp:                    time.Now().UTC(),
+	}
+	line := (&Pusher{}).buildCreateRequest(context.Background(), row).Transactions[0]
+	if line.DestinationID != "" {
+		t.Errorf("destination_id=%q, want empty (name-only new account, not the stale proposed id 684)", line.DestinationID)
+	}
+	if line.DestinationName != "Magic Savoury Restaurant, Union, Dubai" {
+		t.Errorf("destination_name=%q, want the corrected new-account name", line.DestinationName)
+	}
+}

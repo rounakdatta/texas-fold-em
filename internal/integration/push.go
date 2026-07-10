@@ -326,7 +326,25 @@ func (p *Pusher) fetchPushableRow(ctx context.Context, foldUUID string) (pushabl
 // classifier proposed.
 func (p *Pusher) buildCreateRequest(ctx context.Context, row pushableRow) firefly.CreateTransactionRequest {
 	srcID := pickInt64(row.ConfirmedSourceAccountID, row.ProposedSourceAccountID)
-	destID := pickInt64(row.ConfirmedDestinationAccountID, row.ProposedDestinationAccountID)
+	// Destination resolved as a UNIT: a human correction (confirmed) fully
+	// overrides the classifier's proposal — crucially including a name-only
+	// NEW account, which must NOT fall back to the stale proposed id. That
+	// fallback was the bug where correcting a mis-classified merchant to a
+	// new account (confirmed name, null id) was silently ignored in favour
+	// of the old proposed account id. Only when NOTHING was confirmed do we
+	// use the proposal.
+	var destID int64
+	var destName string
+	switch {
+	case row.ConfirmedDestinationAccountID.Valid:
+		destID = row.ConfirmedDestinationAccountID.Int64
+	case strings.TrimSpace(row.ConfirmedDestinationAccountName.String) != "":
+		destName = strings.TrimSpace(row.ConfirmedDestinationAccountName.String)
+	case row.ProposedDestinationAccountID.Valid:
+		destID = row.ProposedDestinationAccountID.Int64
+	default:
+		destName = strings.TrimSpace(row.ProposedDestinationAccountName.String)
+	}
 	catID := pickInt64(row.ConfirmedCategoryID, row.ProposedCategoryID)
 	budID := pickInt64(row.ConfirmedBudgetID, row.ProposedBudgetID)
 	// Description fallback ladder:
@@ -413,11 +431,10 @@ func (p *Pusher) buildCreateRequest(ctx context.Context, row pushableRow) firefl
 	}
 	if destID != 0 {
 		line.DestinationID = strconv.FormatInt(destID, 10)
-	} else if destName := pickString(row.ConfirmedDestinationAccountName, row.ProposedDestinationAccountName); destName != "" {
+	} else if destName != "" {
 		// No existing account id — send the name so firefly finds-or-creates
 		// the expense account by that name (its standard behaviour on a
-		// withdrawal POST). This is the push side of the classifier's
-		// "propose a new destination for a novel merchant" path.
+		// withdrawal POST). Honours a name-only correction to a NEW account.
 		line.DestinationName = destName
 	}
 	if catID != 0 {
