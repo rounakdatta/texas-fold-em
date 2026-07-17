@@ -33,7 +33,7 @@ func TestMealContext_Buckets(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := mealContext(tc.utcInput)
+			got := mealContext(tc.utcInput, "") // domestic (INR): IST is local
 			if got == "" {
 				t.Fatalf("mealContext returned empty for %q", tc.utcInput)
 			}
@@ -55,7 +55,7 @@ func TestMealContext_Buckets(t *testing.T) {
 // rather than emitting a confusing partial line.
 func TestMealContext_RejectsGarbage(t *testing.T) {
 	for _, s := range []string{"", "not-a-date", "12345"} {
-		if got := mealContext(s); got != "" {
+		if got := mealContext(s, ""); got != "" {
 			t.Errorf("mealContext(%q) = %q, want empty", s, got)
 		}
 	}
@@ -87,6 +87,53 @@ func TestMealBucket_Boundaries(t *testing.T) {
 		got := mealBucket(tc.h, tc.m)
 		if !strings.Contains(got, tc.want) {
 			t.Errorf("mealBucket(%d:%02d) = %q, want substring %q", tc.h, tc.m, got, tc.want)
+		}
+	}
+}
+
+// TestMealContext_ForeignCurrencyUsesLocalTime: a USD charge is bucketed in
+// US local time, not the server's IST. 22:00 UTC = 03:30 IST (late-night) but
+// 18:00 EDT in the US — the meal signal must be the local one.
+func TestMealContext_ForeignCurrencyUsesLocalTime(t *testing.T) {
+	got := mealContext("2026-07-17T22:00:00Z", "USD")
+	for _, want := range []string{"likely-local", "2026-07-17 18:00", "EDT", "USD", "US", "home (IST)", "subscription"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("foreign meal context missing %q:\n%s", want, got)
+		}
+	}
+	// A domestic (INR) charge stays IST-only, no likely-local line.
+	if dom := mealContext("2026-07-17T22:00:00Z", ""); strings.Contains(dom, "likely-local") {
+		t.Errorf("domestic should have no likely-local line: %s", dom)
+	}
+}
+
+func TestTimezoneForCurrency(t *testing.T) {
+	if _, region, approx, ok := timezoneForCurrency("USD"); !ok || !approx || !strings.Contains(region, "US") {
+		t.Errorf("USD: ok=%v approx=%v region=%q; want ok, approx, US", ok, approx, region)
+	}
+	if _, region, approx, ok := timezoneForCurrency("aed"); !ok || approx || region != "UAE" {
+		t.Errorf("AED: ok=%v approx=%v region=%q; want ok, !approx, UAE", ok, approx, region)
+	}
+	if _, _, _, ok := timezoneForCurrency("INR"); ok {
+		t.Error("INR must not map (it's home)")
+	}
+	if _, _, _, ok := timezoneForCurrency("ZZZ"); ok {
+		t.Error("unknown currency must not map")
+	}
+}
+
+func TestForeignCurrencyOf(t *testing.T) {
+	cases := []struct{ raw, want string }{
+		{`{"currency":"INR","source_currency":"USD"}`, "USD"},
+		{`{"currency":"INR","source_currency":"inr"}`, ""}, // same as home
+		{`{"currency":"INR"}`, ""},                          // no source
+		{`{"amount":100}`, ""},                              // neither
+		{`not json`, ""},
+		{``, ""},
+	}
+	for _, c := range cases {
+		if got := foreignCurrencyOf(c.raw); got != c.want {
+			t.Errorf("foreignCurrencyOf(%q) = %q, want %q", c.raw, got, c.want)
 		}
 	}
 }
