@@ -28,6 +28,10 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	// Embed the IANA timezone database in the binary so time.LoadLocation
+	// works for every zone regardless of the base image (the classifier maps
+	// a foreign charge's currency to its local timezone for meal inference).
+	_ "time/tzdata"
 
 	"github.com/rounakdatta/texas-fold-em/internal/integration"
 	"github.com/rounakdatta/texas-fold-em/internal/integration/classifier"

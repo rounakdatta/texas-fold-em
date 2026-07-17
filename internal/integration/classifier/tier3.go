@@ -36,7 +36,7 @@ You will be given:
   - lists of the user's available firefly accounts, categories, budgets, and tags
   - examples of similar past firefly transactions (RAG retrieval)
   - the user's own past description strings for this exact merchant (STYLE SAMPLES) — these teach you their voice
-  - a TIME CONTEXT block: when the transaction happened in IST and which meal/occasion bucket it falls in
+  - a TIME CONTEXT block: when the transaction happened. For a domestic charge this is IST. For a FOREIGN-currency charge it also shows the LIKELY-LOCAL time in the charge currency's region (the user travels), because meal/occasion depends on local time — not the server's IST.
   - hints from deterministic tiers, when available (these are GUIDANCE, not commands)
 
 Your job: produce the cleanest possible firefly proposal.
@@ -72,9 +72,21 @@ description_suggestion guidance (this is what becomes the transaction TITLE in f
      show the format they prefer (length, vocabulary, structure). Match it.
        e.g. samples are "Dinner with X", "Lunch with Y", "Coffee solo"
             → produce "Dinner with ___" or "Lunch with ___", not "Restaurant meal"
-  B. USE the TIME CONTEXT to guess the meal/occasion. A 21:42 txn at a restaurant is
-     dinner; 13:15 is lunch; 09:30 is breakfast. Fold this into the description
-     when STYLE SAMPLES show the user tends to mark the meal explicitly.
+  B. USE the TIME CONTEXT to guess the meal/occasion — but use the LOCAL time where
+     the transaction happened, and LOCAL dining norms:
+       - When TIME CONTEXT shows a "likely-local" line (a foreign-currency charge),
+         judge the meal from THAT time, not IST — the user was abroad. Apply the
+         region's norms (e.g. a 19:00 US/Europe restaurant charge is dinner; the
+         same 19:00 in India is early-evening). If the timezone is flagged
+         approximate and the merchant name/narration names a city, refine to that
+         city's timezone.
+       - IGNORE time & location for online services / subscriptions (Anthropic,
+         OpenAI, Netflix, cloud bills, etc.) — a USD subscription bought from India
+         is not a US meal; don't attach a meal/occasion to it at all.
+       - Domestic (IST) charges: 21:42 at a restaurant is dinner; 13:15 lunch;
+         09:30 breakfast.
+     Fold the meal into the description only when STYLE SAMPLES show the user marks
+     it explicitly.
   C. USE "___" (three underscores) as a placeholder when you don't know a specific detail
      the user typically includes — companion name, dish name, occasion. The user will
      fill these in during review. PREFER partial-with-placeholder over
@@ -341,7 +353,7 @@ func (c *Classifier) gatherTier3Inputs(ctx context.Context, staged StagedRow, ti
 		tier1:           tier1,
 		tier2:           tier2,
 		foldAccount:     foldAcc,
-		mealCtx:         mealContext(staged.TxnTimestamp),
+		mealCtx:         mealContext(staged.TxnTimestamp, foreignCurrencyOf(staged.RawPayload)),
 		styleSamples:    samples,
 	}, nil
 }

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -280,31 +281,129 @@ func istLocation() *time.Location {
 	return time.FixedZone("IST", 5*3600+30*60)
 }
 
-// mealContext returns a compact human-readable description of when a
-// transaction happened in the user's local time, including a
-// time-of-day bucket the LLM can use to guess at meal/occasion.
+// mealContext returns a compact human-readable description of WHEN a
+// transaction happened — in the local time of where it most likely
+// happened, so the LLM can guess meal/occasion correctly even when the
+// user is abroad.
 //
-// Example output:
+// The server clock is IST, but a foreign-currency charge was most likely
+// made in that currency's region (foreignCurrency is the ORIGINAL charge
+// currency, e.g. "USD"/"AED"; empty for a domestic INR transaction). For a
+// foreign charge we surface the LIKELY-LOCAL time in that region as the
+// primary signal, keep IST as a secondary reference, and tell the LLM to
+// apply LOCAL dining norms and to ignore time entirely for online /
+// subscription merchants (an Anthropic charge in USD from India is not a
+// US meal).
+//
+// Domestic example:
 //
 //	"2026-05-12 21:42 IST Mon — dinner (20:00-23:30) — weekday"
 //
-// Bucket boundaries are tuned to Indian dining patterns. If the input
-// timestamp can't be parsed, returns an empty string and the caller
-// is expected to skip rendering the TIME CONTEXT block.
-func mealContext(txnTimestamp string) string {
+// Empty string when the timestamp can't be parsed (caller skips the block).
+func mealContext(txnTimestamp, foreignCurrency string) string {
 	t, ok := parseTxnTimestamp(txnTimestamp)
 	if !ok {
 		return ""
 	}
-	local := t.In(istLocation())
-	bucket := mealBucket(local.Hour(), local.Minute())
-	wday := weekdayCategory(local.Weekday())
-	return fmt.Sprintf("%s IST %s — %s — %s",
-		local.Format("2006-01-02 15:04"),
-		local.Format("Mon"),
-		bucket,
-		wday,
+	home := t.In(istLocation())
+	homeLine := fmt.Sprintf("%s IST %s — %s — %s",
+		home.Format("2006-01-02 15:04"), home.Format("Mon"),
+		mealBucket(home.Hour(), home.Minute()), weekdayCategory(home.Weekday()))
+
+	loc, region, approx, ok := timezoneForCurrency(foreignCurrency)
+	if !ok {
+		// Domestic, or a currency we can't place — IST IS the local time.
+		return homeLine
+	}
+	local := t.In(loc)
+	approxNote := ""
+	if approx {
+		approxNote = "; timezone approximate — refine from any city in the merchant/narration"
+	}
+	return fmt.Sprintf(
+		"likely-local: %s %s %s (charge currency %s → likely %s%s)\n"+
+			"  home (IST):   %s\n"+
+			"  For meal/occasion use the LIKELY-LOCAL time and LOCAL dining norms "+
+			"(e.g. dinner is ~18:00-21:00 in the US/Europe, later in India). "+
+			"If the merchant is an online service / subscription, IGNORE time & location entirely.",
+		local.Format("2006-01-02 15:04"), local.Format("MST"), local.Format("Mon"),
+		foreignCurrency, region, approxNote,
+		homeLine,
 	)
+}
+
+// foreignCurrencyOf returns the ORIGINAL charge currency of a fold txn when
+// it genuinely differs from the home currency (a cross-border charge), else
+// "". Read from raw_payload: source_currency is the charge currency, currency
+// is the home-billed one (see migration 00010 / fold_sync).
+func foreignCurrencyOf(rawPayload string) string {
+	if rawPayload == "" {
+		return ""
+	}
+	var p struct {
+		Currency       string `json:"currency"`
+		SourceCurrency string `json:"source_currency"`
+	}
+	if json.Unmarshal([]byte(rawPayload), &p) != nil {
+		return ""
+	}
+	src := strings.ToUpper(strings.TrimSpace(p.SourceCurrency))
+	home := strings.ToUpper(strings.TrimSpace(p.Currency))
+	if src == "" || src == home {
+		return ""
+	}
+	return src
+}
+
+// timezoneForCurrency maps an ISO currency to a representative IANA timezone
+// — a proxy for WHERE a foreign charge physically happened, for meal/occasion
+// inference. Single-timezone currencies (AED, GBP, SGD…) are exact; wide ones
+// (USD across four US zones, EUR/AUD/CAD) return approx=true so the prompt
+// flags the local time as approximate and lets the LLM refine from a city in
+// the merchant/narration. ok=false ⇒ no confident mapping; caller falls back
+// to home (IST). INR is intentionally absent (that IS home).
+func timezoneForCurrency(code string) (loc *time.Location, region string, approx, ok bool) {
+	z, found := currencyZones[strings.ToUpper(strings.TrimSpace(code))]
+	if !found {
+		return nil, "", false, false
+	}
+	l, err := time.LoadLocation(z.tz)
+	if err != nil {
+		return nil, "", false, false
+	}
+	return l, z.region, z.approx, true
+}
+
+var currencyZones = map[string]struct {
+	tz     string
+	region string
+	approx bool
+}{
+	"USD": {"America/New_York", "US (Eastern shown)", true},
+	"EUR": {"Europe/Paris", "Europe (CET shown)", true},
+	"GBP": {"Europe/London", "UK", false},
+	"AED": {"Asia/Dubai", "UAE", false},
+	"SAR": {"Asia/Riyadh", "Saudi Arabia", false},
+	"QAR": {"Asia/Qatar", "Qatar", false},
+	"BHD": {"Asia/Bahrain", "Bahrain", false},
+	"KWD": {"Asia/Kuwait", "Kuwait", false},
+	"OMR": {"Asia/Muscat", "Oman", false},
+	"SGD": {"Asia/Singapore", "Singapore", false},
+	"THB": {"Asia/Bangkok", "Thailand", false},
+	"MYR": {"Asia/Kuala_Lumpur", "Malaysia", false},
+	"IDR": {"Asia/Jakarta", "Indonesia (WIB shown)", true},
+	"JPY": {"Asia/Tokyo", "Japan", false},
+	"KRW": {"Asia/Seoul", "South Korea", false},
+	"VND": {"Asia/Ho_Chi_Minh", "Vietnam", false},
+	"HKD": {"Asia/Hong_Kong", "Hong Kong", false},
+	"CNY": {"Asia/Shanghai", "China", false},
+	"LKR": {"Asia/Colombo", "Sri Lanka", false},
+	"NPR": {"Asia/Kathmandu", "Nepal", false},
+	"AUD": {"Australia/Sydney", "Australia (Eastern shown)", true},
+	"NZD": {"Pacific/Auckland", "New Zealand", false},
+	"CAD": {"America/Toronto", "Canada (Eastern shown)", true},
+	"CHF": {"Europe/Zurich", "Switzerland", false},
+	"TRY": {"Europe/Istanbul", "Turkey", false},
 }
 
 // parseTxnTimestamp accepts the three timestamp shapes we observe in
