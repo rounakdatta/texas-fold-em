@@ -212,7 +212,14 @@ type indexRow struct {
 	Status               string
 	TierLabel            string
 	Confidence           float64
-	ProposedCategoryName string
+	// CategoryName is the category push will send: firefly's live one for a
+	// pushed row, else the human's choice (blank for an explicit "none"),
+	// else the classifier's suggestion.
+	CategoryName string
+	// Incoming: money coming INTO the account being viewed — fold's
+	// INCOMING rows, plus, under an account filter, rows whose destination
+	// is that account (e.g. a bill payment into a card). Drives the +/-.
+	Incoming bool
 	// SourceAccountName is the effective paying account (confirmed
 	// overrides proposed), resolved to a firefly name. Empty when the
 	// row has no source account yet (common for pending/needs_review).
@@ -265,14 +272,18 @@ func (f listFilters) where() (string, []any) {
 		args = append(args, f.Status)
 	}
 	if f.SourceAccount != "" {
-		// Effective source = confirmed (human) overrides proposed
-		// (classifier) — the same precedence the Pusher uses when it
-		// resolves which account to send to firefly. A non-numeric value
-		// is dropped upstream in handleIndex, so ParseInt should succeed;
-		// guard anyway so a bad param degrades to "all" instead of erroring.
+		// Every row that moves money on the account: where it PAID (the
+		// effective source) and where money CAME IN (the effective
+		// destination) — a credit card's bill payments, refunds, reversals
+		// and waivers all land on it as a destination, and reconciling the
+		// card needs to see them next to its spends. "Effective" resolves as
+		// a unit, the same way the Pusher does (see effectiveAccountIDSQL).
+		// A non-numeric value is dropped upstream in handleIndex, so
+		// ParseInt should succeed; guard anyway so a bad param degrades to
+		// "all" instead of erroring.
 		if id, err := strconv.ParseInt(f.SourceAccount, 10, 64); err == nil {
-			clauses = append(clauses, "COALESCE(s.confirmed_source_account_id, s.proposed_source_account_id) = ?")
-			args = append(args, id)
+			clauses = append(clauses, "("+effectiveAccountIDSQL("source")+" = ? OR "+effectiveAccountIDSQL("destination")+" = ?)")
+			args = append(args, id, id)
 		}
 	}
 	if len(clauses) == 0 {
@@ -470,8 +481,17 @@ func (h *Handler) listRows(ctx context.Context, f listFilters, limit, offset int
 		       COALESCE(s.confirmed_foreign_amount_paise, s.foreign_amount_paise), s.foreign_currency, s.mode, s.type,
 		       COALESCE(s.merchant_extracted,''), s.status,
 		       s.classifier_tier, s.classifier_confidence,
-		       (SELECT category_name FROM firefly_txns
-		         WHERE category_id = s.proposed_category_id LIMIT 1),
+		       -- Category as push will send it: a pushed row's live firefly
+		       -- category (via the mirror); else the human's choice as a
+		       -- unit — an explicit none (0) resolves to nothing and must
+		       -- not fall back to the suggestion; else the suggestion.
+		       COALESCE(
+		         CASE WHEN s.status='pushed'
+		              THEN (SELECT f.category_name FROM firefly_txns f WHERE f.firefly_id = s.firefly_txn_id LIMIT 1) END,
+		         CASE WHEN s.confirmed_category_id IS NOT NULL
+		              THEN (SELECT category_name FROM firefly_txns WHERE category_id = s.confirmed_category_id LIMIT 1)
+		              ELSE (SELECT category_name FROM firefly_txns WHERE category_id = s.proposed_category_id LIMIT 1) END
+		       ),
 		       -- Source name, resolved to match what's actually in firefly:
 		       --  1. pushed rows → the pushed journal's live source (via the
 		       --     firefly_txns mirror by journal id) so the list mirrors
@@ -507,7 +527,8 @@ func (h *Handler) listRows(ctx context.Context, f listFilters, limit, offset int
 		       s.amount_paise,
 		       (s.confirmed_amount_paise IS NOT NULL OR s.confirmed_foreign_amount_paise IS NOT NULL
 		        OR s.confirmed_txn_timestamp IS NOT NULL),
-		       ` + possibleDuplicateSQL("s.raw_payload") + `
+		       ` + possibleDuplicateSQL("s.raw_payload") + `,
+		       ` + effectiveAccountIDSQL("source") + `, ` + effectiveAccountIDSQL("destination") + `
 		FROM staged_fold_txns s
 		WHERE ` + where + `
 		ORDER BY s.txn_timestamp DESC
@@ -534,11 +555,26 @@ func (h *Handler) listRows(ctx context.Context, f listFilters, limit, offset int
 			tsStr       string
 			foldPaise   int64
 			edited, dup int
+			effSrc      sql.NullInt64
+			effDst      sql.NullInt64
 		)
 		if err := rows.Scan(&r.FoldUUID, &tsStr, &amountPaise, &r.Currency, &fAmt, &fCur, &r.Mode, &r.Type,
 			&r.MerchantExtracted, &r.Status, &tier, &conf, &catName, &srcName, &destName, &r.Description, &groupID,
-			&foldPaise, &edited, &dup); err != nil {
+			&foldPaise, &edited, &dup, &effSrc, &effDst); err != nil {
 			return nil, err
+		}
+		// Direction as seen from the account being viewed: under an account
+		// filter, money INTO that account (it's the destination, not the
+		// source) is incoming even when fold saw it as an OUTGOING debit on
+		// the paying side — a card's bill payment reads as a credit there.
+		r.Incoming = r.Type != "OUTGOING"
+		if id, err := strconv.ParseInt(f.SourceAccount, 10, 64); err == nil {
+			switch {
+			case effSrc.Valid && effSrc.Int64 == id:
+				r.Incoming = false
+			case effDst.Valid && effDst.Int64 == id:
+				r.Incoming = true
+			}
 		}
 		r.Edited, r.Manual, r.PossibleDuplicate = edited == 1, r.Mode == manualMode, dup == 1
 		r.FoldAmountDisplay = paiseToDecimal(foldPaise)
@@ -560,7 +596,7 @@ func (h *Handler) listRows(ctx context.Context, f listFilters, limit, offset int
 			r.Confidence = conf.Float64
 		}
 		if catName.Valid {
-			r.ProposedCategoryName = catName.String
+			r.CategoryName = catName.String
 		}
 		if srcName.Valid {
 			r.SourceAccountName = srcName.String

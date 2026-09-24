@@ -111,6 +111,10 @@ Reconciling against a card statement is done in the same place:
   next sync updates it and logs the change to the audit trail.
 - **Duplicates are flagged.** fold.money's own `is_possible_duplicate` shows as
   a *possible duplicate* badge.
+- **Filter by an account to reconcile it.** The account filter shows every row
+  that moves money on that account — what it paid *and* what came into it (a
+  card's bill payments, refunds, reversals) — with money in shown as `+`. The
+  list's category column shows the category push will actually send.
 
 ## Safety
 

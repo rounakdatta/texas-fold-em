@@ -1173,3 +1173,100 @@ func TestUI_Index_RendersDriverWrittenTimestamp(t *testing.T) {
 		t.Errorf("driver-written timestamp not rendered as <time datetime>: %s", snippet(string(body), "drv-1"))
 	}
 }
+
+// rowHTML returns the <tr> of the list row for one fold_uuid ("" if absent).
+func rowHTML(body, uuid string) string {
+	for _, tr := range strings.Split(body, "<tr") {
+		if strings.Contains(tr, "/admin/ui/staged/"+uuid+"?") {
+			return tr
+		}
+	}
+	return ""
+}
+
+// TestUI_IndexAccountFilter_IncludesMoneyIn: filtering by a card must show
+// every row that moves money on it — its spends AND what comes into it (a
+// bill payment from the bank, a refund/reversal added by hand) — and shows
+// money in as "+" from the card's point of view.
+func TestUI_IndexAccountFilter_IncludesMoneyIn(t *testing.T) {
+	u := newUITestHarness(t, AuthModeBypass)
+	if _, err := u.db.DB.Exec(`
+		INSERT INTO firefly_accounts (firefly_id, name, type, account_role, active, raw_payload)
+		VALUES (1314, 'Ixigo AU Bank Credit Card', 'asset', 'ccAsset', 1, '{}'), (1, 'HDFC Card', 'asset', 'savingAsset', 1, '{}')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := u.db.DB.Exec(`
+		INSERT INTO staged_fold_txns (fold_uuid, raw_payload, amount_paise, currency, txn_timestamp, mode, type, narration,
+		    merchant_extracted, status, proposed_source_account_id, proposed_destination_account_id,
+		    confirmed_source_account_name, confirmed_destination_account_id)
+		VALUES ('au-spend',   '{}', 907069,   'INR', '2026-07-26T00:35:00Z', 'CARD',   'OUTGOING', 'CARD/x/SAAZ', 'saaz', 'ready_to_push', 1314, 12, NULL, NULL),
+		       ('au-payment', '{}', 19547435, 'INR', '2026-08-04T06:53:00Z', 'UPI',    'OUTGOING', 'UPI-GPAY-CREDITCARD', 'gpay card bill', 'ready_to_push', 1, 1314, NULL, NULL),
+		       ('au-refund',  '{}', 200,      'INR', '2026-06-30T06:30:00Z', 'MANUAL', 'INCOMING', 'SPOTIFY reversal', NULL, 'ready_to_push', NULL, NULL, 'Spotify', 1314),
+		       ('other-card', '{}', 5000,     'INR', '2026-07-01T06:30:00Z', 'CARD',   'OUTGOING', 'CARD/y/ELSEWHERE', 'elsewhere', 'ready_to_push', 2, 12, NULL, NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	resp := u.do(t, "GET", "/admin/ui/?status=ready_to_push&account=1314", nil)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	b := string(body)
+	if !strings.Contains(b, "ready_to_push (3)") {
+		t.Errorf("want the card's spend, payment and refund (3), got: %q", snippet(b, "ready_to_push ("))
+	}
+	if rowHTML(b, "other-card") != "" {
+		t.Error("another card's row leaked into the filtered list")
+	}
+	for uuid, sign := range map[string]string{"au-spend": "-INR", "au-payment": "+INR", "au-refund": "+INR"} {
+		if tr := rowHTML(b, uuid); !strings.Contains(tr, sign) {
+			t.Errorf("%s should read %s from the card's side: %s", uuid, sign, tr)
+		}
+	}
+	// From the bank's side the same payment is money out.
+	resp = u.do(t, "GET", "/admin/ui/?status=ready_to_push&account=1", nil)
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if tr := rowHTML(string(body), "au-payment"); !strings.Contains(tr, "-INR") {
+		t.Errorf("under the bank's filter the payment should read -INR: %s", tr)
+	}
+	if !strings.Contains(string(body), ">Ixigo AU Bank Credit Card</option>") {
+		t.Error("the card should be offered in the account dropdown")
+	}
+}
+
+// TestUI_Index_CategoryColumnShowsEffectiveCategory: the list shows the
+// category push will send — the human's choice over the classifier's, and
+// nothing at all for an explicit "none" — not just the suggestion.
+func TestUI_Index_CategoryColumnShowsEffectiveCategory(t *testing.T) {
+	u := newUITestHarness(t, AuthModeBypass)
+	if _, err := u.db.DB.Exec(`
+		INSERT INTO firefly_txns (firefly_id, group_id, txn_type, amount_paise, currency, date,
+		    source_account_id, source_account_name, destination_account_id, destination_account_name,
+		    destination_account_name_normalized, category_id, category_name, description, tags_json)
+		VALUES (920, 9200, 'withdrawal', 509400, 'INR', '2025-09-17', 1, 'HDFC Card', 30, 'United Insurance',
+		        'united insurance', 9, 'Medical Insurance', 'renewal', '[]')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := u.db.DB.Exec(`
+		INSERT INTO staged_fold_txns (fold_uuid, raw_payload, amount_paise, currency, txn_timestamp, mode, type, narration,
+		    status, proposed_category_id, confirmed_category_id)
+		VALUES ('cat-confirmed', '{}', 543800, 'INR', '2026-09-18T07:25:00Z', 'CARD', 'OUTGOING', 'n', 'ready_to_push', 6, 9),
+		       ('cat-none',      '{}', 16889,  'INR', '2026-08-14T07:05:00Z', 'CARD', 'OUTGOING', 'n', 'ready_to_push', 6, 0),
+		       ('cat-proposed',  '{}', 7000,   'INR', '2026-05-09T12:00:00Z', 'CARD', 'OUTGOING', 'n', 'ready_to_push', 6, NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	resp := u.do(t, "GET", "/admin/ui/?status=ready_to_push", nil)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	b := string(body)
+	if !strings.Contains(b, "<th>Category</th>") {
+		t.Error(`column should be headed "Category" now that it shows the effective value`)
+	}
+	if tr := rowHTML(b, "cat-confirmed"); !strings.Contains(tr, "Medical Insurance") || strings.Contains(tr, "Snacks") {
+		t.Errorf("confirmed category should win over the suggestion: %s", tr)
+	}
+	if tr := rowHTML(b, "cat-none"); strings.Contains(tr, "Snacks") {
+		t.Errorf("an explicit none must not show the suggestion: %s", tr)
+	}
+	if tr := rowHTML(b, "cat-proposed"); !strings.Contains(tr, "Snacks") {
+		t.Errorf("with nothing confirmed the suggestion shows: %s", tr)
+	}
+}

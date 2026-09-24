@@ -39,7 +39,7 @@
         <th>Amount</th>
         <th>Source</th>
         <th>Destination</th>
-        <th>Proposed category</th>
+        <th>Category</th>
         <th>Confidence</th>
         <th></th>
       </tr>
@@ -50,8 +50,8 @@
         <td>{{if ne .Status "pushed"}}<input type="checkbox" name="fold_uuids" value="{{.FoldUUID}}">{{end}}</td>
         <td>{{statusBadge .Status}}</td>
         <td><time datetime="{{.TxnTimestampUTC}}">{{.TxnTimestamp}}</time></td>
-        <td class="amount {{if eq .Type "OUTGOING"}}amount-out{{else}}amount-in{{end}}">
-          {{if eq .Type "OUTGOING"}}-{{else}}+{{end}}{{.Currency}} {{.AmountDisplay}}
+        <td class="amount {{if .Incoming}}amount-in{{else}}amount-out{{end}}">
+          {{if .Incoming}}+{{else}}-{{end}}{{.Currency}} {{.AmountDisplay}}
           {{if .ForeignDisplay}}<br><span style="color:var(--muted); font-weight:normal">{{.ForeignDisplay}}</span>{{end}}
           {{if .Edited}}<br><span class="pill pill-ready_to_push" title="corrected — fold saw {{.Currency}} {{.FoldAmountDisplay}}">corrected</span>{{end}}
           {{if .Manual}}<br><span class="pill pill-pending" title="added by hand from a statement line">manual</span>{{end}}
@@ -59,7 +59,7 @@
         </td>
         <td style="color:var(--muted)">{{.SourceAccountName}}</td>
         <td>{{.DestinationName}}{{if .Description}}<br><span style="color:var(--muted); font-weight:normal; font-size:0.9em">{{.Description}}</span>{{end}}</td>
-        <td>{{.ProposedCategoryName}}</td>
+        <td>{{.CategoryName}}</td>
         <td>{{confidenceBar .Confidence}}</td>
         <td><a href="/admin/ui/staged/{{.FoldUUID}}?back={{filterURL $.Filters $.PerPage $.Page | urlquery}}">review →</a>{{if .FireflyURL}} · <a href="{{.FireflyURL}}" target="_blank" rel="noopener">firefly ↗</a>{{end}}</td>
       </tr>
