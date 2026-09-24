@@ -72,10 +72,17 @@ func (h *Handler) listAccountsByKind(ctx context.Context, kind string) ([]nameOp
 // source account (which would include long-gone payers). The set is
 // tiny (a handful of cards/banks), so the per-id name lookup is cheap.
 func (h *Handler) listFilterAccounts(ctx context.Context) ([]nameOption, error) {
+	// Every account a row pays FROM, plus own (asset) accounts rows pay
+	// INTO — the same two sides the account filter matches — so a card
+	// that only receives a transfer is still offered. Destinations are
+	// limited to assets; otherwise every merchant would join the dropdown.
 	rows, err := h.db.QueryContext(ctx, `
-		SELECT DISTINCT COALESCE(confirmed_source_account_id, proposed_source_account_id) AS aid
-		FROM staged_fold_txns
-		WHERE COALESCE(confirmed_source_account_id, proposed_source_account_id) IS NOT NULL
+		SELECT DISTINCT aid FROM (
+		    SELECT `+effectiveAccountIDSQL("source")+` AS aid FROM staged_fold_txns s
+		    UNION
+		    SELECT `+effectiveAccountIDSQL("destination")+` AS aid FROM staged_fold_txns s
+		    WHERE `+effectiveAccountIDSQL("destination")+` IN (SELECT firefly_id FROM firefly_accounts WHERE type = 'asset')
+		) WHERE aid IS NOT NULL
 	`)
 	if err != nil {
 		return nil, err

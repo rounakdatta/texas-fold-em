@@ -19,6 +19,18 @@ func possibleDuplicateSQL(col string) string {
 	return "CASE WHEN json_valid(" + col + ") THEN COALESCE(json_extract(" + col + ", '$.is_possible_duplicate'), 0) ELSE 0 END"
 }
 
+// effectiveAccountIDSQL resolves a staged row's source or destination
+// account id (side = "source" | "destination") as a UNIT, exactly as the
+// Pusher does: a confirmed id wins; a confirmed name-only account (a new
+// merchant or payer, null id) means "no existing id" and must not fall back
+// to a stale proposed id; otherwise the classifier's proposed id. Expects the
+// staged_fold_txns alias `s`.
+func effectiveAccountIDSQL(side string) string {
+	return "(CASE WHEN s.confirmed_" + side + "_account_id IS NOT NULL THEN s.confirmed_" + side + "_account_id" +
+		" WHEN NULLIF(s.confirmed_" + side + "_account_name, '') IS NOT NULL THEN NULL" +
+		" ELSE s.proposed_" + side + "_account_id END)"
+}
+
 // ist is the zone the review form's date/time inputs are expressed in. The
 // operator's card statements (and fold's own narrations) are in IST, so a
 // statement date typed into the form is an IST date. Stored values stay UTC.
