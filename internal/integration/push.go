@@ -111,6 +111,14 @@ type pushableRow struct {
 
 	ConfirmedTxnType sql.NullString
 
+	// Money/time overrides from the review form, for when the card alert
+	// fold saw differs from what settled on the statement (a tip added
+	// later, fold.money's own FX rate, a statement date). NULL = use fold's
+	// AmountPaise / ForeignAmountPaise / TxnTimestamp.
+	ConfirmedAmountPaise        sql.NullInt64
+	ConfirmedForeignAmountPaise sql.NullInt64
+	ConfirmedTxnTimestamp       sql.NullTime
+
 	// Fall-through: when confirmed_* is null we use proposed_* (auto-classified).
 	ProposedSourceAccountID        sql.NullInt64
 	ProposedSourceAccountName      sql.NullString
@@ -298,7 +306,8 @@ func (p *Pusher) fetchPushableRow(ctx context.Context, foldUUID string) (pushabl
 		       proposed_txn_type,
 		       narration, COALESCE(merchant_extracted, ''), firefly_txn_id,
 		       COALESCE(firefly_group_id,
-		                (SELECT group_id FROM firefly_txns WHERE firefly_id = staged_fold_txns.firefly_txn_id LIMIT 1))
+		                (SELECT group_id FROM firefly_txns WHERE firefly_id = staged_fold_txns.firefly_txn_id LIMIT 1)),
+		       confirmed_amount_paise, confirmed_foreign_amount_paise, confirmed_txn_timestamp
 		FROM staged_fold_txns
 		WHERE fold_uuid = ?
 	`, foldUUID).Scan(
@@ -313,6 +322,7 @@ func (p *Pusher) fetchPushableRow(ctx context.Context, foldUUID string) (pushabl
 		&r.ProposedCategoryID, &r.ProposedBudgetID, &r.ProposedDescription,
 		&r.ProposedTxnType,
 		&r.Narration, &r.MerchantExtracted, &r.FireflyTxnID, &r.FireflyGroupID,
+		&r.ConfirmedAmountPaise, &r.ConfirmedForeignAmountPaise, &r.ConfirmedTxnTimestamp,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return r, fmt.Errorf("%w: %s", PushNotFoundError, foldUUID)
@@ -367,6 +377,9 @@ func (p *Pusher) buildCreateRequest(ctx context.Context, row pushableRow) firefl
 	default:
 		destName = strings.TrimSpace(row.ProposedDestinationAccountName.String)
 	}
+	// A confirmed id of 0 is the review form's explicit "none" — the human
+	// cleared a wrong suggestion. pickInt64 returns it as 0 (confirmed wins),
+	// so nothing is sent and the proposal does NOT leak back in.
 	catID := pickInt64(row.ConfirmedCategoryID, row.ProposedCategoryID)
 	budID := pickInt64(row.ConfirmedBudgetID, row.ProposedBudgetID)
 	// Description fallback ladder:
@@ -424,10 +437,21 @@ func (p *Pusher) buildCreateRequest(ctx context.Context, row pushableRow) firefl
 		srcID, destID = sa, da
 	}
 
+	// Money/time: the human's statement-reconciled values win over what the
+	// card alert said (see migration 00012).
+	amountPaise := row.AmountPaise
+	if row.ConfirmedAmountPaise.Valid {
+		amountPaise = row.ConfirmedAmountPaise.Int64
+	}
+	when := row.TxnTimestamp
+	if row.ConfirmedTxnTimestamp.Valid {
+		when = row.ConfirmedTxnTimestamp.Time
+	}
+
 	line := firefly.CreateTransactionLine{
 		Type:         txnType,
-		Date:         row.TxnTimestamp.Format(time.RFC3339),
-		Amount:       paiseToDecimal(row.AmountPaise),
+		Date:         when.Format(time.RFC3339),
+		Amount:       paiseToDecimal(amountPaise),
 		CurrencyCode: row.Currency,
 		Description:  desc,
 		ExternalID:   row.FoldUUID,
@@ -443,9 +467,13 @@ func (p *Pusher) buildCreateRequest(ctx context.Context, row pushableRow) firefl
 	// foreign amount alongside the INR primary. Only when it genuinely
 	// differs from the home currency. firefly requires the foreign currency
 	// to exist — Push calls EnsureCurrency before the create.
+	foreignPaise := row.ForeignAmountPaise
+	if row.ConfirmedForeignAmountPaise.Valid {
+		foreignPaise = row.ConfirmedForeignAmountPaise // e.g. the tipped USD total
+	}
 	if row.ForeignCurrency.Valid && row.ForeignCurrency.String != "" &&
-		row.ForeignCurrency.String != row.Currency && row.ForeignAmountPaise.Valid {
-		line.ForeignAmount = paiseToDecimal(row.ForeignAmountPaise.Int64)
+		row.ForeignCurrency.String != row.Currency && foreignPaise.Valid {
+		line.ForeignAmount = paiseToDecimal(foreignPaise.Int64)
 		line.ForeignCurrencyCode = row.ForeignCurrency.String
 	}
 	if srcID != 0 {
@@ -486,6 +514,12 @@ type FireflyTxnView struct {
 	BudgetName      string
 	Description     string
 	Tags            []string
+	// Money/time as firefly holds them now (wire-format decimals, RFC3339),
+	// so correcting an amount on a pushed row starts from firefly's truth —
+	// including an amount the operator already fixed directly in firefly.
+	Amount        string
+	ForeignAmount string
+	Date          string
 }
 
 // CurrentFireflyView pulls the LIVE firefly transaction for a pushed row and
@@ -516,6 +550,9 @@ func (p *Pusher) CurrentFireflyView(ctx context.Context, foldUUID string) (Firef
 		BudgetName:      j.BudgetName,
 		Description:     j.Description,
 		Tags:            j.Tags,
+		Amount:          j.Amount,
+		ForeignAmount:   j.ForeignAmount,
+		Date:            j.Date,
 	}, true
 }
 

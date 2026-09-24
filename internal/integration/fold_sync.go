@@ -18,6 +18,10 @@ type FoldSyncReport struct {
 	Inserted     int           `json:"inserted"`              // newly staged
 	Skipped      int           `json:"skipped"`               // already present (idempotent re-run)
 	RawRefreshed int           `json:"raw_refreshed"`         // already-staged rows whose raw_payload we updated to the verbatim wire bytes
+	// MoneyRefreshed counts not-yet-pushed rows whose amount changed on
+	// fold's side since they were staged (e.g. an amount edited in the
+	// fold.money app, or a settled charge replacing its alert).
+	MoneyRefreshed int `json:"money_refreshed"`
 	Pages        int           `json:"pages"`                 // number of fold-API pages walked (>1 only in since-firefly mode)
 	StoppedAt    string        `json:"stopped_at,omitempty"`  // human-readable reason the walk halted: "cutoff_reached" | "hard_cap" | "exhausted"
 	CutoffDate   string        `json:"cutoff_date,omitempty"` // RFC3339 firefly cutoff used (since-firefly mode only)
@@ -102,6 +106,13 @@ func (s *FoldSyncer) SyncRecent(ctx context.Context, limit int) (FoldSyncReport,
 			}
 			if refreshed {
 				report.RawRefreshed++
+			}
+			moneyChanged, err := s.refreshMoney(ctx, tx, t)
+			if err != nil {
+				return report, fmt.Errorf("refresh money for %s: %w", t.UUID, err)
+			}
+			if moneyChanged {
+				report.MoneyRefreshed++
 			}
 		}
 		if i == 0 {
@@ -252,6 +263,13 @@ pages:
 				if refreshed {
 					report.RawRefreshed++
 				}
+				moneyChanged, err := s.refreshMoney(ctx, tx, t)
+				if err != nil {
+					return report, fmt.Errorf("refresh money for %s: %w", t.UUID, err)
+				}
+				if moneyChanged {
+					report.MoneyRefreshed++
+				}
 			}
 			report.OldestUUID = t.UUID
 
@@ -375,20 +393,12 @@ func (s *FoldSyncer) insertStaged(ctx context.Context, stmt *sql.Stmt, t fold.Tr
 	// separately and only when it genuinely differs (an abroad charge).
 	// Degenerate older payloads without a home currency fall back to the
 	// source side so we still store something.
-	primaryAmt, primaryCur := t.Amount, t.Currency
-	if primaryCur == "" {
-		primaryAmt, primaryCur = t.SourceAmount, t.SourceCurrency
-	}
-	var foreignPaise, foreignCur any
-	if t.SourceCurrency != "" && t.SourceCurrency != primaryCur {
-		foreignPaise = amountToPaise(t.SourceAmount)
-		foreignCur = t.SourceCurrency
-	}
+	primaryPaise, primaryCur, foreignPaise, foreignCur := foldMoney(t)
 
 	res, err := stmt.ExecContext(ctx,
 		t.UUID,
 		rawStr,
-		amountToPaise(primaryAmt),
+		primaryPaise,
 		nullIfEmpty(primaryCur),
 		foreignPaise,
 		foreignCur,
@@ -406,6 +416,84 @@ func (s *FoldSyncer) insertStaged(ctx context.Context, stmt *sql.Stmt, t fold.Tr
 		return false, fmt.Errorf("rows affected: %w", err)
 	}
 	return n == 1, nil
+}
+
+// foldMoney is the amount a fold transaction stages as. fold gives BOTH the
+// home-currency amount (Amount/Currency = INR) and the original charge
+// (SourceAmount/SourceCurrency). The primary firefly amount must be the home
+// (INR) side; the foreign side is recorded separately and only when it
+// genuinely differs (an abroad charge). Degenerate older payloads without a
+// home currency fall back to the source side so we still store something.
+func foldMoney(t fold.Transaction) (primaryPaise int64, primaryCur string, foreignPaise sql.NullInt64, foreignCur sql.NullString) {
+	primaryAmt, primaryCur := t.Amount, t.Currency
+	if primaryCur == "" {
+		primaryAmt, primaryCur = t.SourceAmount, t.SourceCurrency
+	}
+	if t.SourceCurrency != "" && t.SourceCurrency != primaryCur {
+		foreignPaise = sql.NullInt64{Int64: amountToPaise(t.SourceAmount), Valid: true}
+		foreignCur = sql.NullString{String: t.SourceCurrency, Valid: true}
+	}
+	return amountToPaise(primaryAmt), primaryCur, foreignPaise, foreignCur
+}
+
+// refreshMoney brings a not-yet-pushed row's amount in line with what fold
+// reports now. INSERT OR IGNORE froze every row at first sight, so an amount
+// that changed later on fold's side (edited in the fold.money app, or a
+// settled charge replacing its pre-tip alert) never reached push. Pushed and
+// skipped rows are left alone — what was sent to firefly is corrected there,
+// through the review form's amount field and "save & update firefly". Human
+// corrections (confirmed_*) are never touched and still win at push time.
+// Each change is written to audit_log. Returns true when the row changed.
+func (s *FoldSyncer) refreshMoney(ctx context.Context, tx *sql.Tx, t fold.Transaction) (bool, error) {
+	amt, cur, fx, fxCur := foldMoney(t)
+	var (
+		oldAmt   int64
+		oldCur   sql.NullString
+		oldFx    sql.NullInt64
+		oldFxCur sql.NullString
+		status   string
+	)
+	err := tx.QueryRowContext(ctx, `
+		SELECT amount_paise, currency, foreign_amount_paise, foreign_currency, status
+		FROM staged_fold_txns WHERE fold_uuid = ?`, t.UUID).Scan(&oldAmt, &oldCur, &oldFx, &oldFxCur, &status)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if status == "pushed" || status == "skipped" {
+		return false, nil
+	}
+	if oldAmt == amt && oldCur.String == cur && oldFx == fx && oldFxCur == fxCur {
+		return false, nil
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE staged_fold_txns
+		   SET amount_paise = ?, currency = ?, foreign_amount_paise = ?, foreign_currency = ?,
+		       updated_at = CURRENT_TIMESTAMP
+		 WHERE fold_uuid = ? AND status NOT IN ('pushed', 'skipped')`,
+		amt, nullIfEmpty(cur), fx, fxCur, t.UUID); err != nil {
+		return false, err
+	}
+	note := fmt.Sprintf("fold amount changed: %s -> %s",
+		moneyNote(oldAmt, oldCur.String, oldFx, oldFxCur), moneyNote(amt, cur, fx, fxCur))
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO audit_log (actor, action, fold_uuid, notes) VALUES ('system', 'fold_money_refresh', ?, ?)`,
+		t.UUID, note); err != nil {
+		return false, err
+	}
+	s.log.Info("fold amount changed on a staged row", "fold_uuid", t.UUID, "change", note)
+	return true, nil
+}
+
+// moneyNote renders "INR 5461.05 (USD 56.75)" for the audit trail.
+func moneyNote(paise int64, cur string, fx sql.NullInt64, fxCur sql.NullString) string {
+	out := fmt.Sprintf("%s %d.%02d", cur, paise/100, paise%100)
+	if fx.Valid && fxCur.Valid {
+		out += fmt.Sprintf(" (%s %d.%02d)", fxCur.String, fx.Int64/100, fx.Int64%100)
+	}
+	return out
 }
 
 // refreshRawPayload updates only raw_payload on an already-staged row,

@@ -72,6 +72,7 @@ type Handler struct {
 	auth       AuthMode
 	indexTmpl  *template.Template
 	detailTmpl *template.Template
+	newTmpl    *template.Template // "add a transaction fold never saw"
 	// fireflyPublicURL is the user-facing firefly base (e.g.
 	// https://firefly.taptappers.club) for deep-linking pushed rows to
 	// their firefly transaction. Empty disables the links. Distinct from
@@ -113,6 +114,10 @@ func New(db *sql.DB, pusher *integration.Pusher, log *slog.Logger, adminKey stri
 	if err != nil {
 		return nil, fmt.Errorf("parse detail template: %w", err)
 	}
+	newTmpl, err := template.New("layout.html").Funcs(funcs).ParseFS(tmplFS, "templates/layout.html", "templates/new.html")
+	if err != nil {
+		return nil, fmt.Errorf("parse new-transaction template: %w", err)
+	}
 	return &Handler{
 		db:         db,
 		pusher:     pusher,
@@ -121,6 +126,7 @@ func New(db *sql.DB, pusher *integration.Pusher, log *slog.Logger, adminKey stri
 		auth:       auth,
 		indexTmpl:  indexTmpl,
 		detailTmpl: detailTmpl,
+		newTmpl:    newTmpl,
 	}, nil
 }
 
@@ -131,9 +137,13 @@ func New(db *sql.DB, pusher *integration.Pusher, log *slog.Logger, adminKey stri
 //	POST /admin/ui/staged/{fold_uuid}/save   → save edits
 //	POST /admin/ui/staged/{fold_uuid}/push   → save edits + push
 //	POST /admin/ui/staged/{fold_uuid}/skip   → mark skipped
+//	GET  /admin/ui/new                       → form: add a transaction fold never saw
+//	POST /admin/ui/new                       → create it as a MANUAL staged row
 //	GET  /admin/ui/login?key=<admin_key>     → set auth cookie (cookie mode only)
 func (h *Handler) Mount(mux *http.ServeMux) {
 	mux.Handle("GET /admin/ui/", h.withAuth(h.handleIndex))
+	mux.Handle("GET /admin/ui/new", h.withAuth(h.handleNewForm))
+	mux.Handle("POST /admin/ui/new", h.withAuth(h.handleNewCreate))
 	mux.Handle("GET /admin/ui/staged/{fold_uuid}", h.withAuth(h.handleDetail))
 	mux.Handle("POST /admin/ui/staged/{fold_uuid}/save", h.withAuth(h.handleSave))
 	mux.Handle("POST /admin/ui/staged/{fold_uuid}/push", h.withAuth(h.handlePush))
@@ -219,6 +229,15 @@ type indexRow struct {
 	// created. Empty unless the row is pushed, the public firefly URL is
 	// configured, and the group id is resolvable from the mirror.
 	FireflyURL string
+	// Edited: the human corrected the amount, foreign amount or date (the
+	// list shows the corrected values; FoldAmountDisplay is what fold saw).
+	Edited            bool
+	FoldAmountDisplay string
+	// Manual: added by hand from a statement line fold never received.
+	Manual bool
+	// PossibleDuplicate: fold.money itself flags this as a likely duplicate
+	// alert (e.g. the same charge alerted twice) — usually one to skip.
+	PossibleDuplicate bool
 }
 
 // listFilters is the set of WHERE constraints the index list honours.
@@ -441,9 +460,14 @@ func parsePositiveInt(s string, def int) int {
 
 func (h *Handler) listRows(ctx context.Context, f listFilters, limit, offset int) ([]indexRow, error) {
 	where, args := f.where()
+	// Money and time shown are the EFFECTIVE values — a statement-reconciled
+	// correction (confirmed_*) wins over what the card alert said — because
+	// that is what push will send. s.amount_paise (fold's own) rides along
+	// for the "edited" hint.
 	q := `
-		SELECT s.fold_uuid, s.txn_timestamp, s.amount_paise, s.currency,
-		       s.foreign_amount_paise, s.foreign_currency, s.mode, s.type,
+		SELECT s.fold_uuid, COALESCE(s.confirmed_txn_timestamp, s.txn_timestamp),
+		       COALESCE(s.confirmed_amount_paise, s.amount_paise), s.currency,
+		       COALESCE(s.confirmed_foreign_amount_paise, s.foreign_amount_paise), s.foreign_currency, s.mode, s.type,
 		       COALESCE(s.merchant_extracted,''), s.status,
 		       s.classifier_tier, s.classifier_confidence,
 		       (SELECT category_name FROM firefly_txns
@@ -479,7 +503,11 @@ func (h *Handler) listRows(ctx context.Context, f listFilters, limit, offset int
 		       ),
 		       COALESCE(NULLIF(s.confirmed_description, ''), NULLIF(s.proposed_description, ''), ''),
 		       COALESCE(s.firefly_group_id,
-		                (SELECT group_id FROM firefly_txns WHERE firefly_id = s.firefly_txn_id LIMIT 1))
+		                (SELECT group_id FROM firefly_txns WHERE firefly_id = s.firefly_txn_id LIMIT 1)),
+		       s.amount_paise,
+		       (s.confirmed_amount_paise IS NOT NULL OR s.confirmed_foreign_amount_paise IS NOT NULL
+		        OR s.confirmed_txn_timestamp IS NOT NULL),
+		       ` + possibleDuplicateSQL("s.raw_payload") + `
 		FROM staged_fold_txns s
 		WHERE ` + where + `
 		ORDER BY s.txn_timestamp DESC
@@ -504,19 +532,21 @@ func (h *Handler) listRows(ctx context.Context, f listFilters, limit, offset int
 			destName    sql.NullString
 			groupID     sql.NullInt64
 			tsStr       string
+			foldPaise   int64
+			edited, dup int
 		)
 		if err := rows.Scan(&r.FoldUUID, &tsStr, &amountPaise, &r.Currency, &fAmt, &fCur, &r.Mode, &r.Type,
-			&r.MerchantExtracted, &r.Status, &tier, &conf, &catName, &srcName, &destName, &r.Description, &groupID); err != nil {
+			&r.MerchantExtracted, &r.Status, &tier, &conf, &catName, &srcName, &destName, &r.Description, &groupID,
+			&foldPaise, &edited, &dup); err != nil {
 			return nil, err
 		}
+		r.Edited, r.Manual, r.PossibleDuplicate = edited == 1, r.Mode == manualMode, dup == 1
+		r.FoldAmountDisplay = paiseToDecimal(foldPaise)
 		r.ForeignDisplay = foreignDisplay(fAmt, fCur)
 		// Two views of the timestamp: a server-rendered fallback for
 		// no-JS clients, and a canonical RFC3339 UTC string for the
 		// client-side <time datetime="..."> conversion to local zone.
-		if t, err := time.Parse(time.RFC3339, tsStr); err == nil {
-			r.TxnTimestamp = t.Format("Jan 02 15:04 UTC")
-			r.TxnTimestampUTC = t.UTC().Format(time.RFC3339)
-		} else if t, err := time.Parse("2006-01-02 15:04:05+00:00", tsStr); err == nil {
+		if t, ok := parseDBTime(tsStr); ok {
 			r.TxnTimestamp = t.Format("Jan 02 15:04 UTC")
 			r.TxnTimestampUTC = t.UTC().Format(time.RFC3339)
 		} else {
@@ -565,6 +595,9 @@ type detailRow struct {
 	Status            string
 	TierLabel         string
 	Confidence        float64
+	Edited            bool // amount/foreign/date corrected by the human
+	Manual            bool // added by hand from a statement line
+	PossibleDuplicate bool // fold.money flags it as a likely duplicate alert
 }
 
 // editForm is the editable subset of the row, in form-field shape.
@@ -579,6 +612,14 @@ type editForm struct {
 	BudgetName             string
 	Description            string
 	Tags                   string
+	// Money and time as push will send them: the human's correction when
+	// there is one, else fold's value. Amount is INR; ForeignAmount is in
+	// ForeignCurrency (empty for a domestic row). Date/Time are IST.
+	Amount          string
+	ForeignAmount   string
+	ForeignCurrency string
+	Date            string
+	Time            string
 }
 
 func (h *Handler) handleDetail(w http.ResponseWriter, r *http.Request) {
@@ -640,6 +681,18 @@ func (h *Handler) handleDetail(w http.ResponseWriter, r *http.Request) {
 			if len(v.Tags) > 0 {
 				edit.Tags = strings.Join(v.Tags, ", ")
 			}
+			// Money/time from firefly's live values too, so a correction
+			// starts from what firefly really holds (an amount already fixed
+			// there by hand is carried, not clobbered, by "save & update").
+			if p, err := parseMoneyToPaise(v.Amount); err == nil && p > 0 {
+				edit.Amount = paiseToDecimal(p)
+			}
+			if p, err := parseMoneyToPaise(v.ForeignAmount); err == nil && p > 0 && edit.ForeignCurrency != "" {
+				edit.ForeignAmount = paiseToDecimal(p)
+			}
+			if t, ok := parseDBTime(v.Date); ok {
+				edit.Date, edit.Time = istDateTime(t)
+			}
 			fireflyPulled = true
 		}
 	}
@@ -680,6 +733,9 @@ func (h *Handler) fetchDetail(ctx context.Context, uuid string) (detailRow, edit
 		pDesc                           sql.NullString
 		fAmt                            sql.NullInt64
 		fCur                            sql.NullString
+		cAmt, cFx                       sql.NullInt64
+		cTs                             sql.NullString
+		dup                             int
 	)
 	err := h.db.QueryRowContext(ctx, `
 		SELECT fold_uuid, narration, txn_timestamp, amount_paise, currency,
@@ -692,7 +748,9 @@ func (h *Handler) fetchDetail(ctx context.Context, uuid string) (detailRow, edit
 		       proposed_source_account_id, proposed_destination_account_id,
 		       proposed_category_id, proposed_budget_id, proposed_description,
 		       confirmed_destination_account_name, proposed_destination_account_name,
-		       confirmed_source_account_name, proposed_source_account_name
+		       confirmed_source_account_name, proposed_source_account_name,
+		       confirmed_amount_paise, confirmed_foreign_amount_paise, confirmed_txn_timestamp,
+		       `+possibleDuplicateSQL("raw_payload")+`
 		FROM staged_fold_txns
 		WHERE fold_uuid = ?
 	`, uuid).Scan(
@@ -702,22 +760,26 @@ func (h *Handler) fetchDetail(ctx context.Context, uuid string) (detailRow, edit
 		&pSrcID, &pDestID, &pCatID, &pBudID, &pDesc,
 		&cDestName, &pDestName,
 		&cSrcName, &pSrcName,
+		&cAmt, &cFx, &cTs, &dup,
 	)
 	if err != nil {
 		return r, editForm{}, "", err
 	}
 
-	if t, err := time.Parse(time.RFC3339, tsStr); err == nil {
-		r.TxnTimestamp = t.Format("Jan 02, 2006 15:04 UTC")
-		r.TxnTimestampUTC = t.UTC().Format(time.RFC3339)
-	} else if t, err := time.Parse("2006-01-02 15:04:05+00:00", tsStr); err == nil {
-		r.TxnTimestamp = t.Format("Jan 02, 2006 15:04 UTC")
-		r.TxnTimestampUTC = t.UTC().Format(time.RFC3339)
+	// The "fold transaction" card shows what fold SAW (the alert); the edit
+	// form below shows what push will SEND (corrections applied).
+	foldTime, ok := parseDBTime(tsStr)
+	if ok {
+		r.TxnTimestamp = foldTime.Format("Jan 02, 2006 15:04 UTC")
+		r.TxnTimestampUTC = foldTime.Format(time.RFC3339)
 	} else {
 		r.TxnTimestamp = tsStr
 	}
 	r.AmountDisplay = paiseToDecimal(amountPaise)
 	r.ForeignDisplay = foreignDisplay(fAmt, fCur)
+	r.Edited = cAmt.Valid || cFx.Valid || cTs.Valid
+	r.Manual = r.Mode == manualMode
+	r.PossibleDuplicate = dup == 1
 	if tier.Valid {
 		r.TierLabel = tierLabel(int(tier.Int64))
 	}
@@ -769,6 +831,29 @@ func (h *Handler) fetchDetail(ctx context.Context, uuid string) (detailRow, edit
 	if id, ok := parseInt(edit.BudgetID); ok {
 		edit.BudgetName = h.lookupBudgetName(ctx, id)
 	}
+
+	// Money and time: the correction when there is one, else fold's value.
+	effAmt := amountPaise
+	if cAmt.Valid {
+		effAmt = cAmt.Int64
+	}
+	edit.Amount = paiseToDecimal(effAmt)
+	if fCur.Valid && fCur.String != "" {
+		edit.ForeignCurrency = fCur.String
+		switch {
+		case cFx.Valid:
+			edit.ForeignAmount = paiseToDecimal(cFx.Int64)
+		case fAmt.Valid:
+			edit.ForeignAmount = paiseToDecimal(fAmt.Int64)
+		}
+	}
+	effTime := foldTime
+	if cTs.Valid {
+		if t, ok := parseDBTime(cTs.String); ok {
+			effTime = t
+		}
+	}
+	edit.Date, edit.Time = istDateTime(effTime)
 
 	ev := ""
 	if evidence.Valid {
@@ -1062,6 +1147,25 @@ func (h *Handler) saveEdits(ctx context.Context, uuid string, form url.Values) (
 		tagsJSON = string(b)
 	}
 
+	// Explicit "none". The form pre-fills category and budget with the
+	// current choice (or the classifier's suggestion), so an EMPTY submitted
+	// field means the human cleared it. Store 0: push sends nothing, and the
+	// suggestion can't leak back in through the confirmed-else-proposed
+	// fallback (the way a wrong "Eating outside" on a hostel stay used to).
+	if catName == "" && formHas(form, "category_name") {
+		catID = int64(0)
+	}
+	if budName == "" && formHas(form, "budget_name") {
+		budID = int64(0)
+	}
+
+	// Money and time corrections (statement reconciliation).
+	amtOv, fxOv, tsOv, bad, err := h.moneyOverrides(ctx, uuid, form)
+	if err != nil {
+		return unresolved, err
+	}
+	unresolved = append(unresolved, bad...)
+
 	_, err = h.db.ExecContext(ctx, `
 		UPDATE staged_fold_txns
 		SET confirmed_source_account_id        = ?,
@@ -1072,12 +1176,111 @@ func (h *Handler) saveEdits(ctx context.Context, uuid string, form url.Values) (
 		    confirmed_budget_id                = ?,
 		    confirmed_description              = ?,
 		    confirmed_tags_json                = ?,
+		    confirmed_amount_paise             = ?,
+		    confirmed_foreign_amount_paise     = ?,
+		    confirmed_txn_timestamp            = ?,
 		    reviewed_at                        = CURRENT_TIMESTAMP,
 		    updated_at                         = CURRENT_TIMESTAMP,
 		    status = CASE WHEN status='needs_review' THEN 'ready_to_push' ELSE status END
 		WHERE fold_uuid = ?
-	`, srcID, srcNameVal, dstID, dstName, catID, budID, nullableStrFromForm(desc), tagsJSON, uuid)
+	`, srcID, srcNameVal, dstID, dstName, catID, budID, nullableStrFromForm(desc), tagsJSON,
+		amtOv, fxOv, tsOv, uuid)
 	return unresolved, err
+}
+
+// formHas reports whether the submitted form carried a field at all. It lets
+// a new form field change behaviour (e.g. "empty budget = none") without
+// changing what happens for a client that never sends that field.
+func formHas(form url.Values, key string) bool {
+	_, ok := form[key]
+	return ok
+}
+
+// moneyOverrides turns the form's amount / foreign amount / date+time into
+// the confirmed_* override values to store. Rules, per field:
+//   - field absent from the form      → keep whatever is stored now;
+//   - empty                           → no override (use fold's value);
+//   - equal to fold's own value       → no override (NULL, not a copy);
+//   - different                       → store it;
+//   - unparseable / not positive      → keep stored, report as unresolved
+//     (so a bad amount also blocks a push).
+//
+// Foreign amount only applies when fold recorded a foreign side; the date is
+// entered in IST at minute precision.
+func (h *Handler) moneyOverrides(ctx context.Context, uuid string, form url.Values) (amt, fx, ts any, bad []string, err error) {
+	var (
+		baseAmt       int64
+		baseFx        sql.NullInt64
+		baseCur       sql.NullString
+		baseTs        string
+		curAmt, curFx sql.NullInt64
+		curTs         sql.NullTime
+	)
+	err = h.db.QueryRowContext(ctx, `
+		SELECT amount_paise, foreign_amount_paise, foreign_currency, txn_timestamp,
+		       confirmed_amount_paise, confirmed_foreign_amount_paise, confirmed_txn_timestamp
+		FROM staged_fold_txns WHERE fold_uuid = ?`, uuid).
+		Scan(&baseAmt, &baseFx, &baseCur, &baseTs, &curAmt, &curFx, &curTs)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil, nil, nil, nil // the UPDATE that follows is a no-op too
+	}
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("read money for overrides: %w", err)
+	}
+	if curAmt.Valid {
+		amt = curAmt.Int64
+	}
+	if curFx.Valid {
+		fx = curFx.Int64
+	}
+	if curTs.Valid {
+		ts = curTs.Time.UTC()
+	}
+
+	if formHas(form, "amount") {
+		v := strings.TrimSpace(form.Get("amount"))
+		p, perr := parseMoneyToPaise(v)
+		switch {
+		case v == "":
+			amt = nil
+		case perr != nil || p <= 0:
+			bad = append(bad, fmt.Sprintf("amount %q", v))
+		case p == baseAmt:
+			amt = nil
+		default:
+			amt = p
+		}
+	}
+	if formHas(form, "foreign_amount") && baseCur.Valid && baseCur.String != "" {
+		v := strings.TrimSpace(form.Get("foreign_amount"))
+		p, perr := parseMoneyToPaise(v)
+		switch {
+		case v == "":
+			fx = nil
+		case perr != nil || p <= 0:
+			bad = append(bad, fmt.Sprintf("foreign amount %q", v))
+		case baseFx.Valid && p == baseFx.Int64:
+			fx = nil
+		default:
+			fx = p
+		}
+	}
+	if formHas(form, "date") {
+		d := strings.TrimSpace(form.Get("date"))
+		t, perr := parseISTForm(d, form.Get("time"))
+		base, baseOK := parseDBTime(baseTs)
+		switch {
+		case d == "":
+			ts = nil
+		case perr != nil:
+			bad = append(bad, fmt.Sprintf("date %q %q", d, form.Get("time")))
+		case baseOK && base.Truncate(time.Minute).Equal(t):
+			ts = nil
+		default:
+			ts = t
+		}
+	}
+	return amt, fx, ts, bad, nil
 }
 
 // helpers ////////////////////////////////////////////////////////////////

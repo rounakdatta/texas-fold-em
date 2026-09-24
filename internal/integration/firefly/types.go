@@ -68,6 +68,11 @@ type TransactionJournal struct {
 	// signal between fold's truncated merchant string and firefly's
 	// canonical destination_account_name.
 	Notes           string   `json:"notes"`
+	// Foreign side of a cross-currency transaction (e.g. "7.24" USD);
+	// empty for domestic ones. Read so the review form can pre-fill a
+	// correction from firefly's live values.
+	ForeignAmount       string `json:"foreign_amount"`
+	ForeignCurrencyCode string `json:"foreign_currency_code"`
 }
 
 // TransactionGroupResponse is the body returned by GET /api/v1/transactions/{id}.

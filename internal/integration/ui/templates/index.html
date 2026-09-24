@@ -53,6 +53,9 @@
         <td class="amount {{if eq .Type "OUTGOING"}}amount-out{{else}}amount-in{{end}}">
           {{if eq .Type "OUTGOING"}}-{{else}}+{{end}}{{.Currency}} {{.AmountDisplay}}
           {{if .ForeignDisplay}}<br><span style="color:var(--muted); font-weight:normal">{{.ForeignDisplay}}</span>{{end}}
+          {{if .Edited}}<br><span class="pill pill-ready_to_push" title="corrected — fold saw {{.Currency}} {{.FoldAmountDisplay}}">corrected</span>{{end}}
+          {{if .Manual}}<br><span class="pill pill-pending" title="added by hand from a statement line">manual</span>{{end}}
+          {{if .PossibleDuplicate}}<br><span class="pill pill-needs_review" title="fold.money flags this as a possible duplicate alert">possible duplicate</span>{{end}}
         </td>
         <td style="color:var(--muted)">{{.SourceAccountName}}</td>
         <td>{{.DestinationName}}{{if .Description}}<br><span style="color:var(--muted); font-weight:normal; font-size:0.9em">{{.Description}}</span>{{end}}</td>

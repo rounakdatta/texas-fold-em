@@ -662,3 +662,122 @@ func TestBuildCreateRequest_DepositNewRevenueSourceByName(t *testing.T) {
 		t.Errorf("source_name=%q, want 'Neha Ananthan'", line.SourceName)
 	}
 }
+
+// TestBuildCreateRequest_MoneyOverrides: the human's statement-reconciled
+// amount, foreign amount and date replace what the card alert said — here a
+// US dinner whose tip was added after the alert.
+func TestBuildCreateRequest_MoneyOverrides(t *testing.T) {
+	alert := time.Date(2026, 7, 26, 0, 35, 0, 0, time.UTC)
+	statementDay := time.Date(2026, 7, 25, 18, 30, 0, 0, time.UTC)
+	base := pushableRow{
+		FoldUUID:                     "u-tip",
+		AmountPaise:                  787640, // ₹7876.40 at the alert
+		Currency:                     "INR",
+		ForeignAmountPaise:           sql.NullInt64{Int64: 8157, Valid: true}, // USD 81.57 pre-tip
+		ForeignCurrency:              sql.NullString{String: "USD", Valid: true},
+		TxnTimestamp:                 alert,
+		Type:                         "OUTGOING",
+		ProposedSourceAccountID:      sql.NullInt64{Int64: 1314, Valid: true},
+		ProposedDestinationAccountID: sql.NullInt64{Int64: 900, Valid: true},
+	}
+
+	// No override: fold's values go through untouched.
+	line := (&Pusher{}).buildCreateRequest(context.Background(), base).Transactions[0]
+	if line.Amount != "7876.40" || line.ForeignAmount != "81.57" || line.Date != alert.Format(time.RFC3339) {
+		t.Errorf("without overrides got %s / %s / %s", line.Amount, line.ForeignAmount, line.Date)
+	}
+
+	over := base
+	over.ConfirmedAmountPaise = sql.NullInt64{Int64: 907069, Valid: true}      // ₹9070.69 billed
+	over.ConfirmedForeignAmountPaise = sql.NullInt64{Int64: 9421, Valid: true} // USD 94.21 tipped
+	over.ConfirmedTxnTimestamp = sql.NullTime{Time: statementDay, Valid: true}
+	line = (&Pusher{}).buildCreateRequest(context.Background(), over).Transactions[0]
+	if line.Amount != "9070.69" || line.CurrencyCode != "INR" {
+		t.Errorf("amount = %s %s, want 9070.69 INR", line.Amount, line.CurrencyCode)
+	}
+	if line.ForeignAmount != "94.21" || line.ForeignCurrencyCode != "USD" {
+		t.Errorf("foreign = %s %s, want 94.21 USD", line.ForeignAmount, line.ForeignCurrencyCode)
+	}
+	if line.Date != statementDay.Format(time.RFC3339) {
+		t.Errorf("date = %s, want %s", line.Date, statementDay.Format(time.RFC3339))
+	}
+}
+
+// TestBuildCreateRequest_ExplicitNoneBudgetAndCategory: a confirmed id of 0
+// is the review form's "none" — the classifier's suggestion must not leak
+// back in through the confirmed-else-proposed fallback.
+func TestBuildCreateRequest_ExplicitNoneBudgetAndCategory(t *testing.T) {
+	row := pushableRow{
+		FoldUUID: "u-hostel", AmountPaise: 4276930, Currency: "INR",
+		TxnTimestamp: time.Now().UTC(), Type: "OUTGOING",
+		ProposedSourceAccountID:      sql.NullInt64{Int64: 1314, Valid: true},
+		ProposedDestinationAccountID: sql.NullInt64{Int64: 900, Valid: true},
+		ProposedCategoryID:           sql.NullInt64{Int64: 6, Valid: true},
+		ProposedBudgetID:             sql.NullInt64{Int64: 3, Valid: true}, // a wrong "Eating outside"
+		ConfirmedCategoryID:          sql.NullInt64{Int64: 0, Valid: true},
+		ConfirmedBudgetID:            sql.NullInt64{Int64: 0, Valid: true},
+	}
+	line := (&Pusher{}).buildCreateRequest(context.Background(), row).Transactions[0]
+	if line.CategoryID != "" || line.BudgetID != "" {
+		t.Errorf("explicit none leaked a suggestion: category=%q budget=%q", line.CategoryID, line.BudgetID)
+	}
+	row.ConfirmedBudgetID = sql.NullInt64{Int64: 7, Valid: true}
+	if line = (&Pusher{}).buildCreateRequest(context.Background(), row).Transactions[0]; line.BudgetID != "7" {
+		t.Errorf("a real confirmed budget should still win, got %q", line.BudgetID)
+	}
+}
+
+// TestPush_PreviewUsesStoredOverrides round-trips the override columns
+// through SQLite (the DATETIME one via the driver), so a typo in
+// fetchPushableRow's SELECT can't pass unnoticed.
+func TestPush_PreviewUsesStoredOverrides(t *testing.T) {
+	s := newPushTestSetup(t)
+	when := time.Date(2026, 5, 7, 4, 45, 0, 0, time.UTC)
+	if _, err := s.db.DB.Exec(`UPDATE staged_fold_txns SET confirmed_amount_paise = 7250, confirmed_txn_timestamp = ? WHERE fold_uuid = 'u1'`, when); err != nil {
+		t.Fatal(err)
+	}
+	p := NewPusher(s.db, firefly.NewClient(s.fakeFirefly.URL, "p", s.fakeFirefly.Client()),
+		slog.New(slog.NewTextHandler(io.Discard, nil)), false)
+	report, err := p.Push(context.Background(), "u1", false)
+	if err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	body, _ := json.Marshal(report.PreviewBody)
+	if !strings.Contains(string(body), `"amount":"72.50"`) {
+		t.Errorf("preview should carry the corrected amount 72.50: %s", body)
+	}
+	if !strings.Contains(string(body), `"date":"2026-05-07T04:45:00Z"`) {
+		t.Errorf("preview should carry the corrected date: %s", body)
+	}
+}
+
+// TestUpdate_SendsCorrectedAmount: a row already pushed with fold's alert
+// amount gets its statement amount corrected in the review form; "save &
+// update firefly" must PUT that amount onto the SAME firefly journal.
+func TestUpdate_SendsCorrectedAmount(t *testing.T) {
+	s := newPushTestSetup(t)
+	var putBody, putPath string
+	ff := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		if r.Method == http.MethodPut {
+			b, _ := io.ReadAll(r.Body)
+			putBody, putPath = string(b), r.URL.Path
+		}
+		_, _ = w.Write([]byte(`{"data":{"id":"7950","attributes":{"transactions":[{"transaction_journal_id":"7951"}]}}}`))
+	}))
+	t.Cleanup(ff.Close)
+	if _, err := s.db.DB.Exec(`UPDATE staged_fold_txns SET status='pushed', firefly_txn_id=7951, firefly_group_id=7950,
+		confirmed_amount_paise=7250 WHERE fold_uuid='u1'`); err != nil {
+		t.Fatal(err)
+	}
+	p := NewPusher(s.db, firefly.NewClient(ff.URL, "p", ff.Client()), slog.New(slog.NewTextHandler(io.Discard, nil)), false)
+	if _, err := p.Update(context.Background(), "u1"); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if putPath != "/api/v1/transactions/7950" {
+		t.Errorf("PUT path = %q, want the existing group", putPath)
+	}
+	if !strings.Contains(putBody, `"amount":"72.50"`) || !strings.Contains(putBody, `"transaction_journal_id":"7951"`) {
+		t.Errorf("PUT body should carry the corrected amount on journal 7951: %s", putBody)
+	}
+}

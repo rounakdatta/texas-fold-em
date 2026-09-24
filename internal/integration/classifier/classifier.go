@@ -805,12 +805,17 @@ func (c *Classifier) ReclassifyUUIDs(ctx context.Context, uuids []string) (Class
 
 // fetchStagedForClassify loads the slim StagedRow set matching a WHERE
 // clause against staged_fold_txns, newest first.
+//
+// Rows the operator added by hand from a statement (mode='MANUAL') are
+// never classified: they carry no fold payload, and every field on them is
+// already a human decision. Excluding them here covers every classify path
+// (pending, review, all, reclassify-selected) at once.
 func (c *Classifier) fetchStagedForClassify(ctx context.Context, where string, args ...any) ([]StagedRow, error) {
 	rows, err := c.db.QueryContext(ctx, `
 		SELECT fold_uuid, narration, mode, type, COALESCE(merchant_extracted,''),
 		       amount_paise, currency, txn_timestamp, raw_payload
 		FROM staged_fold_txns
-		WHERE `+where+`
+		WHERE (`+where+`) AND mode <> 'MANUAL'
 		ORDER BY txn_timestamp DESC
 	`, args...)
 	if err != nil {

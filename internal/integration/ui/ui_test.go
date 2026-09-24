@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rounakdatta/texas-fold-em/internal/integration"
 	"github.com/rounakdatta/texas-fold-em/internal/integration/classifier"
@@ -518,7 +520,7 @@ func TestUI_Save_PersistsAndBumpsStatus(t *testing.T) {
 	form.Set("destination_name", "Cake Palace") // → resolves to id 12
 	form.Set("source_name", "HDFC Card")        // → resolves to id 1
 	form.Set("category_name", "Snacks")         // → resolves to id 6
-	form.Set("budget_name", "")                 // empty → NULL
+	form.Set("budget_name", "")                 // cleared → explicit "none" (0)
 	form.Set("description", "edited description")
 	form.Set("tags", "food, evening")
 
@@ -559,8 +561,10 @@ func TestUI_Save_PersistsAndBumpsStatus(t *testing.T) {
 	if !confCatID.Valid || confCatID.Int64 != 6 {
 		t.Errorf("category resolved=%v, want 6", confCatID)
 	}
-	if confBudID.Valid {
-		t.Errorf("budget should be NULL when name is empty, got %v", confBudID)
+	// An empty submitted budget is the human clearing it: stored as 0, the
+	// explicit "none", so a classifier suggestion can't leak back in at push.
+	if !confBudID.Valid || confBudID.Int64 != 0 {
+		t.Errorf("budget should be explicit none (0) when cleared, got %v", confBudID)
 	}
 	if confDesc != "edited description" {
 		t.Errorf("confirmed_description=%q", confDesc)
@@ -957,5 +961,215 @@ func TestUI_SaveEdits_DepositNewRevenueSource(t *testing.T) {
 	}
 	if status != "ready_to_push" {
 		t.Errorf("status=%q, want ready_to_push (source was resolved, not unresolved)", status)
+	}
+}
+
+// flashOf returns the flash message a UI POST set, e.g. {"ok","edits saved"}.
+func flashOf(t *testing.T, resp *http.Response) (kind, msg string) {
+	t.Helper()
+	for _, c := range resp.Cookies() {
+		if c.Name == "tfe-flash" {
+			v, _ := url.QueryUnescape(c.Value)
+			var f flashCookie
+			if err := json.Unmarshal([]byte(v), &f); err == nil {
+				return f.Kind, f.Message
+			}
+		}
+	}
+	return "", ""
+}
+
+// TestUI_Save_MoneyOverrides: the review form's amount / date fields store a
+// statement-reconciled correction, and putting fold's own values back clears
+// it (NULL, not a copy), so an untouched row never looks "corrected".
+func TestUI_Save_MoneyOverrides(t *testing.T) {
+	u := newUITestHarness(t, AuthModeBypass)
+	form := url.Values{"amount": {"₹72.50"}, "date": {"2026-05-07"}, "time": {"10:15"}}
+	resp := u.do(t, "POST", "/admin/ui/staged/rev-1/save", form)
+	resp.Body.Close()
+	if kind, msg := flashOf(t, resp); kind != "ok" {
+		t.Fatalf("save flash = %q %q, want ok", kind, msg)
+	}
+	var (
+		amt sql.NullInt64
+		ts  sql.NullTime
+	)
+	if err := u.db.DB.QueryRow(`SELECT confirmed_amount_paise, confirmed_txn_timestamp FROM staged_fold_txns WHERE fold_uuid='rev-1'`).Scan(&amt, &ts); err != nil {
+		t.Fatal(err)
+	}
+	if !amt.Valid || amt.Int64 != 7250 {
+		t.Errorf("confirmed_amount_paise = %v, want 7250", amt)
+	}
+	if want := time.Date(2026, 5, 7, 4, 45, 0, 0, time.UTC); !ts.Valid || !ts.Time.Equal(want) {
+		t.Errorf("confirmed_txn_timestamp = %v, want %v (10:15 IST)", ts, want)
+	}
+
+	// The detail page shows the correction, flags it, and still shows what fold saw.
+	resp = u.do(t, "GET", "/admin/ui/staged/rev-1", nil)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	for _, want := range []string{`name="amount" value="72.50"`, `name="date" value="2026-05-07"`, `name="time" value="10:15"`, "corrected", "fold saw INR 70.00"} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("detail page missing %q", want)
+		}
+	}
+
+	// fold's own values (₹70.00 at 12:59 UTC = 18:29 IST) → no override.
+	resp = u.do(t, "POST", "/admin/ui/staged/rev-1/save", url.Values{"amount": {"70.00"}, "date": {"2026-05-08"}, "time": {"18:29"}})
+	resp.Body.Close()
+	if err := u.db.DB.QueryRow(`SELECT confirmed_amount_paise, confirmed_txn_timestamp FROM staged_fold_txns WHERE fold_uuid='rev-1'`).Scan(&amt, &ts); err != nil {
+		t.Fatal(err)
+	}
+	if amt.Valid || ts.Valid {
+		t.Errorf("fold's own values should clear the overrides, got amount=%v ts=%v", amt, ts)
+	}
+}
+
+// TestUI_Save_BadAmountIsUnresolved: an unparseable amount is reported and
+// stored nothing — and, like any unresolved field, blocks a push.
+func TestUI_Save_BadAmountIsUnresolved(t *testing.T) {
+	u := newUITestHarness(t, AuthModeBypass)
+	resp := u.do(t, "POST", "/admin/ui/staged/rev-1/push", url.Values{"amount": {"12,3a"}, "destination_name": {"Cake Palace"}, "source_name": {"HDFC Card"}})
+	resp.Body.Close()
+	if kind, msg := flashOf(t, resp); kind != "err" || !strings.Contains(msg, "amount") {
+		t.Errorf("flash = %q %q, want an error naming the amount", kind, msg)
+	}
+	var status string
+	var amt sql.NullInt64
+	if err := u.db.DB.QueryRow(`SELECT status, confirmed_amount_paise FROM staged_fold_txns WHERE fold_uuid='rev-1'`).Scan(&status, &amt); err != nil {
+		t.Fatal(err)
+	}
+	if status == "pushed" || amt.Valid {
+		t.Errorf("bad amount must not push or store: status=%q amount=%v", status, amt)
+	}
+}
+
+// TestUI_NewManualTransaction: a statement line fold never saw is added from
+// the review UI, lands ready to push with every field resolved like a normal
+// row, is left alone by the classifier, and pushes like any other row.
+func TestUI_NewManualTransaction(t *testing.T) {
+	u := newUITestHarness(t, AuthModeBypass)
+	form := url.Values{
+		"txn_type": {"withdrawal"}, "amount": {"14,988.00"}, "date": {"2026-06-01"}, "time": {"12:00"},
+		"source_name": {"HDFC Card"}, "destination_name": {"Cleartrip"}, "category_name": {"Snacks"},
+		"budget_name": {""}, "description": {"___ flight booking"}, "tags": {"trip"},
+		"narration": {"Cleartrip Private L Mumbai IN"},
+	}
+	resp := u.do(t, "POST", "/admin/ui/new", form)
+	resp.Body.Close()
+	loc := resp.Header.Get("Location")
+	if resp.StatusCode != http.StatusSeeOther || !strings.HasPrefix(loc, "/admin/ui/staged/manual-") {
+		t.Fatalf("create → %d %q, want 303 to the new row", resp.StatusCode, loc)
+	}
+	if kind, msg := flashOf(t, resp); kind != "ok" {
+		t.Errorf("flash = %q %q, want ok", kind, msg)
+	}
+	uuid := strings.TrimPrefix(loc, "/admin/ui/staged/")
+	var (
+		mode, status, narration, desc string
+		amt                           int64
+		src, cat                      sql.NullInt64
+		dstName, txnType              sql.NullString
+		ts                            time.Time
+	)
+	if err := u.db.DB.QueryRow(`
+		SELECT mode, status, narration, amount_paise, txn_timestamp, confirmed_source_account_id,
+		       confirmed_destination_account_name, confirmed_category_id, confirmed_description, confirmed_txn_type
+		FROM staged_fold_txns WHERE fold_uuid = ?`, uuid).
+		Scan(&mode, &status, &narration, &amt, &ts, &src, &dstName, &cat, &desc, &txnType); err != nil {
+		t.Fatalf("read manual row: %v", err)
+	}
+	if mode != "MANUAL" || status != "ready_to_push" || amt != 1498800 || narration != "Cleartrip Private L Mumbai IN" {
+		t.Errorf("row = mode %q status %q amount %d narration %q", mode, status, amt, narration)
+	}
+	if want := time.Date(2026, 6, 1, 6, 30, 0, 0, time.UTC); !ts.Equal(want) {
+		t.Errorf("txn_timestamp = %v, want %v (12:00 IST)", ts, want)
+	}
+	if !src.Valid || src.Int64 != 1 || dstName.String != "Cleartrip" || !cat.Valid || cat.Int64 != 6 || desc != "___ flight booking" || txnType.String != "withdrawal" {
+		t.Errorf("fields: src=%v dst=%q cat=%v desc=%q type=%q", src, dstName.String, cat, desc, txnType.String)
+	}
+
+	// The classifier never touches it, even when asked to.
+	resp = u.do(t, "POST", "/admin/ui/reclassify", url.Values{"fold_uuids": {uuid}, "back": {"/admin/ui/"}})
+	resp.Body.Close()
+	if err := u.db.DB.QueryRow(`SELECT status FROM staged_fold_txns WHERE fold_uuid = ?`, uuid).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "ready_to_push" {
+		t.Errorf("reclassify changed a manual row to %q", status)
+	}
+
+	// It is listed with its badge, and pushes like any row.
+	resp = u.do(t, "GET", "/admin/ui/?status=ready_to_push", nil)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(body), ">manual</span>") || !strings.Contains(string(body), "14988.00") {
+		t.Errorf("list should show the manual row with its badge and amount")
+	}
+	resp = u.do(t, "POST", "/admin/ui/staged/"+uuid+"/push", form)
+	resp.Body.Close()
+	if err := u.db.DB.QueryRow(`SELECT status FROM staged_fold_txns WHERE fold_uuid = ?`, uuid).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "pushed" {
+		t.Errorf("manual row status after push = %q, want pushed", status)
+	}
+}
+
+// TestUI_NewManualTransaction_Validates rejects a bad amount without adding
+// a row.
+func TestUI_NewManualTransaction_Validates(t *testing.T) {
+	u := newUITestHarness(t, AuthModeBypass)
+	resp := u.do(t, "POST", "/admin/ui/new", url.Values{"txn_type": {"withdrawal"}, "amount": {"-5"}, "date": {"2026-06-01"}, "description": {"x"}})
+	resp.Body.Close()
+	if resp.Header.Get("Location") != "/admin/ui/new" {
+		t.Errorf("should bounce back to the form, got %q", resp.Header.Get("Location"))
+	}
+	var n int
+	_ = u.db.DB.QueryRow(`SELECT COUNT(*) FROM staged_fold_txns WHERE mode = 'MANUAL'`).Scan(&n)
+	if n != 0 {
+		t.Errorf("a rejected form still added %d row(s)", n)
+	}
+}
+
+// TestUI_Index_CorrectedAmountAndDuplicateFlag: the list shows the amount
+// push will send, marks it corrected, and surfaces fold.money's own
+// is_possible_duplicate flag.
+func TestUI_Index_CorrectedAmountAndDuplicateFlag(t *testing.T) {
+	u := newUITestHarness(t, AuthModeBypass)
+	if _, err := u.db.DB.Exec(`
+		INSERT INTO staged_fold_txns (fold_uuid, raw_payload, amount_paise, currency, txn_timestamp,
+		    mode, type, narration, status, confirmed_amount_paise)
+		VALUES ('dup-1', '{"uuid":"dup-1","is_possible_duplicate":true}', 238475, 'INR', '2026-08-06T12:07:53Z',
+		        'CARD', 'OUTGOING', 'CARD/z/O''HARE', 'needs_review', 240000)`); err != nil {
+		t.Fatal(err)
+	}
+	resp := u.do(t, "GET", "/admin/ui/?status=needs_review", nil)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	for _, want := range []string{"INR 2400.00", ">corrected</span>", "fold saw INR 2384.75", ">possible duplicate</span>"} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("list missing %q", want)
+		}
+	}
+}
+
+// TestUI_Index_RendersDriverWrittenTimestamp: the list reads the effective
+// timestamp through COALESCE, which returns the raw text the SQLite driver
+// stored for a time.Time ("2026-07-26 00:35:13 +0000 UTC"), not a typed
+// time. It must still render as a proper <time datetime> for the browser's
+// local-time conversion — fold's real rows are all written this way.
+func TestUI_Index_RendersDriverWrittenTimestamp(t *testing.T) {
+	u := newUITestHarness(t, AuthModeBypass)
+	ts := time.Date(2026, 7, 26, 0, 35, 13, 0, time.UTC)
+	if _, err := u.db.DB.Exec(`INSERT INTO staged_fold_txns (fold_uuid, raw_payload, amount_paise, currency, txn_timestamp,
+		mode, type, narration, status) VALUES ('drv-1', '{}', 100, 'INR', ?, 'CARD', 'OUTGOING', 'n', 'needs_review')`, ts); err != nil {
+		t.Fatal(err)
+	}
+	resp := u.do(t, "GET", "/admin/ui/?status=needs_review", nil)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(body), `datetime="2026-07-26T00:35:13Z"`) {
+		t.Errorf("driver-written timestamp not rendered as <time datetime>: %s", snippet(string(body), "drv-1"))
 	}
 }

@@ -556,3 +556,80 @@ func TestFoldSync_ForeignCurrency(t *testing.T) {
 		t.Errorf("domestic must have no foreign side, got %v/%v", famt, fcur)
 	}
 }
+
+// TestFoldSync_RefreshesMoneyOnUnpushedRows: INSERT OR IGNORE used to freeze
+// a row's amount at first sight, so an amount that changed on fold's side
+// later (edited in the fold.money app, or a settled charge replacing its
+// pre-tip alert) never reached push. Now a not-yet-pushed row takes fold's
+// new amount; a pushed row is left exactly as it was sent to firefly; a human
+// correction (confirmed_*) is never touched; and each change is audited.
+func TestFoldSync_RefreshesMoneyOnUnpushedRows(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, filepath.Join(t.TempDir(), "staging.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	// Two rows fold staged from the pre-tip alert (USD 81.57 → ₹7876.40):
+	// one still in review (with a human-corrected description), one already pushed.
+	if _, err := db.DB.ExecContext(ctx, `
+		INSERT INTO staged_fold_txns (fold_uuid, raw_payload, amount_paise, currency, foreign_amount_paise, foreign_currency,
+		    txn_timestamp, mode, type, narration, merchant_extracted, status, confirmed_description, confirmed_amount_paise)
+		VALUES ('tip-open',   '{}', 787640, 'INR', 8157, 'USD', '2026-07-26T00:35:00Z', 'CARD', 'OUTGOING', 'CARD/x/SAAZ', 'saaz', 'needs_review', 'Dinner with ___', NULL),
+		       ('tip-pushed', '{}', 787640, 'INR', 8157, 'USD', '2026-07-26T00:35:00Z', 'CARD', 'OUTGOING', 'CARD/y/SAAZ', 'saaz', 'pushed',       'Dinner with ___', 907069)
+	`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// fold now reports the settled, tipped charge: USD 94.21 → ₹9070.69.
+	settled := func(uuid string) string {
+		return `{"uuid":"` + uuid + `","amount":9070.69,"source_amount":94.21,"currency":"INR","source_currency":"USD","txn_timestamp":"2026-07-26T00:35:00Z","mode":"CARD","type":"OUTGOING","narration":"CARD/x/SAAZ"}`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"transactions":[` + settled("tip-open") + `,` + settled("tip-pushed") + `]},"meta":{}}`))
+	}))
+	t.Cleanup(srv.Close)
+	tokens := func(_ context.Context) (fold.AccessToken, error) {
+		return fold.AccessToken{AccessToken: "ats", DeviceHash: "dh", UserUUID: "user-1", ExpiresAt: time.Now().Add(15 * time.Minute)}, nil
+	}
+	syncer := NewFoldSyncer(db, fold.NewClient(srv.URL, tokens, srv.Client()), slog.Default())
+
+	report, err := syncer.SyncRecent(ctx, 5)
+	if err != nil {
+		t.Fatalf("SyncRecent: %v", err)
+	}
+	if report.MoneyRefreshed != 1 {
+		t.Errorf("money_refreshed = %d, want 1 (only the unpushed row)", report.MoneyRefreshed)
+	}
+	read := func(uuid string) (amt, fx int64, desc string, conf sql.NullInt64) {
+		t.Helper()
+		if err := db.QueryRowContext(ctx, `SELECT amount_paise, foreign_amount_paise, confirmed_description, confirmed_amount_paise
+			FROM staged_fold_txns WHERE fold_uuid = ?`, uuid).Scan(&amt, &fx, &desc, &conf); err != nil {
+			t.Fatalf("read %s: %v", uuid, err)
+		}
+		return
+	}
+	if amt, fx, desc, _ := read("tip-open"); amt != 907069 || fx != 9421 || desc != "Dinner with ___" {
+		t.Errorf("unpushed row = ₹%d / USD %d / %q, want 907069 / 9421 / human description kept", amt, fx, desc)
+	}
+	if amt, fx, _, conf := read("tip-pushed"); amt != 787640 || fx != 8157 || !conf.Valid || conf.Int64 != 907069 {
+		t.Errorf("pushed row changed: ₹%d / USD %d / confirmed %v — it must stay as sent to firefly", amt, fx, conf)
+	}
+	var notes string
+	if err := db.QueryRowContext(ctx, `SELECT notes FROM audit_log WHERE action = 'fold_money_refresh' AND fold_uuid = 'tip-open'`).Scan(&notes); err != nil {
+		t.Fatalf("audit row: %v", err)
+	}
+	if !strings.Contains(notes, "INR 7876.40 (USD 81.57) -> INR 9070.69 (USD 94.21)") {
+		t.Errorf("audit notes = %q", notes)
+	}
+
+	// Unchanged upstream → no churn.
+	report2, err := syncer.SyncRecent(ctx, 5)
+	if err != nil {
+		t.Fatalf("SyncRecent (rerun): %v", err)
+	}
+	if report2.MoneyRefreshed != 0 {
+		t.Errorf("rerun money_refreshed = %d, want 0", report2.MoneyRefreshed)
+	}
+}

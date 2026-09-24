@@ -42,7 +42,7 @@
     .btn-secondary { background:transparent; color:var(--muted); border:1px solid var(--border); }
     form { margin: 0; }
     label { display:block; font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; margin-bottom:4px; margin-top:14px; }
-    input[type=text], input[type=number], textarea, select { width:100%; padding:8px 10px; background:var(--row); border:1px solid var(--border); border-radius:6px; color:var(--fg); font-family:inherit; font-size:13px; }
+    input[type=text], input[type=number], input[type=date], input[type=time], textarea, select { width:100%; padding:8px 10px; background:var(--row); border:1px solid var(--border); border-radius:6px; color:var(--fg); font-family:inherit; font-size:13px; }
     textarea { min-height: 60px; resize: vertical; }
     .grid { display:grid; grid-template-columns: 1fr 1fr; gap: 16px; }
     .card { background: var(--row); padding: 16px 20px; border:1px solid var(--border); border-radius:8px; margin-bottom:16px; }
@@ -56,6 +56,7 @@
     .chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
     .chip { display:inline-block; padding:3px 10px; border-radius:99px; background:rgba(124,92,255,0.12); color:var(--accent); border:1px solid rgba(124,92,255,0.3); font-size:11px; cursor:pointer; user-select:none; }
     .chip:hover { background:rgba(124,92,255,0.22); }
+    input[type=date], input[type=time] { color-scheme: dark; } /* light picker icons on the dark theme */
     small.hint { color:var(--muted); font-size:11px; display:block; margin-top:3px; }
     header nav a.active { color:var(--fg); font-weight:600; }
     /* Compact per-row status glyphs (reuse the .pill status colours). */
@@ -85,6 +86,7 @@
       <a href="/admin/ui/?status=ready_to_push"{{if eq .Status "ready_to_push"}} class="active"{{end}}>ready to push</a>
       <a href="/admin/ui/?status=pushed"{{if eq .Status "pushed"}} class="active"{{end}}>pushed</a>
       <a href="/admin/ui/?status=pending"{{if eq .Status "pending"}} class="active"{{end}}>pending</a>
+      <a href="/admin/ui/new"{{if eq .Status "new"}} class="active"{{end}}>+ add transaction</a>
     </nav>
   </header>
   <main>
