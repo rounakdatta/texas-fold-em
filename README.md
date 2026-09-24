@@ -92,6 +92,26 @@ name autocompletes backed by your real firefly history; per-merchant
 suggested tags appear as one-click chips; timestamps render in your
 device's local timezone. Push, skip, save edits — all one click.
 
+Reconciling against a card statement is done in the same place:
+
+- **Correct the money and the date.** A card alert fires at authorisation, so
+  what settles can differ — a US restaurant tip is added later, fold.money
+  converts foreign charges at its own rate, a statement posts a different day.
+  Each row's review form takes the statement's INR amount, the foreign amount
+  and an IST date/time; push (and *save & update firefly* for rows already
+  pushed) sends the corrected values. Rows show a *corrected* badge.
+- **Add a transaction fold never saw** (*+ add transaction*): a charge from
+  before a card was linked, a missed alert, a refund, reversal, fee or waiver.
+  It becomes a `MANUAL` row — pushed like any other, never touched by the
+  classifier.
+- **Clear a wrong suggestion.** Emptying the category or budget field now means
+  *none*; the classifier's suggestion no longer comes back at push time.
+- **Late changes on fold's side flow through.** When fold reports a new amount
+  for a row that isn't pushed yet (say, one edited in the fold.money app), the
+  next sync updates it and logs the change to the audit trail.
+- **Duplicates are flagged.** fold.money's own `is_possible_duplicate` shows as
+  a *possible duplicate* badge.
+
 ## Safety
 
 Three properties worth calling out:

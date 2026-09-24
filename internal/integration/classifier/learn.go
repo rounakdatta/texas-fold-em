@@ -89,6 +89,15 @@ func (c *Classifier) LearnFromPushed(ctx context.Context, foldUUID string) error
 		// Defensive: only learn from confirmed-and-pushed rows.
 		return nil
 	}
+	// A confirmed id of 0 is the review form's explicit "none" (a wrong
+	// suggestion the human cleared). Learn it as "no category / no budget",
+	// never as an account id 0.
+	if catID.Valid && catID.Int64 == 0 {
+		catID = sql.NullInt64{}
+	}
+	if budID.Valid && budID.Int64 == 0 {
+		budID = sql.NullInt64{}
+	}
 	merchantNorm := ""
 	if merchant.Valid {
 		merchantNorm = strings.TrimSpace(strings.ToLower(merchant.String))

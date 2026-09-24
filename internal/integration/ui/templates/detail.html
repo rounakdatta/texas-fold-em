@@ -2,7 +2,11 @@
 <p><a href="{{.Back}}">← back</a></p>
 
 <div class="card">
-  <h2>fold transaction</h2>
+  <h2>fold transaction
+    {{if .Row.Manual}}<span class="pill pill-pending" title="added by hand from a statement line fold never received">manual</span>{{end}}
+    {{if .Row.PossibleDuplicate}}<span class="pill pill-needs_review" title="fold.money flags this as a possible duplicate alert — often one to skip">possible duplicate</span>{{end}}
+    {{if .Row.Edited}}<span class="pill pill-ready_to_push" title="amount, foreign amount or date corrected below">corrected</span>{{end}}
+  </h2>
   <div class="grid">
     <div>
       <strong>uuid:</strong> <span class="tier">{{.Row.FoldUUID}}</span><br>
@@ -52,10 +56,35 @@
       <div>
         <label>category</label>
         <input type="text" name="category_name" value="{{.Edit.CategoryName}}" list="cat-options" autocomplete="off">
+        <small class="hint">clear it for no category</small>
       </div>
       <div>
         <label>budget</label>
         <input type="text" name="budget_name" value="{{.Edit.BudgetName}}" list="bud-options" autocomplete="off">
+        <small class="hint">clear it for no budget</small>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div>
+        <label>amount ({{.Row.Currency}})</label>
+        <input type="text" name="amount" value="{{.Edit.Amount}}" inputmode="decimal" autocomplete="off">
+        <small class="hint">what the statement billed · fold saw {{.Row.Currency}} {{.Row.AmountDisplay}}</small>
+      </div>
+      {{if .Edit.ForeignCurrency}}
+      <div>
+        <label>foreign amount ({{.Edit.ForeignCurrency}})</label>
+        <input type="text" name="foreign_amount" value="{{.Edit.ForeignAmount}}" inputmode="decimal" autocomplete="off">
+        <small class="hint">e.g. the tipped total — the card alert only saw {{.Row.ForeignDisplay}}</small>
+      </div>
+      {{end}}
+      <div>
+        <label>date (IST)</label>
+        <input type="date" name="date" value="{{.Edit.Date}}">
+      </div>
+      <div>
+        <label>time (IST)</label>
+        <input type="time" name="time" value="{{.Edit.Time}}">
       </div>
     </div>
 

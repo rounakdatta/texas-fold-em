@@ -1,0 +1,88 @@
+{{define "content"}}
+<p><a href="/admin/ui/">← back</a></p>
+
+<form method="post" action="/admin/ui/new">
+  <div class="card">
+    <h2>add a transaction fold never saw</h2>
+    <p style="color:var(--muted); margin-top:0">For a statement line with no fold row: a charge from before the card was linked to fold, a missed alert, a refund, reversal, fee or waiver. It is saved as <strong>ready to push</strong> — review it, then push as usual.</p>
+    <div class="grid">
+      <div>
+        <label>type</label>
+        <select name="txn_type">
+          <option value="withdrawal">withdrawal — money out</option>
+          <option value="deposit">deposit — money in (refund, reversal, cashback)</option>
+          <option value="transfer">transfer — between your own accounts</option>
+        </select>
+      </div>
+      <div>
+        <label>amount (INR)</label>
+        <input type="text" name="amount" inputmode="decimal" required autocomplete="off" placeholder="as billed on the statement">
+      </div>
+      <div>
+        <label>date (IST)</label>
+        <input type="date" name="date" value="{{.Date}}" required>
+      </div>
+      <div>
+        <label>time (IST)</label>
+        <input type="time" name="time" value="12:00">
+      </div>
+      <div>
+        <label>foreign amount (optional)</label>
+        <input type="text" name="foreign_amount" inputmode="decimal" autocomplete="off">
+      </div>
+      <div>
+        <label>foreign currency (optional)</label>
+        <input type="text" name="foreign_currency" maxlength="3" autocomplete="off" placeholder="USD">
+      </div>
+      <div>
+        <label>source account</label>
+        <input type="text" name="source_name" list="src-options" autocomplete="off" placeholder="the card or account the money left">
+        <small class="hint">withdrawal / transfer: your account · deposit: who paid you</small>
+      </div>
+      <div>
+        <label>destination account</label>
+        <input type="text" name="destination_name" list="dest-options" autocomplete="off" placeholder="the merchant, or your account">
+        <small class="hint">withdrawal: the merchant (a new name is created on push) · deposit / transfer: your account</small>
+      </div>
+      <div>
+        <label>category</label>
+        <input type="text" name="category_name" list="cat-options" autocomplete="off">
+      </div>
+      <div>
+        <label>budget</label>
+        <input type="text" name="budget_name" list="bud-options" autocomplete="off">
+      </div>
+    </div>
+
+    <label>description</label>
+    <textarea name="description" required placeholder="the firefly title"></textarea>
+
+    <label>tags (comma-separated)</label>
+    <input type="text" name="tags" list="tag-options" autocomplete="off">
+
+    <label>statement line</label>
+    <input type="text" name="narration" autocomplete="off" placeholder="e.g. CLEARTRIP PRIVATE LI Mumbai IN">
+    <small class="hint">copied from the statement; stored as the firefly notes, like fold's narration</small>
+
+    <div class="actions">
+      <button type="submit" class="btn">add transaction</button>
+    </div>
+  </div>
+
+  <datalist id="dest-options">
+    {{range .DestOptions}}<option value="{{.Name}}">{{end}}
+  </datalist>
+  <datalist id="src-options">
+    {{range .SourceOptions}}<option value="{{.Name}}">{{end}}
+  </datalist>
+  <datalist id="cat-options">
+    {{range .CategoryOptions}}<option value="{{.Name}}">{{end}}
+  </datalist>
+  <datalist id="bud-options">
+    {{range .BudgetOptions}}<option value="{{.Name}}">{{end}}
+  </datalist>
+  <datalist id="tag-options">
+    {{range .TagLibrary}}<option value="{{.}}">{{end}}
+  </datalist>
+</form>
+{{end}}
