@@ -84,9 +84,20 @@ func (h *Handler) refundCardFor(ctx context.Context, uuid string) (refundView, [
 		if v.Current == "" {
 			v.Options = append(v.Options, refundOption{Value: "", Label: "— not set —", Selected: true})
 		}
+		// Every exact / fold-grouped purchase, but only the few most recent
+		// larger ones — a busy merchant has hundreds of those, and a partial
+		// refund is almost always of a recent order.
+		const maxLarger = 5
+		larger := 0
 		listed := false
 		for _, c := range cands {
 			sel := c.Ref == v.Current
+			if !c.Exact && !c.GroupMatch && !sel {
+				if larger >= maxLarger {
+					continue
+				}
+				larger++
+			}
 			listed = listed || sel
 			v.Options = append(v.Options, refundOption{Value: c.Ref, Label: candidateLabel(c), Selected: sel})
 		}
@@ -133,8 +144,18 @@ func candidateLabel(c classifier.RefundCandidate) string {
 		parts = append(parts, "grouped by fold.money")
 	case c.Exact:
 		parts = append(parts, "exact amount")
+	case c.RemainingPaise < c.AmountPaise:
+		parts = append(parts, "partly refunded already — INR "+paiseToDecimal(c.RemainingPaise)+" left")
 	default:
-		parts = append(parts, "partial — INR "+paiseToDecimal(c.RemainingPaise)+" not yet refunded")
+		parts = append(parts, "larger — a partial refund?")
+	}
+	switch c.DaysBefore {
+	case 0:
+		parts = append(parts, "same day")
+	case 1:
+		parts = append(parts, "1 day before")
+	default:
+		parts = append(parts, fmt.Sprintf("%d days before", c.DaysBefore))
 	}
 	return strings.Join(parts, " · ")
 }

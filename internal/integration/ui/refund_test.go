@@ -191,3 +191,27 @@ func TestUI_LinkButton(t *testing.T) {
 		t.Errorf("after linking, the page should show the link and drop the button")
 	}
 }
+
+// A busy merchant has hundreds of larger orders; the picker lists every
+// exact one but only the five most recent larger ones.
+func TestUI_RefundPicker_CapsLargerCandidates(t *testing.T) {
+	u := newUITestHarness(t, AuthModeBypass)
+	seedRefundPair(t, u, "ready_to_push", "ready_to_push")
+	for i := 1; i <= 8; i++ {
+		if _, err := u.db.DB.Exec(`
+			INSERT INTO staged_fold_txns (fold_uuid, raw_payload, amount_paise, currency, txn_timestamp, mode, type, narration,
+			    merchant_extracted, status, proposed_source_account_id, proposed_destination_account_id, proposed_description)
+			VALUES (?, '{"account_id":"scapia-acc"}', ?, 'INR', ?, 'CARD', 'OUTGOING', 'CARD/x/Zomato/x/OUTGOING', 'zomato',
+			        'ready_to_push', 954, 11, ?)`,
+			"big-"+string(rune('0'+i)), 90000+int64(i), "2026-03-0"+string(rune('0'+i))+"T07:00:00Z", "order "+string(rune('0'+i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	page := body(t, u.do(t, http.MethodGet, "/admin/ui/staged/ref-1", nil))
+	if n := strings.Count(page, "larger — a partial refund?"); n != 5 {
+		t.Errorf("larger candidates listed = %d, want 5", n)
+	}
+	if !strings.Contains(page, `<option value="fold:buy-1" selected>`) || !strings.Contains(page, "1 day before") {
+		t.Errorf("the exact purchase (1 day before) should still be listed and selected")
+	}
+}
