@@ -104,8 +104,8 @@
     // (stamp: what the card says as it is dragged right)
     if (b.includes('hold')) return { kind: 'skip', label: 'Skip it', stamp: 'Skip' };
     // who before what: the title suggestions are the payee's past titles
-    if (b.includes('payee')) return { kind: 'payee', label: 'Who was paid?', stamp: 'Add payee' };
-    if (b.includes('source')) return { kind: 'editor', label: 'Pick the account', stamp: 'Pick account' };
+    if (b.includes('payee')) return c.direction === 'in' ? { kind: 'payee', label: 'Who paid?', stamp: 'Add payer' } : { kind: 'payee', label: 'Who was paid?', stamp: 'Add payee' };
+    if (b.includes('source')) return { kind: 'account', label: 'Pick the account', stamp: 'Pick account' };
     if (b.includes('title-empty')) return { kind: 'title', label: 'Add a title', stamp: 'Add title' };
     if (b.includes('title-blank')) return { kind: 'title', label: 'Fill in the blank', stamp: 'Fill in' };
     return { kind: 'send', label: 'Send', stamp: 'Send' };
@@ -149,8 +149,10 @@
     const mine = c.direction === 'in' ? c.to : c.from;
     const acct = c.direction === 'transfer'
       ? h('span', { class: 'acct' }, icon('swap'), h('span', { text: 'Transfer' }))
-      : h('span', { class: 'acct', title: mine.full || mine.name || '' },
-          icon(/card$/i.test(mine.name || '') ? 'card' : 'bank'), h('span', { text: mine.name || 'Which account?' }));
+      : !mine.name
+        ? h('button', { type: 'button', class: 'acct is-missing', 'data-act': 'account' }, icon('bank'), h('span', { text: 'Which account?' }))
+        : h('span', { class: 'acct', title: mine.full || mine.name || '' },
+            icon(/card$/i.test(mine.name || '') ? 'card' : 'bank'), h('span', { text: mine.name }));
     scroll.append(h('header', { class: 'card-top' }, acct, h('span', { class: 'when' }, c.day, ' · ', c.clock)));
 
     // The money and who it went to.
@@ -158,23 +160,27 @@
     hero.append(avatar(c));
     hero.append(h('div', { class: 'amount num' }, c.direction === 'in' ? '+' + c.amount : c.amount));
     const notes = [];
-    if (c.foreign) notes.push(c.foreign + ' abroad');
-    if (c.foldAmount) notes.push('from the statement · the alert said ' + c.foldAmount);
+    if (c.foreign) notes.push(c.foreign);
+    if (c.foldAmount) notes.push('the alert said ' + c.foldAmount);
     if (notes.length) hero.append(h('div', { class: 'amount-note' }, notes.join(' · ')));
     const who = h('div', { class: 'who' });
     if (c.direction === 'transfer') {
       who.append(h('span', { class: 'who-name', text: c.from.name }), h('span', { class: 'transfer-arrow', 'aria-label': 'to', text: '→' }), h('span', { class: 'who-name', text: c.to.name }));
     } else if (c.direction === 'in') {
-      who.append(h('span', { class: 'who-pre', text: 'from' }), h('span', { class: 'who-name', text: c.from.name || 'someone' }));
+      who.append(h('span', { class: 'who-pre', text: 'from' }),
+        h('button', { type: 'button', class: 'who-name' + (c.from.name ? '' : ' is-missing'), 'data-act': 'payee', text: c.from.name || 'Who paid?' }));
       if (c.from.place) who.append(h('span', { class: 'who-place', text: c.from.place }));
+      const g = guessFor(c);
+      if (g) who.append(h('span', { class: 'who-break', 'aria-hidden': 'true' }), h('button', { type: 'button', class: 'who-guess', 'data-act': 'guess', 'aria-label': 'Paid by ' + g + '? Use this name' }, h('span', { text: g + '?' })));
     } else {
       const missing = (c.blockers || []).includes('payee');
       who.append(h('span', { class: 'who-pre', text: 'to' }),
         h('button', { type: 'button', class: 'who-name' + (missing ? ' is-missing' : ''), 'data-act': 'payee', text: missing ? 'Who was paid?' : c.to.name }));
       if (c.to.place && !missing) who.append(h('span', { class: 'who-place', text: c.to.place }));
       // with no payee, the name on the alert is the likely answer: one tap takes it
-      if (missing && c.to.name) who.append(h('span', { class: 'who-break', 'aria-hidden': 'true' }), h('button', { type: 'button', class: 'who-guess', 'data-act': 'guess', 'aria-label': 'Paid to ' + c.to.name + '? Use this name' },
-        h('span', { text: c.to.name + '?' })));
+      const g = guessFor(c);
+      if (g) who.append(h('span', { class: 'who-break', 'aria-hidden': 'true' }), h('button', { type: 'button', class: 'who-guess', 'data-act': 'guess', 'aria-label': 'Paid to ' + g + '? Use this name' },
+        h('span', { text: g + '?' })));
     }
     hero.append(who);
     scroll.append(hero);
@@ -212,6 +218,16 @@
 
     attachDrag(el);
     return el;
+  }
+
+  // The likely other side when the card doesn't know it: the merchant on a
+  // spend's alert, the name on money in's bank line — offered, never assumed.
+  function guessFor(c) {
+    if (c.direction === 'out') return (c.blockers || []).includes('payee') && c.to.name ? c.to.name : '';
+    if (c.direction !== 'in' || c.from.name) return '';
+    const said = (c.bankSaid || '').trim();
+    if (!said || /^Statement:/.test(said) || /\d{4,}|@|\//.test(said) || said.length > 40) return '';
+    return said;
   }
 
   // Someone's note as a sentence: it ends with a stop, whatever they typed.
@@ -621,6 +637,7 @@
   function doStep(c, step) {
     if (step.kind === 'title') openTitle(c);
     else if (step.kind === 'payee') openPayee(c);
+    else if (step.kind === 'account') openAccount(c);
     else if (step.kind === 'editor') location.href = c.editUrl;
     else if (step.kind === 'skip') decide('skip');
   }
@@ -732,7 +749,8 @@
     else if (act === 'refund') openRefund(c);
     else if (act === 'skip') { bringToTop(c.uuid); decide('skip'); }
     else if (act === 'editor') location.href = c.editUrl;
-    else if (act === 'guess') edit(c, { payee: c.to.name }).catch(() => {});
+    else if (act === 'guess') { const g = guessFor(c); if (g) edit(c, { payee: g }).catch(() => {}); }
+    else if (act === 'account') openAccount(c);
   }
 
   // ---- saving an edit -------------------------------------------------------------
@@ -841,25 +859,30 @@
   }
 
   async function openPayee(c) {
-    const input = h('input', { type: 'search', placeholder: 'Who was paid?', 'aria-label': 'Payee', autocomplete: 'off' });
-    const missing = (c.blockers || []).includes('payee');
-    const current = missing ? '' : [c.to.name, c.to.place].filter(Boolean).join(', ');
+    const incoming = c.direction === 'in';
+    const other = incoming ? c.from : c.to;
+    const input = h('input', { type: 'search', placeholder: incoming ? 'Who paid you?' : 'Who was paid?', 'aria-label': incoming ? 'Payer' : 'Payee', autocomplete: 'off' });
+    const missing = incoming ? !c.from.name : (c.blockers || []).includes('payee');
+    const current = missing ? '' : [other.name, other.place].filter(Boolean).join(', ');
+    const guess = guessFor(c);
     input.value = current;
     const list = h('div', { class: 'pick-list', role: 'listbox' });
     const choose = async v => { closeSheet(); if (v !== current) await edit(c, { payee: v }).catch(() => {}); };
-    openSheet('Paid to', h('div', { class: 'fields' }, input, h('p', { class: 'hint', text: 'Pick one of your payees, or type a new name. Firefly creates it when this is sent.' }), list));
+    openSheet(incoming ? 'Paid by' : 'Paid to', h('div', { class: 'fields' }, input,
+      h('p', { class: 'hint', text: incoming ? 'Pick someone who has paid you before, or type a new name. Firefly creates it when this is sent.' : 'Pick one of your payees, or type a new name. Firefly creates it when this is sent.' }), list));
     setTimeout(() => input.select(), 40); // typing replaces the current name
     const [o, s] = await Promise.all([options(), suggestions(c)]);
+    const names = incoming ? (o.payers || []) : o.payees;
     const paint = () => {
       const q = input.value.trim();
       const ql = q.toLowerCase();
       list.replaceChildren();
       if (!ql || q === current) {
-        const past = (s.payees || []).filter(x => x.value !== c.to.name);
-        if (missing && c.to.name) {
-          list.append(h('div', { class: 'pick-group', text: 'On the alert' }));
-          const known = o.payees.find(p => p.toLowerCase() === c.to.name.toLowerCase());
-          list.append(pickButton(known || c.to.name, known ? '' : 'new payee', () => choose(known || c.to.name)));
+        const past = incoming ? [] : (s.payees || []).filter(x => x.value !== guess);
+        if (guess) {
+          list.append(h('div', { class: 'pick-group', text: incoming ? 'On the bank line' : 'On the alert' }));
+          const known = names.find(p => p.toLowerCase() === guess.toLowerCase());
+          list.append(pickButton(known || guess, known ? '' : incoming ? 'new payer' : 'new payee', () => choose(known || guess)));
         }
         if (past.length) {
           list.append(h('div', { class: 'pick-group', text: 'Before, for ' + (c.bankSaid || 'this bank name') }));
@@ -868,14 +891,14 @@
         return;
       }
       const starts = [], has = [];
-      for (const p of o.payees) {
+      for (const p of names) {
         const pl = p.toLowerCase();
         if (pl.startsWith(ql)) starts.push(p); else if (pl.includes(ql)) has.push(p);
         if (starts.length > 30) break;
       }
       const hits = starts.concat(has).slice(0, 30);
       const exact = hits.some(p => p.toLowerCase() === ql);
-      if (!exact) list.append(pickButton('Use “' + q + '”', 'new payee', () => choose(q)));
+      if (!exact) list.append(pickButton('Use “' + q + '”', incoming ? 'new payer' : 'new payee', () => choose(q)));
       for (const p of hits) list.append(pickButton(p, '', () => choose(p)));
     };
     input.addEventListener('input', paint);
@@ -885,6 +908,16 @@
 
   // The purchases a refund could be for (not the "none of these" choice).
   function refundChoices(c) { return ((c.refund && c.refund.options) || []).filter(o => o.value !== 'none'); }
+
+  function openAccount(c) {
+    const incoming = c.direction === 'in';
+    const list = h('div', { class: 'pick-list' });
+    const mine = incoming ? c.to : c.from;
+    const choose = async a => { closeSheet(); await edit(c, { account: a.name }).catch(() => {}); };
+    for (const a of accounts) list.append(pickButton(a.short, a.short !== a.name ? a.name : '', () => choose(a), a.name === mine.full || a.short === mine.name));
+    if (!accounts.length) list.append(h('p', { class: 'hint', text: 'No accounts yet — sync them from Firefly in the full editor.' }));
+    openSheet(incoming ? 'Which account did it come into?' : 'Which account paid?', h('div', { class: 'fields' }, list));
+  }
 
   function openRefund(c) {
     const list = h('div', { class: 'pick-list' });
@@ -901,6 +934,8 @@
     add('Edit the title', 'T', () => openTitle(c));
     add('Change the category', 'C', () => openCategory(c));
     if (c.direction === 'out') add('Change who was paid', 'P', () => openPayee(c));
+    if (c.direction === 'in') add('Change who paid', 'P', () => openPayee(c));
+    if (c.direction !== 'transfer') add(c.direction === 'in' ? 'Change the account it came into' : 'Change the account that paid', '', () => openAccount(c));
     if (c.refund) add('Which purchase it refunds', '', () => openRefund(c));
     add('Open the full editor', 'O', () => { location.href = c.editUrl; });
     if (state.pile === 'later') add('Move back to review', '', () => moveBack(c));
@@ -993,7 +1028,7 @@
       case 'arrowleft': e.preventDefault(); decide('later'); break;
       case 't': case 'e': e.preventDefault(); openTitle(c); break;
       case 'c': e.preventDefault(); openCategory(c); break;
-      case 'p': if (c.direction === 'out') { e.preventDefault(); openPayee(c); } break;
+      case 'p': if (c.direction !== 'transfer') { e.preventDefault(); openPayee(c); } break;
       case 'o': e.preventDefault(); location.href = c.editUrl; break;
       case 'm': e.preventDefault(); openMore(c); break;
       case 'u': e.preventDefault(); undo(); break;
