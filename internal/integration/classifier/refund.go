@@ -55,6 +55,8 @@ type RefundCandidate struct {
 	GroupMatch bool `json:"group_match,omitempty"`
 	// RemainingPaise is the purchase amount not yet claimed by other refunds.
 	RemainingPaise int64 `json:"remaining_paise"`
+	// DaysBefore: how long before the refund the purchase was made.
+	DaysBefore int `json:"days_before"`
 
 	foldAccountID string
 	cardAssetID   int64
@@ -74,6 +76,17 @@ type refundProbe struct {
 
 // refundLookback bounds how old a purchase a refund may point at.
 const refundLookback = 180 * 24 * time.Hour
+
+// How recent a purchase must be for a match to be CONFIDENT. A food or
+// grocery refund lands within days; an exact amount found months earlier is
+// as likely a coincidence (a regular order at a regular price) as the
+// purchase being refunded — the 31 Dec Zomato ₹602.75 refund matched a
+// 5 Nov order of the same price. Past these windows a match is only a
+// suggestion for review.
+const (
+	exactConfidentWithin   = 30 * 24 * time.Hour
+	partialSuggestedWithin = 7 * 24 * time.Hour
+)
 
 // refundPayload is the part of fold.money's raw transaction the refund logic
 // reads. fold.md documents refund_group_id / refund / remaining_refund_amount
@@ -196,16 +209,19 @@ func (c *Classifier) tierRefund(ctx context.Context, staged StagedRow) (Decision
 }
 
 // pickRefundCandidate chooses the purchase a refund most likely gives money
-// back for, with the decision's confidence and a one-line reason.
+// back for, with the decision's confidence and a one-line reason. Candidates
+// arrive best-first (group match, then exact amount, then most recent).
 //
-//   - fold.money grouped them (refund_group_id)          → that one, 1.0
-//   - exactly one purchase for exactly the amount        → it, 1.0
-//   - several identical purchases (a re-placed order)    → the latest, 0.9
-//     — any of them is equivalent in the books
-//   - only larger purchases (a partial refund)           → the latest, 0.6,
-//     for the human to confirm
-//   - nothing                                            → no original, 0.7
-//     (the deposit itself is still right; review to find the purchase)
+//   - fold.money grouped them (refund_group_id)             → that one, 1.0
+//   - exactly one exact-amount purchase within 30 days      → it, 1.0
+//   - several identical ones within 30 days (a re-placed
+//     order) — any is equivalent in the books              → the latest, 0.9
+//   - an exact amount, but older than 30 days               → suggested, 0.6
+//   - only a larger purchase within 7 days (items missing)  → suggested, 0.6
+//   - otherwise                                             → none, 0.6
+//
+// Below the auto-accept threshold the row goes to review, where the human
+// sees every candidate; the deposit itself is right either way.
 func pickRefundCandidate(cands []RefundCandidate) (*RefundCandidate, float64, string) {
 	if len(cands) == 0 {
 		return nil, 0.7, "no matching purchase on this card in the last 180 days"
@@ -215,19 +231,30 @@ func pickRefundCandidate(cands []RefundCandidate) (*RefundCandidate, float64, st
 			return &cands[i], 1.0, "fold.money groups it with this purchase"
 		}
 	}
-	var exact []int
-	for i := range cands {
-		if cands[i].Exact {
-			exact = append(exact, i)
+	var recentExact []int
+	firstExact, firstPartial := -1, -1
+	for i, c := range cands {
+		switch {
+		case c.Exact && firstExact < 0:
+			firstExact = i
+		case !c.Exact && firstPartial < 0:
+			firstPartial = i
+		}
+		if c.Exact && time.Duration(c.DaysBefore)*24*time.Hour <= exactConfidentWithin {
+			recentExact = append(recentExact, i)
 		}
 	}
 	switch {
-	case len(exact) == 1:
-		return &cands[exact[0]], 1.0, "one purchase for exactly this amount"
-	case len(exact) > 1:
-		return &cands[exact[0]], 0.9, fmt.Sprintf("%d identical purchases; picked the latest", len(exact))
+	case len(recentExact) == 1:
+		return &cands[recentExact[0]], 1.0, "one purchase for exactly this amount"
+	case len(recentExact) > 1:
+		return &cands[recentExact[0]], 0.9, fmt.Sprintf("%d identical purchases; picked the latest", len(recentExact))
+	case firstExact >= 0:
+		return &cands[firstExact], 0.6, fmt.Sprintf("an exact amount, but %d days earlier — check it", cands[firstExact].DaysBefore)
+	case firstPartial >= 0 && time.Duration(cands[firstPartial].DaysBefore)*24*time.Hour <= partialSuggestedWithin:
+		return &cands[firstPartial], 0.6, "no purchase for exactly this amount; suggested the latest larger one (partial refund?)"
 	}
-	return &cands[0], 0.6, "no purchase for exactly this amount; picked the latest larger one (partial refund?)"
+	return nil, 0.6, "no purchase for exactly this amount recently; pick one in review"
 }
 
 // refundDescription mirrors the user's own refund titles ("Refund for
@@ -460,6 +487,9 @@ func findRefundCandidates(ctx context.Context, db *sql.DB, p refundProbe) ([]Ref
 			continue
 		}
 		c.Exact = c.AmountPaise == p.AmountPaise
+		if !p.When.IsZero() && !c.When.IsZero() && p.When.After(c.When) {
+			c.DaysBefore = int(p.When.Sub(c.When).Hours() / 24)
+		}
 		kept = append(kept, c)
 	}
 	sort.SliceStable(kept, func(i, j int) bool {
@@ -567,7 +597,8 @@ func probeForStaged(ctx context.Context, db *sql.DB, foldUUID string) (refundPro
 	return p, true, nil
 }
 
-// MatchRefunds proposes the purchase for every refund that has none yet —
+// MatchRefunds proposes the purchase for every refund that has none yet, when
+// the match is confident —
 // rows classified before refunds were understood, rows the human already
 // edited (their other fields are untouched), and MANUAL deposits added from
 // a statement. Only proposed_refund_of changes: no status, no other field.
@@ -609,8 +640,12 @@ func (c *Classifier) MatchRefunds(ctx context.Context) (int, error) {
 		if err != nil {
 			return n, err
 		}
-		best, _, _ := pickRefundCandidate(cands)
-		if best == nil {
+		// Only a CONFIDENT match is proposed here: these rows may already be
+		// ready to push, and push turns the proposal into a firefly link
+		// without anyone looking. A weaker candidate is still offered in the
+		// review picker, for the human to choose.
+		best, conf, _ := pickRefundCandidate(cands)
+		if best == nil || conf < c.threshold {
 			continue
 		}
 		if _, err := c.db.ExecContext(ctx,

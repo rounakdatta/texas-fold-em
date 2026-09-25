@@ -90,8 +90,11 @@ Three things that fall out of this design and are worth knowing:
   for, with that purchase's tags. The purchase is found among fold's staged
   rows *and* firefly's own history — same card, same merchant, earlier, not
   already refunded in full; fold.money's own `refund_group_id` wins when it's
-  set. Exact matches are ready to push; partial refunds and refunds with no
-  purchase found go to review.
+  set. An exact match within 30 days is ready to push; an older exact match,
+  a partial refund (a larger purchase within a week) or no purchase found goes
+  to review with the candidates listed. Rows classified before this — or
+  edited by hand — get a purchase proposed only when the match is that
+  confident.
 
 ## The review UI
 

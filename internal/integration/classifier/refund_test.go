@@ -429,3 +429,53 @@ func TestPickRefundCandidate_Reasons(t *testing.T) {
 		t.Errorf("empty: %v %.2f %q", b, c, n)
 	}
 }
+
+// An exact amount months before the refund is a coincidence as often as
+// not (a regular order at a regular price): suggested, but for review.
+func TestTierRefund_OldExactMatchIsOnlySuggested(t *testing.T) {
+	db := seedRefundDB(t)
+	stagePurchase(t, db, "buy-old", "scapia-acc", 60275, "2025-11-05T07:00:00Z", "Apollo fish from Meghana", "", 954)
+	stageRefund(t, db, "ref-1", `{"account_id":"scapia-acc"}`, 60275, "2025-12-31T12:26:00Z")
+
+	classifyAll(t, db)
+	p := readProposal(t, db, "ref-1")
+	if p.refundOf != "fold:buy-old" || p.status != "needs_review" || p.conf >= DefaultConfidenceThreshold {
+		t.Errorf("refund_of/status/conf = %q/%q/%.2f, want the old exact one suggested, for review", p.refundOf, p.status, p.conf)
+	}
+}
+
+// A larger purchase more than a week before isn't even suggested.
+func TestTierRefund_OldLargerPurchaseNotSuggested(t *testing.T) {
+	db := seedRefundDB(t)
+	stagePurchase(t, db, "buy-1", "scapia-acc", 95500, "2026-03-09T07:00:00Z", "Kurta", "", 954)
+	stageRefund(t, db, "ref-1", `{"account_id":"scapia-acc"}`, 51000, "2026-03-17T14:28:00Z")
+
+	classifyAll(t, db)
+	p := readProposal(t, db, "ref-1")
+	if p.refundOf != "" || p.status != "needs_review" {
+		t.Errorf("refund_of/status = %q/%q, want none/needs_review", p.refundOf, p.status)
+	}
+}
+
+// The backfill touches rows that may already be ready to push, where push
+// would turn a proposal into a firefly link unreviewed — so it proposes only
+// confident matches.
+func TestMatchRefunds_OnlyConfidentMatches(t *testing.T) {
+	db := seedRefundDB(t)
+	stagePurchase(t, db, "buy-big", "scapia-acc", 244000, "2026-09-22T13:50:00Z", "Zepto order", "", 954)
+	if _, err := db.Exec(`
+		INSERT INTO staged_fold_txns (fold_uuid, raw_payload, amount_paise, currency, txn_timestamp, mode, type,
+		    narration, merchant_extracted, status, classifier_tier)
+		VALUES ('ref-part', '{"account_id":"scapia-acc"}', 17900, 'INR', '2026-09-23T16:53:52Z', 'CARD', 'INCOMING',
+		        'CARD/y/Zomato/x/INCOMING/Refund Received!', 'zomato', 'ready_to_push', 3)`); err != nil {
+		t.Fatal(err)
+	}
+	n, err := New(db, slog.Default(), DefaultConfidenceThreshold, 10).MatchRefunds(context.Background())
+	if err != nil || n != 0 {
+		t.Fatalf("MatchRefunds = %d, %v; want 0 (a partial match is only a suggestion)", n, err)
+	}
+	cands, err := RefundCandidatesFor(context.Background(), db, "ref-part")
+	if err != nil || len(cands) != 1 || cands[0].Ref != "fold:buy-big" || cands[0].DaysBefore != 1 {
+		t.Errorf("the review picker should still offer it: %+v, %v", cands, err)
+	}
+}
