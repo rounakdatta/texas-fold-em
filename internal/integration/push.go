@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rounakdatta/texas-fold-em/internal/integration/firefly"
@@ -61,6 +62,10 @@ type Pusher struct {
 	readOnly    bool
 	learner     Learner // optional; when set, push success triggers reinforcement
 	eagerSyncer *Syncer // optional; when set, push success mirrors the just-created firefly journal into firefly_txns
+
+	// firefly's "Refund" link-type id, looked up on first use (refund_link.go).
+	linkMu         sync.Mutex
+	refundLinkType int64
 }
 
 // NewPusher constructs a Pusher with no learner.
@@ -204,6 +209,7 @@ func (p *Pusher) Push(ctx context.Context, foldUUID string, confirm bool) (PushR
 			return PushReport{}, fmt.Errorf("mark pushed (dedup hit): %w", err)
 		}
 		p.audit(ctx, "firefly_dedup_hit", row.FoldUUID, journalID, body, 200, "external_id already exists in firefly")
+		p.linkRefunds(ctx, row.FoldUUID)
 		return PushReport{
 			FoldUUID:     row.FoldUUID,
 			Action:       "deduped",
@@ -281,6 +287,10 @@ func (p *Pusher) Push(ctx context.Context, foldUUID string, confirm bool) (PushR
 			p.log.Warn("learner failed; push still succeeded", "fold_uuid", row.FoldUUID, "err", err)
 		}
 	}
+
+	// Refunds: record "this refunds that purchase" in firefly as a native
+	// Refund link, in whichever direction this push completed.
+	p.linkRefunds(ctx, row.FoldUUID)
 
 	return PushReport{
 		FoldUUID:       row.FoldUUID,
@@ -611,6 +621,7 @@ func (p *Pusher) Update(ctx context.Context, foldUUID string) (PushReport, error
 	if p.learner != nil {
 		_ = p.learner.LearnFromPushed(ctx, foldUUID)
 	}
+	p.linkRefunds(ctx, foldUUID)
 	return PushReport{
 		FoldUUID:       foldUUID,
 		Action:         "updated",

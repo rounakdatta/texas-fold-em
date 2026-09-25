@@ -132,6 +132,30 @@ func (c *Client) ListBudgets(ctx context.Context, page, limit int) (BudgetListRe
 	return resp, nil
 }
 
+// ListLinkTypes returns firefly's transaction-link types (built-in and
+// user-defined). There are only a handful, so one page is always enough.
+func (c *Client) ListLinkTypes(ctx context.Context) ([]LinkType, error) {
+	q := url.Values{}
+	q.Set("limit", "100")
+	var resp LinkTypeListResponse
+	if err := c.get(ctx, "/api/v1/link-types", q, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Data, nil
+}
+
+// ListJournalLinks returns every transaction link that touches a journal,
+// in either direction. Used to make link creation idempotent.
+func (c *Client) ListJournalLinks(ctx context.Context, journalID int64) ([]TransactionLink, error) {
+	q := url.Values{}
+	q.Set("limit", "100")
+	var resp TransactionLinkListResponse
+	if err := c.get(ctx, fmt.Sprintf("/api/v1/transaction-journals/%d/links", journalID), q, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Data, nil
+}
+
 // get is the single point through which all HTTP calls flow. It is the
 // reason this package's read-only contract is enforced: nothing in this
 // file calls http.Client.Do directly with a non-GET method.

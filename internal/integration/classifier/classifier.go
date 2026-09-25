@@ -59,6 +59,7 @@ const (
 	TierFTSVote        Tier = 2
 	TierLLM            Tier = 3
 	TierHumanReview    Tier = 4
+	// TierRefund (5) is declared in refund.go.
 )
 
 // Decision is what ClassifyOne produces. The pointer ID fields are
@@ -82,7 +83,11 @@ type Decision struct {
 	BudgetName             string
 	Description            string
 	Tags                   []string
-	Evidence               Evidence
+	// RefundOf, for a refund, references the purchase it gives money back
+	// for ("fold:<uuid>" or "journal:<id>", see refund.go). Push turns it
+	// into firefly's native "Refund" transaction link.
+	RefundOf string
+	Evidence Evidence
 }
 
 // Evidence is the structured "why" — what the UI displays alongside
@@ -95,6 +100,8 @@ type Evidence struct {
 	FTSHits            []FTSHitView   `json:"fts_hits,omitempty"`
 	Note               string         `json:"note,omitempty"`
 	Tags               []string       `json:"tags,omitempty"`
+	// RefundCandidates are the purchases a refund could be for, best first.
+	RefundCandidates []RefundCandidate `json:"refund_candidates,omitempty"`
 }
 
 // LookupHitView is a denormalised view of merchant_lookup for the UI.
@@ -211,6 +218,14 @@ func (c *Classifier) SetConcurrency(n int) { c.concurrency = n }
 //   - LLM configured but errored / declined → use Tier 1, else Tier 2,
 //     else Tier 4. (Same priority — Tier 3 enriches, never breaks.)
 func (c *Classifier) ClassifyOne(ctx context.Context, staged StagedRow) (Decision, error) {
+	// Refunds first, and deterministically — see refund.go for why they
+	// never reach the merchant lookup or the LLM.
+	if d, ok, err := c.tierRefund(ctx, staged); err != nil {
+		return Decision{}, fmt.Errorf("refund tier: %w", err)
+	} else if ok {
+		return d, nil
+	}
+
 	var tier1Hint, tier2Hint *Decision
 
 	if d, ok, err := c.tierOneMerchantLookup(ctx, staged); err != nil {
@@ -273,6 +288,12 @@ func (c *Classifier) ClassifyOne(ctx context.Context, staged StagedRow) (Decisio
 // only on unexpected DB failures.
 func (c *Classifier) tierOneMerchantLookup(ctx context.Context, staged StagedRow) (Decision, bool, error) {
 	if staged.MerchantExtracted == "" {
+		return Decision{}, false, nil
+	}
+	// merchant_lookup is built from WITHDRAWALS (money going to the
+	// merchant). For money coming IN its destination/source are backwards,
+	// so it has nothing to say — using it booked refunds as spends.
+	if staged.Type == "INCOMING" {
 		return Decision{}, false, nil
 	}
 	row, err := c.queryMerchantLookup(ctx, staged.MerchantExtracted)
@@ -604,6 +625,7 @@ func (c *Classifier) resetToPending(ctx context.Context, foldUUID string) error 
 		    proposed_description            = NULL,
 		    proposed_tags_json              = NULL,
 		    proposed_txn_type               = NULL,
+		    proposed_refund_of              = NULL,
 		    classified_at                   = NULL,
 		    updated_at                      = CURRENT_TIMESTAMP
 		WHERE fold_uuid = ?
@@ -667,6 +689,7 @@ func (c *Classifier) ApplyDecision(ctx context.Context, foldUUID string, d Decis
 		    proposed_description              = ?,
 		    proposed_tags_json                = COALESCE(NULLIF(?, ''), proposed_tags_json),
 		    proposed_txn_type                 = ?,
+		    proposed_refund_of                = ?,
 		    classified_at                     = CURRENT_TIMESTAMP,
 		    updated_at                        = CURRENT_TIMESTAMP
 		WHERE fold_uuid = ?
@@ -682,8 +705,9 @@ func (c *Classifier) ApplyDecision(ctx context.Context, foldUUID string, d Decis
 		nullableInt64(d.CategoryID),
 		nullableInt64(d.BudgetID),
 		nullableString(d.Description),
-		tagsJSON,                  // proposed_tags_json (COALESCE preserves existing on empty)
-		nullableString(d.TxnType), // proposed_txn_type
+		tagsJSON,                   // proposed_tags_json (COALESCE preserves existing on empty)
+		nullableString(d.TxnType),  // proposed_txn_type
+		nullableString(d.RefundOf), // proposed_refund_of
 		foldUUID,
 	)
 	if err != nil {
@@ -701,6 +725,7 @@ type ClassifyReport struct {
 	Deferred       int           `json:"deferred"` // LLM unavailable; row left pending for retry next cycle
 	Tier1Hits      int           `json:"tier1_hits"`
 	Tier2Hits      int           `json:"tier2_hits"`
+	RefundHits     int           `json:"refund_hits"`
 	Duration       time.Duration `json:"duration"`
 }
 
@@ -928,8 +953,23 @@ func (c *Classifier) classifyAndApply(ctx context.Context, s StagedRow, report *
 	//   - fold card → no confident match   ⇒ propose the fold card name,
 	//       which ApplyDecision routes to review as a new/unmatched card
 	//       (never a wrong existing asset)
-	// For INCOMING the account_id is the *receiving* account — a
-	// destination concern — so we leave source to the LLM's revenue pick.
+	// For INCOMING the account_id is the *receiving* account: the same
+	// ground truth, on the destination side. (Without this, a refund or a
+	// credit could land on whichever asset a tier guessed — refunds were
+	// proposed onto "Axis Bank Ace" and even "CDSL".) The source of an
+	// INCOMING row is the payer, which stays the tiers' call.
+	if s.Type == "INCOMING" {
+		if fa, _ := lookupFoldAccountForStaged(ctx, c.db, s.RawPayload); fa != nil && fa.Name != "" {
+			assets, _ := listFireflyAssetsFromMirror(ctx, c.db)
+			if id, name, ok := matchFoldCardToFireflyAsset(fa, assets); ok {
+				d.DestinationAccountID = &id
+				d.DestinationAccountName = name
+			} else {
+				d.DestinationAccountID = nil
+				d.DestinationAccountName = fa.Name
+			}
+		}
+	}
 	if s.Type == "OUTGOING" {
 		if fa, _ := lookupFoldAccountForStaged(ctx, c.db, s.RawPayload); fa != nil && fa.Name != "" {
 			assets, _ := listFireflyAssetsFromMirror(ctx, c.db)
@@ -951,6 +991,8 @@ func (c *Classifier) classifyAndApply(ctx context.Context, s StagedRow, report *
 		report.Tier1Hits++
 	case TierFTSVote:
 		report.Tier2Hits++
+	case TierRefund:
+		report.RefundHits++
 	}
 	if d.Tier == TierHumanReview || d.Confidence < c.threshold {
 		report.NeedsReview++

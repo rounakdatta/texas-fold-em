@@ -6,6 +6,7 @@
     {{if .Row.Manual}}<span class="pill pill-pending" title="added by hand from a statement line fold never received">manual</span>{{end}}
     {{if .Row.PossibleDuplicate}}<span class="pill pill-needs_review" title="fold.money flags this as a possible duplicate alert — often one to skip">possible duplicate</span>{{end}}
     {{if .Row.Edited}}<span class="pill pill-ready_to_push" title="amount, foreign amount or date corrected below">corrected</span>{{end}}
+    {{if .Row.IsRefund}}<span class="pill pill-pushed" title="gives money back for a purchase — see “refund of” below">refund</span>{{end}}
   </h2>
   <div class="grid">
     <div>
@@ -21,7 +22,26 @@
       <div class="narration">{{.Row.Narration}}</div>
     </div>
   </div>
+  {{if .Row.RawPayload}}
+  <details style="margin-top:10px">
+    <summary style="cursor:pointer; color:var(--muted); font-size:12px">fold.money's raw payload</summary>
+    <pre>{{.Row.RawPayload}}</pre>
+  </details>
+  {{end}}
 </div>
+
+{{if .RefundedBy}}
+<div class="card">
+  <h2>refunded by</h2>
+  {{range .RefundedBy}}
+  <div>
+    <a href="/admin/ui/staged/{{.FoldUUID}}">{{.When}} · +INR {{.Amount}} · {{.Description}}</a>
+    <span class="pill pill-{{.Status}}">{{.Status}}</span>
+    {{if .LinkID}}<span class="pill pill-pushed" title="firefly link {{.LinkID}}">linked in firefly</span>{{end}}
+  </div>
+  {{end}}
+</div>
+{{end}}
 
 <div class="card evidence-card">
   <h2>classifier decision</h2>
@@ -88,6 +108,16 @@
       </div>
     </div>
 
+    {{if .Refund.Show}}
+    <label>refund of</label>
+    <select name="refund_of">
+      {{range .Refund.Options}}<option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>{{end}}
+    </select>
+    <small class="hint">the purchase this gives money back for{{if .Refund.Current}}{{if .Refund.Confirmed}} (your pick){{else}} (the classifier's pick){{end}}{{end}} — push records it in firefly as a native “Refund” link, so the purchase shows “is (partially) refunded by” this.
+      {{if .Refund.LinkID}}<strong style="color:var(--ok)">✓ linked in firefly (link {{.Refund.LinkID}})</strong> — changing it here won't move that link.{{end}}
+      {{if .Refund.Waiting}}The link is made when that purchase is pushed.{{end}}</small>
+    {{end}}
+
     <label>description</label>
     <textarea name="description">{{.Edit.Description}}</textarea>
 
@@ -110,6 +140,14 @@
       {{end}}
     </div>
   </div>
+
+  {{if .Refund.CanLink}}
+  <div class="card">
+    <strong>not linked in firefly yet</strong> — this refund and its purchase are both in firefly.
+    <button type="submit" formaction="/admin/ui/staged/{{.Row.FoldUUID}}/link" formnovalidate class="btn">link in firefly as a refund</button>
+    <small class="hint">creates the firefly “Refund” link only; nothing else is sent</small>
+  </div>
+  {{end}}
 
   <datalist id="dest-options">
     {{range .DestOptions}}<option value="{{.Name}}">{{end}}

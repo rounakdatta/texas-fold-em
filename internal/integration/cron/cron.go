@@ -124,6 +124,15 @@ func runOneCycle(
 			"examined", report.Examined,
 			"auto", report.AutoClassified,
 			"review", report.NeedsReview,
+			"refunds", report.RefundHits,
 		)
+		// Point refunds at their purchases where nothing has yet — rows
+		// classified before refunds were understood, hand-edited rows, and
+		// manual deposits. Cheap SQL; only proposed_refund_of changes.
+		if n, err := cls.MatchRefunds(ctx); err != nil {
+			log.Warn("refund matching error (cycle continues)", "err", err)
+		} else if n > 0 {
+			log.Info("periodic refund matching", "matched", n)
+		}
 	}
 }

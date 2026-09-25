@@ -162,3 +162,41 @@ type BudgetListResponse struct {
 	Data []Budget `json:"data"`
 	Meta Meta     `json:"meta"`
 }
+
+// LinkType is one of firefly's transaction-link types. Firefly ships four
+// built-ins (Related, Refund, Paid, Reimbursement); "Refund" reads
+// "(partially) refunds" from the refund's side and "is (partially)
+// refunded by" from the original purchase's side.
+type LinkType struct {
+	ID         string `json:"id"`
+	Attributes struct {
+		Name    string `json:"name"`
+		Inward  string `json:"inward"`
+		Outward string `json:"outward"`
+	} `json:"attributes"`
+}
+
+type LinkTypeListResponse struct {
+	Data []LinkType `json:"data"`
+	Meta Meta       `json:"meta"`
+}
+
+// TransactionLink is a link between two journals. On the wire InwardID is
+// the link's SOURCE journal and OutwardID its DESTINATION: firefly shows the
+// type's outward phrase on the source ("(partially) refunds …") and the
+// inward phrase on the destination ("is (partially) refunded by …") —
+// see TransactionLinkTransformer and TransactionGroupRepository::getLinks.
+type TransactionLink struct {
+	ID         string `json:"id"`
+	Attributes struct {
+		LinkTypeID string `json:"link_type_id"`
+		InwardID   string `json:"inward_id"`
+		OutwardID  string `json:"outward_id"`
+		Notes      string `json:"notes"`
+	} `json:"attributes"`
+}
+
+type TransactionLinkListResponse struct {
+	Data []TransactionLink `json:"data"`
+	Meta Meta              `json:"meta"`
+}

@@ -81,7 +81,17 @@ Three things that fall out of this design and are worth knowing:
   merchant before, the LLM grounds source-account inference on fold's
   own knowledge of which card or account actually paid — so an
   unfamiliar restaurant on your travel card doesn't end up assigned to
-  whichever card you happen to use most often.
+  whichever card you happen to use most often. Money coming *in* lands on
+  the account fold says received it, by the same rule.
+- **It understands refunds.** A card refund ("Refund Received!") skips the
+  ladder: it becomes a firefly **deposit** from the merchant's revenue account
+  (the one named like its expense account) into the card that was charged,
+  category *Refund*, titled "Refund for …" after the purchase it gives back
+  for, with that purchase's tags. The purchase is found among fold's staged
+  rows *and* firefly's own history — same card, same merchant, earlier, not
+  already refunded in full; fold.money's own `refund_group_id` wins when it's
+  set. Exact matches are ready to push; partial refunds and refunds with no
+  purchase found go to review.
 
 ## The review UI
 
@@ -115,6 +125,14 @@ Reconciling against a card statement is done in the same place:
   that moves money on that account — what it paid *and* what came into it (a
   card's bill payments, refunds, reversals) — with money in shown as `+`. The
   list's category column shows the category push will actually send.
+- **Refunds are linked in firefly.** A refund's review form has a *refund of*
+  picker (the classifier's pick, other candidates, or *none*). Firefly is the
+  ledger, so the relationship is recorded there, as firefly's native **Refund**
+  transaction link: the purchase shows "is (partially) refunded by" the refund.
+  Push creates the link as soon as both sides are in firefly — pushing a
+  purchase also links any refunds that were waiting for it — and a *link in
+  firefly* button retries one. Rows carry *refund* / *refunded* badges, and the
+  detail page shows fold.money's raw payload.
 
 ## Safety
 
