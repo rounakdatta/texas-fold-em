@@ -94,6 +94,7 @@
     out: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17 17 7M9 7h8v8" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>',
     in: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 7 7 17M15 17H7V9" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>',
     close: '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>',
+    sync: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.4 13.5a7.5 7.5 0 0 1-13.1 3.6M4.6 10.5a7.5 7.5 0 0 1 13.1-3.6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M18.4 3.2v4.2h-4.2M5.6 20.8v-4.2h4.2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   };
   const icon = name => { const t = document.createElement('template'); t.innerHTML = SVG[name]; return t.content.firstChild; };
 
@@ -886,7 +887,9 @@
 
   // ---- sheets -------------------------------------------------------------------
   let sheetDone = null;
+  let sheetRepaint = null; // the open picker's redraw, for when Firefly's accounts arrive
   function openSheet(title, body, foot) {
+    sheetRepaint = null;
     // (replaceChildren would print a null as the text "null")
     sheet.replaceChildren(...[
       h('div', { class: 'sheet-grab', 'aria-hidden': 'true' }),
@@ -900,19 +903,57 @@
   }
   function closeSheet() { if (sheet.open) sheet.close(); }
   sheet.addEventListener('click', e => { if (e.target === sheet) closeSheet(); });
-  sheet.addEventListener('close', () => { if (sheetDone) { const f = sheetDone; sheetDone = null; f(); } });
+  sheet.addEventListener('close', () => {
+    // (a close arrives after the fact: going from More to a picker closes one
+    // sheet and opens the next before this runs, and that one's redraw stays)
+    if (!sheet.open) sheetRepaint = null;
+    if (sheetDone) { const f = sheetDone; sheetDone = null; f(); }
+  });
 
   function pickButton(label, hint, onpick, selected, stacked) {
     return h('button', { type: 'button', class: 'pick' + (stacked ? ' pick-stacked' : ''), 'aria-selected': selected ? 'true' : false, onclick: onpick },
-      h('span', { class: 'pick-main', text: label }), hint ? h('span', { class: 'pick-hint', text: hint }) : null);
+      h('span', { class: 'pick-main', text: label }),
+      // (a hint that starts "new" is an account that just arrived from Firefly)
+      hint ? h('span', { class: 'pick-hint' + (/^new\b/.test(hint) ? ' is-new' : ''), text: hint, title: hint }) : null);
   }
+
+  // ---- accounts from Firefly, in the pickers ---------------------------------------
+  // fold's pickers offer its copy of Firefly's accounts, and one made in
+  // Firefly a minute ago isn't in it yet — noticed exactly here, while looking
+  // for it. So the end of each account picker says when the copy was last
+  // made and makes it again, in place; the list redraws with what arrived
+  // marked new. (app.js runs the sync, whichever button starts it.)
+  const firefly = () => window.foldAccounts;
+  function newHint(name, hint) {
+    const A = firefly();
+    return A && A.isNew(name) ? (hint ? 'new · ' + hint : 'new') : hint;
+  }
+  function syncFoot() {
+    const A = firefly();
+    if (!A || !A.available) return null;
+    const busy = !!A.running;
+    return h('div', { class: 'sync-foot' },
+      h('p', { class: 'sync-note', 'data-sync-status': '', 'aria-live': 'polite', text: busy ? 'Syncing with Firefly…' : A.lastLine() }),
+      h('button', { type: 'button', class: 'sync-now' + (busy ? ' is-busy' : ''), 'data-sync-accounts': '', disabled: busy },
+        icon('sync'), h('span', { text: 'Sync now' })));
+  }
+  document.addEventListener('fold:accounts', async e => {
+    if (e.detail.phase !== 'done') return;
+    state.options = null; // every picker asks afresh
+    if (!(sheet.open && sheetRepaint)) return;
+    await sheetRepaint();
+    // what arrived is what was being looked for: bring it into view
+    const first = sheet.querySelector('.pick-hint.is-new');
+    if (first) first.closest('.pick').scrollIntoView({ block: 'nearest', behavior: reduceMotion ? 'auto' : 'smooth' });
+  });
 
   async function suggestions(c) {
     try { return await api('rows/' + c.uuid + '/suggest'); } catch (_) { return { titles: [], categories: [] }; }
   }
   async function options() {
     if (!state.options) {
-      try { state.options = await api('options'); } catch (_) { state.options = { categories: [], payees: [] }; }
+      const A = firefly();
+      try { state.options = await api('options' + (A && A.at ? '?v=' + encodeURIComponent(A.at) : '')); } catch (_) { state.options = { categories: [], payees: [] }; }
     }
     return state.options;
   }
@@ -1024,24 +1065,30 @@
     openSheet(incoming ? 'From which account?' : 'To which account?', h('div', { class: 'fields' },
       h('p', { class: 'hint', text: switching
         ? (incoming ? 'Money from another of your own accounts is a transfer. Pick which one.' : 'Money to another of your own accounts is a transfer. Pick which one.')
-        : 'A transfer moves money between two of your own accounts.' }), list));
-    const [o, s] = await Promise.all([options(), suggestions(c)]);
-    const ownFull = fullName(own).toLowerCase();
-    const accts = (o.accounts || []).filter(a => !ownFull || a.name.toLowerCase() !== ownFull);
-    const byName = new Map(accts.map(a => [a.name.toLowerCase(), a]));
-    const current = c.type === 'transfer' ? fullName(other).toLowerCase() : '';
-    const usual = (s.accounts || []).map(x => ({ a: byName.get(x.value.toLowerCase()), hint: x.hint })).filter(x => x.a);
-    const shown = new Set();
-    if (usual.length) list.append(h('div', { class: 'pick-group', text: incoming ? 'Usually from' : 'Usually to' }));
-    for (const x of usual) {
-      shown.add(x.a.name);
-      list.append(pickButton(x.a.short, x.hint, () => choose(x.a), x.a.name.toLowerCase() === current));
-    }
-    const rest = accts.filter(a => !shown.has(a.name));
-    if (usual.length && rest.length) list.append(h('div', { class: 'pick-group', text: 'Your other accounts' }));
-    for (const a of rest) list.append(pickButton(a.short, '', () => choose(a), a.name.toLowerCase() === current));
-    if (!accts.length) list.append(h('p', { class: 'hint', text: 'No other accounts yet — they come from Firefly.' }));
-    for (const b of list.querySelectorAll('.pick')) b.setAttribute('role', 'option');
+        : 'A transfer moves money between two of your own accounts.' }), list, syncFoot()));
+    const sugg = suggestions(c);
+    const paint = async () => {
+      const [o, s] = await Promise.all([options(), sugg]);
+      const ownFull = fullName(own).toLowerCase();
+      const accts = (o.accounts || []).filter(a => !ownFull || a.name.toLowerCase() !== ownFull);
+      const byName = new Map(accts.map(a => [a.name.toLowerCase(), a]));
+      const current = c.type === 'transfer' ? fullName(other).toLowerCase() : '';
+      const usual = (s.accounts || []).map(x => ({ a: byName.get(x.value.toLowerCase()), hint: x.hint })).filter(x => x.a);
+      const shown = new Set();
+      list.replaceChildren();
+      if (usual.length) list.append(h('div', { class: 'pick-group', text: incoming ? 'Usually from' : 'Usually to' }));
+      for (const x of usual) {
+        shown.add(x.a.name);
+        list.append(pickButton(x.a.short, newHint(x.a.name, x.hint), () => choose(x.a), x.a.name.toLowerCase() === current));
+      }
+      const rest = accts.filter(a => !shown.has(a.name));
+      if (usual.length && rest.length) list.append(h('div', { class: 'pick-group', text: 'Your other accounts' }));
+      for (const a of rest) list.append(pickButton(a.short, newHint(a.name, ''), () => choose(a), a.name.toLowerCase() === current));
+      if (!accts.length) list.append(h('p', { class: 'hint', text: 'No other accounts yet — they come from Firefly.' }));
+      for (const b of list.querySelectorAll('.pick')) b.setAttribute('role', 'option');
+    };
+    sheetRepaint = paint;
+    await paint();
   }
 
   // Who was paid, or who paid: a payee or a payer — never one of your own
@@ -1064,12 +1111,20 @@
     const hint = switching
       ? (incoming ? 'Pick who paid you, or type a new name, and it becomes a deposit.' : 'Pick who was paid, or type a new name, and it becomes a withdrawal.')
       : (incoming ? 'Pick someone who has paid you before, or type a new name. Firefly creates it when this is sent.' : 'Pick one of your payees, or type a new name. Firefly creates it when this is sent.');
-    openSheet(incoming ? 'Paid by' : 'Paid to', h('div', { class: 'fields' }, input, h('p', { class: 'hint', text: hint }), list));
+    openSheet(incoming ? 'Paid by' : 'Paid to', h('div', { class: 'fields' }, input, h('p', { class: 'hint', text: hint }), list, syncFoot()));
     setTimeout(() => input.select(), 40); // typing replaces the current name
+    let repaint = null;
+    sheetRepaint = () => repaint && repaint();
     const [o, s] = await Promise.all([options(), suggestions(c)]);
-    const names = incoming ? (o.payers || []) : (o.payees || []);
+    let names = incoming ? (o.payers || []) : (o.payees || []);
     const ownFull = fullName(own).toLowerCase();
-    const accts = o.accounts || [];
+    let accts = o.accounts || [];
+    repaint = async () => {
+      const fresh = await options();
+      names = incoming ? (fresh.payers || []) : (fresh.payees || []);
+      accts = fresh.accounts || [];
+      paint();
+    };
     const isAcct = (a, q) => a.name.toLowerCase() === q || a.short.toLowerCase() === q;
     const isOwn = v => accts.some(a => isAcct(a, (v || '').trim().toLowerCase()));
     const paint = () => {
@@ -1096,7 +1151,7 @@
       const transfers = () => {
         if (!ownHits.length) return;
         list.append(h('div', { class: 'pick-group', text: 'Your accounts — that makes it a transfer' }));
-        for (const a of ownHits) list.append(pickButton((incoming ? 'Transfer from ' : 'Transfer to ') + a.short, '', () => toTransfer(a)));
+        for (const a of ownHits) list.append(pickButton((incoming ? 'Transfer from ' : 'Transfer to ') + a.short, newHint(a.name, ''), () => toTransfer(a)));
       };
       if (exactOwn && exactOwn.name.toLowerCase() === ownFull) {
         list.append(h('p', { class: 'hint', text: exactOwn.short + ' is the account this is on.' }));
@@ -1112,7 +1167,7 @@
       const exact = hits.some(p => p.toLowerCase() === ql);
       if (!exact && !exactOwn) list.append(pickButton('Use “' + q + '”', incoming ? 'new payer' : 'new payee', () => choose(q)));
       if (hits.length && exactOwn && ownHits.length) list.append(h('div', { class: 'pick-group', text: incoming ? 'Payers' : 'Payees' }));
-      for (const p of hits) list.append(pickButton(p, '', () => choose(p)));
+      for (const p of hits) list.append(pickButton(p, newHint(p, ''), () => choose(p)));
       if (!exactOwn) transfers();
     };
     input.addEventListener('input', paint);
@@ -1123,20 +1178,31 @@
   // The purchases a refund could be for (not the "none of these" choice).
   function refundChoices(c) { return ((c.refund && c.refund.options) || []).filter(o => o.value !== 'none'); }
 
+  // Which of your accounts paid (or took the money in): every one of them in
+  // Firefly — not only those fold has already seen a transaction on, or a
+  // card made yesterday could never be picked.
   function openAccount(c) {
     const incoming = c.direction === 'in';
-    const list = h('div', { class: 'pick-list' });
+    const list = h('div', { class: 'pick-list', role: 'listbox' });
     const mine = ownOf(c);
     // a transfer's other end is not a choice for this end
     const skip = c.type === 'transfer' ? fullName(otherOf(c)) : '';
     const choose = async a => { closeSheet(); await edit(c, { account: a.name }).catch(() => {}); };
-    for (const a of accounts) {
-      if (skip && a.name === skip) continue;
-      list.append(pickButton(a.short, a.short !== a.name ? a.name : '', () => choose(a), a.name === mine.full || a.short === mine.name));
-    }
-    if (!accounts.length) list.append(h('p', { class: 'hint', text: 'No accounts yet — sync them from Firefly in the full editor.' }));
     openSheet(c.type === 'transfer' ? (incoming ? 'Which account did it move into?' : 'Which account did it move from?')
-      : incoming ? 'Which account did it come into?' : 'Which account paid?', h('div', { class: 'fields' }, list));
+      : incoming ? 'Which account did it come into?' : 'Which account paid?', h('div', { class: 'fields' }, list, syncFoot()));
+    const paint = async () => {
+      const o = await options();
+      const accts = ((o.accounts && o.accounts.length) ? o.accounts : accounts).filter(a => !skip || a.name !== skip);
+      list.replaceChildren();
+      for (const a of accts) {
+        list.append(pickButton(a.short, newHint(a.name, a.short !== a.name ? a.name : ''), () => choose(a),
+          a.name === mine.full || a.name === mine.name || a.short === mine.name));
+      }
+      if (!accts.length) list.append(h('p', { class: 'hint', text: 'No accounts yet — they come from Firefly.' }));
+      for (const b of list.querySelectorAll('.pick')) b.setAttribute('role', 'option');
+    };
+    sheetRepaint = paint;
+    paint();
   }
 
   function openRefund(c) {

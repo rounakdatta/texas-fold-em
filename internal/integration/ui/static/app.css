@@ -269,8 +269,11 @@ dialog.sheet::backdrop { background: var(--scrim); }
   font-size: 15.5px;
 }
 .pick:hover, .pick:focus-visible { background: var(--surface-2); }
-.pick .pick-main { flex: 1; min-width: 0; }
+/* the name is what a person picks by: the small print beside it gives way
+   first, cut short (the whole of it in the title) before the name wraps */
+.pick .pick-main { flex: 0 0 auto; max-width: 100%; min-width: 0; }
 .pick .pick-hint { font-size: 13px; color: var(--fg-3); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.pick:not(.pick-stacked) .pick-hint { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; text-align: right; }
 .pick[aria-selected="true"] { background: var(--accent-soft); }
 .pick-stacked { flex-direction: column; align-items: flex-start; gap: 2px; }
 .pick-stacked .pick-main { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
@@ -422,3 +425,23 @@ details.more pre { white-space: pre-wrap; overflow-wrap: anywhere; font-family: 
 .banner-info > svg { color: var(--fg-2); }
 .banner .banner-body { flex: 1; min-width: 0; }
 .banner .banner-actions { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+
+/* ---- accounts from Firefly ---------------------------------------------------
+   One card on the editor and the deck's side column, one line on the Add
+   form: when fold last copied Firefly's accounts, and a button that copies
+   them again in place. Quiet — it's an occasional errand, not a warning. */
+.sync-lede { margin: 0 0 12px; font-size: 14px; line-height: 1.45; color: var(--fg-2); }
+.sync-btn .sync-ic { width: 16px; height: 16px; flex: none; }
+.sync-status { margin: 10px 0 0; font-size: 13px; line-height: 1.4; color: var(--fg-3); }
+.sync-status.is-done { color: var(--fg-2); }
+.sync-status.is-err { color: var(--danger); }
+.sync-status time { font-variant-numeric: tabular-nums; }
+.sync-inline { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; margin-top: -4px; font-size: 13px; color: var(--fg-3); }
+.sync-inline .sync-status { margin: 0; flex-basis: 100%; }
+.sync-link { display: inline-flex; align-items: center; gap: 5px; min-height: 32px; padding: 0 2px; border: 0; background: none;
+  color: var(--accent-2); font: inherit; font-weight: 600; cursor: pointer; }
+.sync-link:hover { text-decoration: underline; text-underline-offset: 3px; }
+.sync-link[disabled], .sync-btn[disabled] { opacity: .65; cursor: default; }
+.is-busy .sync-ic { animation: sync-turn 0.9s linear infinite; }
+@keyframes sync-turn { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .is-busy .sync-ic { animation: none; } }

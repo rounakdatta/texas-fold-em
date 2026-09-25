@@ -32,9 +32,10 @@
           <input type="text" name="source_name" list="own-options" autocomplete="off" placeholder="the card or account the money left">
         </label>
         <label class="field"><span data-to-label>Paid to</span>
-          <input type="text" name="destination_name" list="payee-options" autocomplete="off" placeholder="the merchant — a new name is created on send">
+          <input type="text" name="destination_name" list="payee-options" autocomplete="off" placeholder="the merchant or person">
         </label>
       </div>
+      {{template "accounts-sync-inline" .}}
       <div class="fields two">
         <label class="field"><span>Category</span><input type="text" name="category_name" list="cat-options" autocomplete="off"></label>
         <label class="field"><span>Budget</span><input type="text" name="budget_name" list="bud-options" autocomplete="off"></label>
@@ -72,7 +73,7 @@
   (function () {
     // [hint, from label, to label, to placeholder, from list, to list, from placeholder]
     var hints = {
-      withdrawal: ['A spend: from your card or account to a merchant.', 'Paid from', 'Paid to', 'the merchant — a new name is created on send', 'own-options', 'payee-options', 'the card or account the money left'],
+      withdrawal: ['A spend: from your card or account to a merchant.', 'Paid from', 'Paid to', 'the merchant or person', 'own-options', 'payee-options', 'the card or account the money left'],
       deposit: ['Money in: a refund, reversal, cashback or salary.', 'From', 'Into', 'your account', 'payer-options', 'own-options', 'who paid you'],
       transfer: ['A move between your own accounts, like a card bill payment.', 'From', 'To', 'your other account', 'own-options', 'own-options', 'the account the money left']
     };

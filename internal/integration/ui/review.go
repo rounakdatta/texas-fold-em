@@ -1430,8 +1430,10 @@ func (h *Handler) handleOptions(w http.ResponseWriter, r *http.Request) {
 		// Accounts: your own accounts — the only thing a transfer can go
 		// to or come from. Never offered as a payee or a payer.
 		Accounts []account `json:"accounts"`
+		// SyncedAt: when these lists last came from Firefly (RFC3339).
+		SyncedAt string `json:"syncedAt"`
 	}
-	o := opts{Categories: []string{}, Payees: []string{}, Payers: []string{}, Accounts: []account{}}
+	o := opts{Categories: []string{}, Payees: []string{}, Payers: []string{}, Accounts: []account{}, SyncedAt: rfc3339OrEmpty(h.accountsSyncedAt(ctx))}
 	rows, err := h.db.QueryContext(ctx, `
 		SELECT category_name FROM firefly_txns WHERE category_name IS NOT NULL AND category_name <> ''
 		GROUP BY category_name ORDER BY COUNT(*) DESC, category_name`)
