@@ -271,6 +271,44 @@ func (c *Client) EnsureCurrency(ctx context.Context, code string) error {
 	}, nil)
 }
 
+// CreateTransactionLink links two journals with a firefly link type. For a
+// refund: linkTypeID is firefly's "Refund" type, inwardJournalID is the
+// REFUND and outwardJournalID the original PURCHASE, which makes firefly read
+// "<refund> (partially) refunds <purchase>" and "<purchase> is (partially)
+// refunded by <refund>". (The wire names are counter-intuitive: firefly's
+// store controller makes the inward journal the link's source, and the
+// source shows the type's outward phrase.) Returns the new link's id.
+//
+// This is a WRITE (see the file header). It only ever creates a link —
+// there is no unlink path in this package.
+func (c *Client) CreateTransactionLink(ctx context.Context, linkTypeID, inwardJournalID, outwardJournalID int64, notes string) (int64, error) {
+	if linkTypeID <= 0 || inwardJournalID <= 0 || outwardJournalID <= 0 {
+		return 0, fmt.Errorf("firefly: link needs a type and two journals (got %d, %d, %d)", linkTypeID, inwardJournalID, outwardJournalID)
+	}
+	body := map[string]any{
+		"link_type_id": linkTypeID,
+		"inward_id":    inwardJournalID,
+		"outward_id":   outwardJournalID,
+	}
+	if strings.TrimSpace(notes) != "" {
+		body["notes"] = notes
+	}
+	var resp struct {
+		Data struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := c.post(ctx, "/api/v1/transaction-links", body, &resp); err != nil {
+		return 0, err
+	}
+	var id int64
+	fmt.Sscan(resp.Data.ID, &id)
+	if id == 0 {
+		return 0, fmt.Errorf("firefly: link created but no id in response")
+	}
+	return id, nil
+}
+
 // post is the write-side counterpart to get: a JSON POST. body may be nil
 // (for action endpoints like .../enable). Kept in write.go so every
 // mutating call is physically in this file, per the read-only contract.

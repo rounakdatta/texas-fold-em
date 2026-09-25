@@ -43,6 +43,7 @@ func (c *Classifier) LearnFromPushed(ctx context.Context, foldUUID string) error
 	var (
 		merchant sql.NullString
 		status   string
+		foldType string
 		dstID    sql.NullInt64
 		dstName  sql.NullString
 		srcID    sql.NullInt64
@@ -61,7 +62,7 @@ func (c *Classifier) LearnFromPushed(ctx context.Context, foldUUID string) error
 	// (when even that fails) so the NOT-NULL invariants on
 	// merchant_lookup.modal_destination_account_name are preserved.
 	err := c.db.QueryRowContext(ctx, `
-		SELECT merchant_extracted, status,
+		SELECT merchant_extracted, status, type,
 		       COALESCE(confirmed_destination_account_id, proposed_destination_account_id),
 		       (SELECT destination_account_name FROM firefly_txns
 		         WHERE destination_account_id = COALESCE(confirmed_destination_account_id, proposed_destination_account_id)
@@ -81,12 +82,23 @@ func (c *Classifier) LearnFromPushed(ctx context.Context, foldUUID string) error
 		       COALESCE(NULLIF(TRIM(confirmed_description),''), NULLIF(TRIM(proposed_description),''))
 		FROM staged_fold_txns
 		WHERE fold_uuid = ?
-	`, foldUUID).Scan(&merchant, &status, &dstID, &dstName, &srcID, &srcName, &catID, &catName, &budID, &budName, &desc)
+	`, foldUUID).Scan(&merchant, &status, &foldType, &dstID, &dstName, &srcID, &srcName, &catID, &catName, &budID, &budName, &desc)
 	if err != nil {
 		return fmt.Errorf("learn: read staged: %w", err)
 	}
 	if status != "pushed" {
 		// Defensive: only learn from confirmed-and-pushed rows.
+		return nil
+	}
+	// merchant_lookup describes PURCHASES (merchant = destination). A
+	// refund or other money-in row has the merchant as its source and the
+	// user's card as its destination; learning from it would teach Tier 1
+	// to send the next Zomato order to the card. Same for a transfer
+	// (a card repayment's destination is an asset, not a merchant).
+	if foldType != "OUTGOING" {
+		return nil
+	}
+	if dstID.Valid && isAssetID(ctx, c.db, dstID.Int64) {
 		return nil
 	}
 	// A confirmed id of 0 is the review form's explicit "none" (a wrong

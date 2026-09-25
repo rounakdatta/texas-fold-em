@@ -149,6 +149,7 @@ func (h *Handler) Mount(mux *http.ServeMux) {
 	mux.Handle("POST /admin/ui/staged/{fold_uuid}/push", h.withAuth(h.handlePush))
 	mux.Handle("POST /admin/ui/staged/{fold_uuid}/update", h.withAuth(h.handleUpdate))
 	mux.Handle("POST /admin/ui/staged/{fold_uuid}/skip", h.withAuth(h.handleSkip))
+	mux.Handle("POST /admin/ui/staged/{fold_uuid}/link", h.withAuth(h.handleLink))
 	mux.Handle("POST /admin/ui/reclassify", h.withAuth(h.handleReclassify))
 	mux.Handle("POST /admin/ui/sync-accounts", h.withAuth(h.handleSyncAccounts))
 	if h.auth == AuthModeCookie {
@@ -245,6 +246,12 @@ type indexRow struct {
 	// PossibleDuplicate: fold.money itself flags this as a likely duplicate
 	// alert (e.g. the same charge alerted twice) — usually one to skip.
 	PossibleDuplicate bool
+	// IsRefund: gives money back for a purchase (RefundLinked: firefly
+	// records it as a Refund link). Refunded: some refund points at THIS
+	// purchase.
+	IsRefund     bool
+	RefundLinked bool
+	Refunded     bool
 }
 
 // listFilters is the set of WHERE constraints the index list honours.
@@ -528,7 +535,14 @@ func (h *Handler) listRows(ctx context.Context, f listFilters, limit, offset int
 		       (s.confirmed_amount_paise IS NOT NULL OR s.confirmed_foreign_amount_paise IS NOT NULL
 		        OR s.confirmed_txn_timestamp IS NOT NULL),
 		       ` + possibleDuplicateSQL("s.raw_payload") + `,
-		       ` + effectiveAccountIDSQL("source") + `, ` + effectiveAccountIDSQL("destination") + `
+		       ` + effectiveAccountIDSQL("source") + `, ` + effectiveAccountIDSQL("destination") + `,
+		       s.classifier_tier = 5 OR COALESCE(NULLIF(s.confirmed_refund_of,''), s.proposed_refund_of, '') LIKE 'fold:%'
+		         OR COALESCE(NULLIF(s.confirmed_refund_of,''), s.proposed_refund_of, '') LIKE 'journal:%',
+		       COALESCE(s.firefly_link_id, 0) <> 0,
+		       EXISTS (SELECT 1 FROM staged_fold_txns r
+		               WHERE r.fold_uuid <> s.fold_uuid AND r.status <> 'skipped'
+		                 AND COALESCE(NULLIF(r.confirmed_refund_of,''), r.proposed_refund_of)
+		                     IN ('fold:' || s.fold_uuid, 'journal:' || COALESCE(s.firefly_txn_id, -1)))
 		FROM staged_fold_txns s
 		WHERE ` + where + `
 		ORDER BY s.txn_timestamp DESC
@@ -557,10 +571,11 @@ func (h *Handler) listRows(ctx context.Context, f listFilters, limit, offset int
 			edited, dup int
 			effSrc      sql.NullInt64
 			effDst      sql.NullInt64
+			isRefund    sql.NullBool
 		)
 		if err := rows.Scan(&r.FoldUUID, &tsStr, &amountPaise, &r.Currency, &fAmt, &fCur, &r.Mode, &r.Type,
 			&r.MerchantExtracted, &r.Status, &tier, &conf, &catName, &srcName, &destName, &r.Description, &groupID,
-			&foldPaise, &edited, &dup, &effSrc, &effDst); err != nil {
+			&foldPaise, &edited, &dup, &effSrc, &effDst, &isRefund, &r.RefundLinked, &r.Refunded); err != nil {
 			return nil, err
 		}
 		// Direction as seen from the account being viewed: under an account
@@ -577,6 +592,7 @@ func (h *Handler) listRows(ctx context.Context, f listFilters, limit, offset int
 			}
 		}
 		r.Edited, r.Manual, r.PossibleDuplicate = edited == 1, r.Mode == manualMode, dup == 1
+		r.IsRefund = isRefund.Valid && isRefund.Bool
 		r.FoldAmountDisplay = paiseToDecimal(foldPaise)
 		r.ForeignDisplay = foreignDisplay(fAmt, fCur)
 		// Two views of the timestamp: a server-rendered fallback for
@@ -634,6 +650,10 @@ type detailRow struct {
 	Edited            bool // amount/foreign/date corrected by the human
 	Manual            bool // added by hand from a statement line
 	PossibleDuplicate bool // fold.money flags it as a likely duplicate alert
+	// RawPayload is fold.money's own JSON for the transaction, pretty-printed
+	// (its refund_group_id, notes, merchant …), for the operator to inspect.
+	RawPayload string
+	IsRefund   bool // the row gives money back for a purchase (see the refund card)
 }
 
 // editForm is the editable subset of the row, in form-field shape.
@@ -733,8 +753,13 @@ func (h *Handler) handleDetail(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	refund, refundedBy := h.refundCardFor(r.Context(), uuid)
+	row.IsRefund = refund.Show
+
 	h.render(w, h.detailTmpl, map[string]any{
 		"Title":           uuid,
+		"Refund":          refund,
+		"RefundedBy":      refundedBy,
 		"Status":          row.Status, // for the shared nav's active-state highlight
 		"Row":             row,
 		"Back":            back,
@@ -786,7 +811,7 @@ func (h *Handler) fetchDetail(ctx context.Context, uuid string) (detailRow, edit
 		       confirmed_destination_account_name, proposed_destination_account_name,
 		       confirmed_source_account_name, proposed_source_account_name,
 		       confirmed_amount_paise, confirmed_foreign_amount_paise, confirmed_txn_timestamp,
-		       `+possibleDuplicateSQL("raw_payload")+`
+		       `+possibleDuplicateSQL("raw_payload")+`, raw_payload
 		FROM staged_fold_txns
 		WHERE fold_uuid = ?
 	`, uuid).Scan(
@@ -796,7 +821,7 @@ func (h *Handler) fetchDetail(ctx context.Context, uuid string) (detailRow, edit
 		&pSrcID, &pDestID, &pCatID, &pBudID, &pDesc,
 		&cDestName, &pDestName,
 		&cSrcName, &pSrcName,
-		&cAmt, &cFx, &cTs, &dup,
+		&cAmt, &cFx, &cTs, &dup, &r.RawPayload,
 	)
 	if err != nil {
 		return r, editForm{}, "", err
@@ -816,6 +841,10 @@ func (h *Handler) fetchDetail(ctx context.Context, uuid string) (detailRow, edit
 	r.Edited = cAmt.Valid || cFx.Valid || cTs.Valid
 	r.Manual = r.Mode == manualMode
 	r.PossibleDuplicate = dup == 1
+	if r.RawPayload == "{}" || r.RawPayload == `{"manual":true}` {
+		r.RawPayload = ""
+	}
+	r.RawPayload = prettyJSON(r.RawPayload)
 	if tier.Valid {
 		r.TierLabel = tierLabel(int(tier.Int64))
 	}
@@ -1221,7 +1250,19 @@ func (h *Handler) saveEdits(ctx context.Context, uuid string, form url.Values) (
 		WHERE fold_uuid = ?
 	`, srcID, srcNameVal, dstID, dstName, catID, budID, nullableStrFromForm(desc), tagsJSON,
 		amtOv, fxOv, tsOv, uuid)
-	return unresolved, err
+	if err != nil {
+		return unresolved, err
+	}
+	// Which purchase a refund refunds (the "refund of" picker). Only when
+	// the form carried it, so other clients keep what is stored.
+	if formHas(form, "refund_of") {
+		bad, err := h.saveRefundOf(ctx, uuid, form.Get("refund_of"))
+		if err != nil {
+			return unresolved, err
+		}
+		unresolved = append(unresolved, bad...)
+	}
+	return unresolved, nil
 }
 
 // formHas reports whether the submitted form carried a field at all. It lets
@@ -1372,6 +1413,8 @@ func tierLabel(t int) string {
 		return "3 (LLM)"
 	case 4:
 		return "4 (review)"
+	case 5:
+		return "5 (refund)"
 	default:
 		return fmt.Sprintf("%d", t)
 	}

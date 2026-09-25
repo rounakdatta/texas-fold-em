@@ -232,3 +232,54 @@ func TestUpdateTransaction(t *testing.T) {
 		t.Errorf("group=%d, want 7950", resp.GroupID)
 	}
 }
+
+// A refund link: POST /transaction-links with the refund as inward and the
+// purchase as outward (firefly then reads "<refund> (partially) refunds
+// <purchase>"), returning the new link's id.
+func TestCreateTransactionLink(t *testing.T) {
+	var got map[string]any
+	var method, path string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method, path = r.Method, r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		_, _ = w.Write([]byte(`{"data":{"type":"transaction_links","id":"31"}}`))
+	}))
+	defer srv.Close()
+	c := NewClient(srv.URL, "pat", srv.Client())
+	id, err := c.CreateTransactionLink(context.Background(), 2, 7951, 5001, "linked by texas-fold-em")
+	if err != nil || id != 31 {
+		t.Fatalf("CreateTransactionLink = %d, %v", id, err)
+	}
+	if method != http.MethodPost || path != "/api/v1/transaction-links" {
+		t.Errorf("%s %s", method, path)
+	}
+	if got["link_type_id"] != float64(2) || got["inward_id"] != float64(7951) || got["outward_id"] != float64(5001) || got["notes"] != "linked by texas-fold-em" {
+		t.Errorf("body = %v", got)
+	}
+	if _, err := c.CreateTransactionLink(context.Background(), 0, 1, 2, ""); err == nil {
+		t.Error("expected an error without a link type")
+	}
+}
+
+func TestListLinkTypesAndJournalLinks(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/link-types":
+			_, _ = w.Write([]byte(`{"data":[{"id":"2","attributes":{"name":"Refund","inward":"is (partially) refunded by","outward":"(partially) refunds"}}]}`))
+		case "/api/v1/transaction-journals/7951/links":
+			_, _ = w.Write([]byte(`{"data":[{"id":"31","attributes":{"link_type_id":"2","inward_id":"7951","outward_id":"5001","notes":null}}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c := NewClient(srv.URL, "pat", srv.Client())
+	types, err := c.ListLinkTypes(context.Background())
+	if err != nil || len(types) != 1 || types[0].ID != "2" || types[0].Attributes.Outward != "(partially) refunds" {
+		t.Fatalf("ListLinkTypes = %+v, %v", types, err)
+	}
+	links, err := c.ListJournalLinks(context.Background(), 7951)
+	if err != nil || len(links) != 1 || links[0].Attributes.InwardID != "7951" || links[0].Attributes.OutwardID != "5001" {
+		t.Fatalf("ListJournalLinks = %+v, %v", links, err)
+	}
+}
