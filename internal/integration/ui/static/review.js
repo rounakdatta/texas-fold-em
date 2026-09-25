@@ -230,12 +230,14 @@
 
   // The likely other side when the card doesn't know it: the merchant on a
   // spend's alert, the name on money in's bank line — offered, never assumed.
+  // A name worth offering reads as a name: not a UPI handle
+  // ("q453326208@ybl"), a reference number or a raw statement line.
+  const nameLike = s => !!s && !/^Statement:/.test(s) && !/\d{4,}|@|\//.test(s) && s.length <= 40;
   function guessFor(c) {
-    if (c.direction === 'out') return (c.blockers || []).includes('payee') && c.to.name ? c.to.name : '';
+    if (c.direction === 'out') return (c.blockers || []).includes('payee') && nameLike(c.to.name) ? c.to.name : '';
     if (c.direction !== 'in' || c.from.name) return '';
     const said = (c.bankSaid || '').trim();
-    if (!said || /^Statement:/.test(said) || /\d{4,}|@|\//.test(said) || said.length > 40) return '';
-    return said;
+    return nameLike(said) ? said : '';
   }
 
   // Someone's note as a sentence: it ends with a stop, whatever they typed.

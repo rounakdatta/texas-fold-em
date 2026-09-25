@@ -518,11 +518,15 @@ func (h *Handler) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tabs := h.statusTabs(r.Context(), filters, perPage)
+	// "waiting for you" is the deck's own To review pile (not what was put
+	// off to Later), so it says the same number as the Review badge above it
 	waiting := 0
-	for _, t := range tabs {
-		if t.Key == "needs_review" || t.Key == "ready_to_push" {
-			waiting += t.Count
-		}
+	{
+		g := filters
+		g.Status = "all"
+		where, args := g.where()
+		_ = h.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM staged_fold_txns s WHERE `+reviewable+
+			` AND s.later_at IS NULL AND `+where, args...).Scan(&waiting)
 	}
 	h.render(w, h.indexTmpl, map[string]any{
 		"Title":               "Transactions",

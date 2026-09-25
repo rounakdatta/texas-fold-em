@@ -731,3 +731,23 @@ func TestSentence(t *testing.T) {
 		}
 	}
 }
+
+// The list's call to review counts what the deck will show — the To review
+// pile, not what was put off to Later — so it agrees with the Review badge.
+func TestReview_TheListInvitesYouToWhatTheDeckHolds(t *testing.T) {
+	rh := newReviewHarness(t)
+	rh.stage(t, "w1", "needs_review", "Tea", 3500, "2025-12-29T07:51:00Z")
+	rh.stage(t, "w2", "ready_to_push", "Tea", 3500, "2025-12-29T08:51:00Z")
+	rh.stage(t, "w3", "needs_review", "Tea", 3500, "2025-12-29T09:51:00Z",
+		`UPDATE staged_fold_txns SET later_at = CURRENT_TIMESTAMP WHERE fold_uuid = ?`)
+	resp, err := http.Get(rh.srv.URL + "/admin/ui/?status=all")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	body := string(b)
+	if !strings.Contains(body, `<span class="num">2</span> waiting for you`) || !strings.Contains(body, `Review <span class="count num">2</span>`) {
+		t.Errorf("the call to review and the badge should both say 2: %q / %q", snippet(body, "waiting for you"), snippet(body, "count num"))
+	}
+}
