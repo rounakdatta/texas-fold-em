@@ -99,6 +99,19 @@ func runOneCycle(
 			log.Info("periodic firefly accounts sync", "fetched", report.Fetched, "assets", report.Assets)
 		}
 	}
+	// Put the user's own account back where fold says it is, on rows
+	// classified before the classifier knew how: money in with no account,
+	// or saved the wrong way round. Needs only the two mirrors refreshed
+	// above, so it runs even when fold's sync fails. Idempotent, cheap SQL.
+	if cls != nil {
+		if rep, err := cls.RepairOwnAccounts(ctx, false); err != nil {
+			log.Warn("own-account repair error (cycle continues)", "err", err)
+		} else {
+			for _, ch := range rep.Changes {
+				log.Info("repaired own account", "fold_uuid", ch.FoldUUID, "kind", ch.Kind, "note", ch.Note)
+			}
+		}
+	}
 	if foldSyncer != nil {
 		report, err := foldSyncer.SyncSinceFirefly(ctx, maxTotal)
 		if err != nil {
