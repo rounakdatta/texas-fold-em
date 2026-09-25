@@ -548,9 +548,13 @@ func TestSpokenDay(t *testing.T) {
 
 func TestBankSaid(t *testing.T) {
 	cases := map[[2]string]string{
-		{"CARD/0a0a0a0a0a0a0a03/Ramesh S/Rs./200.00/OUTGOING/29-12-25", "CARD"}:                                                       "Ramesh S",
-		{"CARD/0a0a0a0a0a0a0a4/SUNRISE FOODS LLP/Rs./380/OUTGOING", "CARD"}:                                                         "Sunrise Foods LLP",
-		{"UPI-EXAMPLE STORE-PAYMENTS@OKBANK-BANK0000001-0001-UPI", "UPI"}:                                            "Example Store",
+		{"CARD/0a0a0a0a0a0a0a03/Ramesh S/Rs./200.00/OUTGOING/29-12-25", "CARD"}:                                                "Ramesh S",
+		{"CARD/0a0a0a0a0a0a0a4/SUNRISE FOODS LLP/Rs./380/OUTGOING", "CARD"}:                                                    "Sunrise Foods LLP",
+		{"NEFT CR-ABCD0123456-EXAMPLE PAYER LTD-A PERSON-ABCDN00000000001", "NEFT"}:                                            "Example Payer Ltd",
+		{"ACH C- EXAMPLE DIVIDEND CO-000000000123", "ACH"}:                                                                     "Example Dividend Co",
+		{"IMPS-000000000001-EXAMPLE SENDER-BANK-XXXXXXXX0001-TEST", "IMPS"}:                                                    "Example Sender",
+		{"PRIN AND INT AUTO_REDEEM 000000000001", "OTHER"}:                                                                     "PRIN AND INT AUTO_REDEEM 000000000001",
+		{"UPI-EXAMPLE STORE-PAYMENTS@OKBANK-BANK0000001-0001-UPI", "UPI"}:                                                      "Example Store",
 		{"Card statement 23Nov25-22Dec25: 10/12/2025 17:49 UPI-A VENDOR 45.00 · 45.00 was a cold coffee on 8 Dec", manualMode}: "Statement: 10/12/2025 17:49 UPI-A VENDOR 45.00",
 	}
 	for in, want := range cases {
@@ -621,5 +625,31 @@ func TestReview_TheAccountPickerCountsWhatIsWaitingPerAccount(t *testing.T) {
 	// later pages don't pay for the counts again
 	if next := rh.deck(t, "limit=1&after="+url.QueryEscape("2025-12-29T09:51:00Z|b1")); next.Counts.ByAccount != nil {
 		t.Errorf("a later page recounted: %v", next.Counts.ByAccount)
+	}
+}
+
+// Money in needs to know which of the user's accounts it came into — firefly
+// can't book a deposit without — and the card's edit fills the right side:
+// the account is the destination of money in, the payer its source.
+func TestReview_MoneyInNeedsItsAccountAndTakesAPayer(t *testing.T) {
+	rh := newReviewHarness(t)
+	rh.stage(t, "in1", "needs_review", "Refund of a shirt", 50000, "2025-12-29T07:51:00Z",
+		`UPDATE staged_fold_txns SET type = 'INCOMING', proposed_source_account_id = NULL, proposed_destination_account_id = NULL WHERE fold_uuid = ?`)
+	d := rh.deck(t, "")
+	if len(d.Cards) != 1 || strings.Join(d.Cards[0].Blockers, ",") != blockPayee+","+blockSource {
+		t.Fatalf("money in with no payer and no account: blockers = %v", d.Cards)
+	}
+	code, a := rh.post(t, "rows/in1/edit", `{"account":"HDFC Bank","payee":"A Shop"}`)
+	if code != 200 || a.Card == nil {
+		t.Fatalf("edit = %d %+v", code, a)
+	}
+	if len(a.Card.Blockers) != 0 || a.Card.Direction != "in" || a.Card.From.Name != "A Shop" {
+		t.Errorf("after the edit: blockers %v, direction %s, from %+v, to %+v", a.Card.Blockers, a.Card.Direction, a.Card.From, a.Card.To)
+	}
+	var src, dst string
+	_ = rh.db.DB.QueryRow(`SELECT COALESCE(confirmed_source_account_name,''), COALESCE(confirmed_destination_account_name,'') ||
+		COALESCE(CAST(confirmed_destination_account_id AS TEXT),'') FROM staged_fold_txns WHERE fold_uuid='in1'`).Scan(&src, &dst)
+	if src != "A Shop" || dst == "" {
+		t.Errorf("stored source %q, destination %q: the payer is the source, the account the destination", src, dst)
 	}
 }

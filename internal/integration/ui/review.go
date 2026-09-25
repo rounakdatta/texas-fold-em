@@ -256,10 +256,17 @@ func cardBlockers(c reviewCard, typ string, hasSource, hasDest bool) []string {
 	if strings.TrimSpace(c.Hold) != "" {
 		out = append(out, blockHold)
 	}
-	if typ == "OUTGOING" && !hasDest {
+	// the other side: who was paid, or who paid
+	if (typ == "OUTGOING" && !hasDest) || (typ == "INCOMING" && !hasSource) {
 		out = append(out, blockPayee)
 	}
-	if typ == "OUTGOING" && !hasSource {
+	// the user's own side — the account that paid, or that the money came
+	// into — firefly can't book it without
+	mine := hasSource
+	if typ == "INCOMING" {
+		mine = hasDest
+	}
+	if !mine {
 		out = append(out, blockSource)
 	}
 	switch {
@@ -346,6 +353,11 @@ func splitPlace(full string) (string, string) {
 var (
 	cardNarration = regexp.MustCompile(`^CARD/[0-9a-fA-F]+/([^/]+)/`)
 	upiNarration  = regexp.MustCompile(`^UPI-([^-]+?)(?:-|$)`)
+	// the payer on a bank credit: "NEFT CR-<IFSC>-<payer>-…",
+	// "ACH C- <payer>-<ref>", "IMPS-<ref>-<payer>-…"
+	neftNarration = regexp.MustCompile(`^NEFT CR-[A-Z]{4}0[A-Z0-9]{6}-([^-]+)-`)
+	achNarration  = regexp.MustCompile(`^ACH [CD]- ?([^-]+)-`)
+	impsNarration = regexp.MustCompile(`^IMPS-\d+-([^-]+)-`)
 )
 
 // bankSaid is what the bank called the other side, for the card's small
@@ -365,6 +377,11 @@ func bankSaid(narration, mode string) string {
 	}
 	if m := upiNarration.FindStringSubmatch(n); m != nil {
 		return titleCase(strings.TrimSpace(m[1]))
+	}
+	for _, re := range []*regexp.Regexp{neftNarration, achNarration, impsNarration} {
+		if m := re.FindStringSubmatch(n); m != nil && strings.TrimSpace(m[1]) != "" {
+			return titleCase(strings.TrimSpace(m[1]))
+		}
 	}
 	if len(n) > 60 {
 		return n[:57] + "…"
@@ -679,7 +696,11 @@ func (h *Handler) loadCard(ctx context.Context, uuid string) (reviewCard, error)
 type cardEdit struct {
 	Title    *string `json:"title"`
 	Category *string `json:"category"`
-	Payee    *string `json:"payee"`
+	// Payee is the other side: who was paid on a spend, who paid on money in.
+	Payee *string `json:"payee"`
+	// Account is the user's own side: the account that paid, or that the
+	// money came into.
+	Account  *string `json:"account"`
 	RefundOf *string `json:"refundOf"`
 	Tags     *string `json:"tags"`
 }
@@ -709,6 +730,12 @@ func (h *Handler) handleCardEdit(w http.ResponseWriter, r *http.Request) {
 		h.apiError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	var typ string
+	_ = h.db.QueryRowContext(r.Context(), `SELECT type FROM staged_fold_txns WHERE fold_uuid = ?`, uuid).Scan(&typ)
+	otherSide, mySide := "destination_name", "source_name"
+	if typ == "INCOMING" {
+		otherSide, mySide = "source_name", "destination_name"
+	}
 	if e.Title != nil {
 		form.Set("description", strings.TrimSpace(*e.Title))
 	}
@@ -716,7 +743,10 @@ func (h *Handler) handleCardEdit(w http.ResponseWriter, r *http.Request) {
 		form.Set("category_name", strings.TrimSpace(*e.Category))
 	}
 	if e.Payee != nil {
-		form.Set("destination_name", strings.TrimSpace(*e.Payee))
+		form.Set(otherSide, strings.TrimSpace(*e.Payee))
+	}
+	if e.Account != nil {
+		form.Set(mySide, strings.TrimSpace(*e.Account))
 	}
 	if e.Tags != nil {
 		form.Set("tags", strings.TrimSpace(*e.Tags))
@@ -888,9 +918,9 @@ func blockerMessage(c reviewCard) string {
 		case blockTitleBlank:
 			return "Fill in the blank first"
 		case blockPayee:
-			return "Say who was paid first"
+			return "Say who was paid (or who paid) first"
 		case blockSource:
-			return "Say which account paid first"
+			return "Say which of your accounts it was first"
 		}
 	}
 	return "Not ready to send"
@@ -1111,6 +1141,8 @@ func (h *Handler) handleOptions(w http.ResponseWriter, r *http.Request) {
 	type opts struct {
 		Categories []string `json:"categories"`
 		Payees     []string `json:"payees"`
+		// Payers: who has paid you before (firefly's revenue accounts).
+		Payers []string `json:"payers"`
 	}
 	var o opts
 	rows, err := h.db.QueryContext(ctx, `
@@ -1129,11 +1161,30 @@ func (h *Handler) handleOptions(w http.ResponseWriter, r *http.Request) {
 	for _, p := range payees {
 		o.Payees = append(o.Payees, p.Name)
 	}
+	rows, err = h.db.QueryContext(ctx, `
+		SELECT name FROM (
+			SELECT source_account_name AS name FROM firefly_txns
+			WHERE txn_type = 'deposit' AND source_account_name IS NOT NULL AND source_account_name NOT IN ('', '(no name)')
+			UNION
+			SELECT name FROM firefly_accounts WHERE type = 'revenue' AND active = 1 AND name NOT IN ('', '(no name)')
+		) ORDER BY name COLLATE NOCASE`)
+	if err == nil {
+		for rows.Next() {
+			var s string
+			if rows.Scan(&s) == nil {
+				o.Payers = append(o.Payers, s)
+			}
+		}
+		rows.Close()
+	}
 	if o.Categories == nil {
 		o.Categories = []string{}
 	}
 	if o.Payees == nil {
 		o.Payees = []string{}
+	}
+	if o.Payers == nil {
+		o.Payers = []string{}
 	}
 	w.Header().Set("Cache-Control", "private, max-age=300")
 	writeJSON(w, http.StatusOK, o)
