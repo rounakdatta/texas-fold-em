@@ -185,17 +185,19 @@ func TestUI_IndexPagination(t *testing.T) {
 	}
 	body, _ := io.ReadAll(resp.Body)
 	s := string(body)
-	// Heading must reflect the TRUE total (61 = 60 seeded + 1 from harness).
-	if !strings.Contains(s, "needs_review (61)") {
+	// The status tab must carry the TRUE total (61 = 60 seeded + 1 from
+	// harness). (It used to be a "needs_review (61)" heading; the list now
+	// names statuses in words, with counts on the tabs.)
+	if !strings.Contains(s, `>Needs a look <span class="n num">61</span>`) {
 		t.Errorf("heading missing true total 61, got body contains: %q",
 			snippet(s, "needs_review"))
 	}
 	// Page count line: ceil(61/50) = 2 pages.
-	if !strings.Contains(s, "page 1 of 2") {
+	if !strings.Contains(s, "Page 1 of 2") {
 		t.Errorf("expected 'page 1 of 2' in heading, got: %q", snippet(s, "page"))
 	}
-	// Must contain a "next →" link, not the disabled span.
-	if !strings.Contains(s, `>next →</a>`) {
+	// Must contain a live "Older →" link, not the disabled span.
+	if !strings.Contains(s, `>Older →</a>`) {
 		t.Errorf("expected enabled next link on page 1")
 	}
 	// Page 1 (DESC by ts) contains the newest 50 rows. The harness's
@@ -216,16 +218,16 @@ func TestUI_IndexPagination(t *testing.T) {
 	defer resp2.Body.Close()
 	body2, _ := io.ReadAll(resp2.Body)
 	s2 := string(body2)
-	if !strings.Contains(s2, "page 2 of 2") {
+	if !strings.Contains(s2, "Page 2 of 2") {
 		t.Errorf("expected 'page 2 of 2', got: %q", snippet(s2, "page"))
 	}
 	// Page 2 must contain the LAST row (oldest timestamp) — pg-059 was
 	// inserted last but uses ts day 32%28=4, hmm ordering is by ts. Just
 	// assert the prev link exists and the heading shows total.
-	if !strings.Contains(s2, `>← prev</a>`) {
+	if !strings.Contains(s2, `>← Newer</a>`) {
 		t.Errorf("expected enabled prev link on page 2")
 	}
-	if !strings.Contains(s2, "needs_review (61)") {
+	if !strings.Contains(s2, `>Needs a look <span class="n num">61</span>`) {
 		t.Errorf("page 2 total still 61")
 	}
 
@@ -233,7 +235,7 @@ func TestUI_IndexPagination(t *testing.T) {
 	resp3 := u.do(t, "GET", "/admin/ui/?status=needs_review&per_page=10", nil)
 	defer resp3.Body.Close()
 	body3, _ := io.ReadAll(resp3.Body)
-	if !strings.Contains(string(body3), "page 1 of 7") { // ceil(61/10) = 7
+	if !strings.Contains(string(body3), "Page 1 of 7") { // ceil(61/10) = 7
 		t.Errorf("expected 'page 1 of 7' with per_page=10, got: %q", snippet(string(body3), "page"))
 	}
 }
@@ -268,7 +270,8 @@ func TestUI_IndexAccountFilter(t *testing.T) {
 		t.Fatalf("seed staged: %v", err)
 	}
 
-	// Filter to HDFC (id 1): the zomato row only.
+	// Filter to HDFC (id 1): the zomato row only. (fold's merchant is shown
+	// title-cased, as the review deck shows it.)
 	resp := u.do(t, "GET", "/admin/ui/?status=ready_to_push&account=1", nil)
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
@@ -276,13 +279,13 @@ func TestUI_IndexAccountFilter(t *testing.T) {
 	}
 	s, _ := io.ReadAll(resp.Body)
 	body := string(s)
-	if !strings.Contains(body, "zomato") {
+	if !strings.Contains(body, "Zomato") {
 		t.Errorf("expected HDFC (zomato) row in filtered list")
 	}
-	if strings.Contains(body, "district") {
+	if strings.Contains(body, "District") {
 		t.Errorf("did not expect Amex (district) row when filtering by HDFC")
 	}
-	if !strings.Contains(body, "ready_to_push (1)") {
+	if !strings.Contains(body, `>Ready <span class="n num">1</span>`) {
 		t.Errorf("expected filtered count 1, got: %q", snippet(body, "ready_to_push"))
 	}
 	// The dropdown lists every account present on staged rows, regardless
@@ -295,7 +298,7 @@ func TestUI_IndexAccountFilter(t *testing.T) {
 	respBad := u.do(t, "GET", "/admin/ui/?status=ready_to_push&account=not-a-number", nil)
 	defer respBad.Body.Close()
 	bodyBad, _ := io.ReadAll(respBad.Body)
-	if !strings.Contains(string(bodyBad), "ready_to_push (2)") {
+	if !strings.Contains(string(bodyBad), `>Ready <span class="n num">2</span>`) {
 		t.Errorf("bad account param should show all rows, got: %q", snippet(string(bodyBad), "ready_to_push"))
 	}
 
@@ -304,10 +307,10 @@ func TestUI_IndexAccountFilter(t *testing.T) {
 	defer resp2.Body.Close()
 	s2, _ := io.ReadAll(resp2.Body)
 	body2 := string(s2)
-	if !strings.Contains(body2, "zomato") || !strings.Contains(body2, "district") {
+	if !strings.Contains(body2, "Zomato") || !strings.Contains(body2, "District") {
 		t.Errorf("expected both rows in the unfiltered list")
 	}
-	if !strings.Contains(body2, "ready_to_push (2)") {
+	if !strings.Contains(body2, `>Ready <span class="n num">2</span>`) {
 		t.Errorf("expected unfiltered count 2, got: %q", snippet(body2, "ready_to_push"))
 	}
 }
@@ -685,30 +688,27 @@ func TestUI_IndexAllStatus(t *testing.T) {
 	body := string(s)
 
 	// All three statuses' rows are present (rev-1's destination resolves
-	// to "Cake Palace"; rtp-1/psh-1 fall back to the raw merchant).
-	for _, m := range []string{"Cake Palace", "zomato", "swiggy"} {
+	// to "Cake Palace"; rtp-1/psh-1 fall back to fold's merchant, shown
+	// title-cased the way the review deck shows it).
+	for _, m := range []string{"Cake Palace", "Zomato", "Swiggy"} {
 		if !strings.Contains(body, m) {
 			t.Errorf("all view missing destination %q", m)
 		}
 	}
-	if !strings.Contains(body, "all (3)") {
-		t.Errorf("expected heading 'all (3)', got: %q", snippet(body, "all ("))
+	if !strings.Contains(body, `aria-current="true">All <span class="n num">3</span>`) {
+		t.Errorf("expected the All tab, current, with 3, got: %q", snippet(body, ">All <"))
 	}
-	// Per-row status icons for the mixed statuses.
-	for _, cls := range []string{"sicon-needs_review", "sicon-ready_to_push", "sicon-pushed"} {
-		if !strings.Contains(body, cls) {
-			t.Errorf("all view missing status icon %q", cls)
-		}
-	}
-	// Cockpit columns + the battery gauge (rtp-1 conf 0.92 → high band).
-	for _, want := range []string{"<th>Source</th>", "<th>Destination</th>", "<th>Confidence</th>", "batt-high"} {
+	// In the mixed view each row says its status in words.
+	for _, want := range []string{`class="pill pill-attn">Needs a look</span>`, `class="pill">Ready</span>`, `class="pill pill-in">In Firefly</span>`} {
 		if !strings.Contains(body, want) {
-			t.Errorf("all view missing %q", want)
+			t.Errorf("all view missing status %q", want)
 		}
 	}
-	// The "all" nav tab is highlighted as active.
-	if !strings.Contains(body, `?status=all" class="active"`) {
-		t.Errorf("expected the 'all' nav tab to be marked active")
+	// The confidence battery used to sit on every row — a gauge of the state
+	// every classified row arrives in, so it said nothing about any one of
+	// them. The list shows what is exceptional; the score is in the editor.
+	if strings.Contains(body, "batt-") || strings.Contains(body, "<th>Confidence</th>") {
+		t.Error("the per-row confidence gauge is back on the list")
 	}
 }
 
@@ -863,18 +863,18 @@ func TestUI_AllView_DimsPushedAndScrolls(t *testing.T) {
 	}
 	all, _ := io.ReadAll(mustGet(t, u, "/admin/ui/?status=all"))
 	s := string(all)
-	if !strings.Contains(s, `class="row-pushed"`) {
-		t.Error("all view: expected pushed rows dimmed (row-pushed)")
+	if !strings.Contains(s, `class="txn is-pushed"`) {
+		t.Error("all view: expected pushed rows dimmed (is-pushed)")
 	}
 	if !strings.Contains(s, `data-unpushed="1"`) {
 		t.Error("all view: expected non-pushed rows marked data-unpushed")
 	}
-	if !strings.Contains(s, "querySelector('tr[data-unpushed]')") {
+	if !strings.Contains(s, "querySelector('li[data-unpushed]')") {
 		t.Error("all view: expected the auto-scroll script")
 	}
 	// The pushed tab should not dim (row-pushed only applies in the all view).
 	pushed, _ := io.ReadAll(mustGet(t, u, "/admin/ui/?status=pushed"))
-	if strings.Contains(string(pushed), `class="row-pushed"`) {
+	if strings.Contains(string(pushed), `is-pushed`) {
 		t.Error("pushed tab must not dim its rows")
 	}
 }
@@ -1008,7 +1008,7 @@ func TestUI_Save_MoneyOverrides(t *testing.T) {
 	resp = u.do(t, "GET", "/admin/ui/staged/rev-1", nil)
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	for _, want := range []string{`name="amount" value="72.50"`, `name="date" value="2026-05-07"`, `name="time" value="10:15"`, "corrected", "fold saw INR 70.00"} {
+	for _, want := range []string{`name="amount" value="72.50"`, `name="date" value="2026-05-07"`, `name="time" value="10:15"`, "corrected", "the alert said INR 70.00"} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("detail page missing %q", want)
 		}
@@ -1147,7 +1147,9 @@ func TestUI_Index_CorrectedAmountAndDuplicateFlag(t *testing.T) {
 	resp := u.do(t, "GET", "/admin/ui/?status=needs_review", nil)
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	for _, want := range []string{"INR 2400.00", ">corrected</span>", "fold saw INR 2384.75", ">possible duplicate</span>"} {
+	// The corrected amount reads the Indian way; the hint says what the
+	// alert said (it used to say "fold saw", which only fold's author reads).
+	for _, want := range []string{"₹2,400", ">corrected</span>", "the alert said INR 2384.75", ">possible duplicate</span>"} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("list missing %q", want)
 		}
@@ -1176,7 +1178,7 @@ func TestUI_Index_RendersDriverWrittenTimestamp(t *testing.T) {
 
 // rowHTML returns the <tr> of the list row for one fold_uuid ("" if absent).
 func rowHTML(body, uuid string) string {
-	for _, tr := range strings.Split(body, "<tr") {
+	for _, tr := range strings.Split(body, `<li class="txn`) {
 		if strings.Contains(tr, "/admin/ui/staged/"+uuid+"?") {
 			return tr
 		}
@@ -1209,7 +1211,7 @@ func TestUI_IndexAccountFilter_IncludesMoneyIn(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	b := string(body)
-	if !strings.Contains(b, "ready_to_push (3)") {
+	if !strings.Contains(b, `>Ready <span class="n num">3</span>`) {
 		t.Errorf("want the card's spend, payment and refund (3), got: %q", snippet(b, "ready_to_push ("))
 	}
 	if rowHTML(b, "other-card") != "" {
@@ -1257,9 +1259,8 @@ func TestUI_Index_CategoryColumnShowsEffectiveCategory(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	b := string(body)
-	if !strings.Contains(b, "<th>Category</th>") {
-		t.Error(`column should be headed "Category" now that it shows the effective value`)
-	}
+	// (The list is no longer a table with a "Category" column; the
+	// category is on each row's second line. What it shows is unchanged.)
 	if tr := rowHTML(b, "cat-confirmed"); !strings.Contains(tr, "Medical Insurance") || strings.Contains(tr, "Snacks") {
 		t.Errorf("confirmed category should win over the suggestion: %s", tr)
 	}

@@ -1,0 +1,62 @@
+{{define "head"}}<link rel="stylesheet" href="{{asset "review.css"}}">{{end}}
+{{define "bodyclass"}}deck-body{{end}}
+{{define "main"}}
+<main class="deck-page" id="deck-app" data-accounts="{{.AccountsJSON}}">
+  <h1 class="sr-only">Review transactions</h1>
+  <div class="deck-main">
+    {{if .Flash}}<div class="flash flash-{{.Flash.Kind}}" role="status">{{.Flash.Message}}</div>{{end}}
+
+    <div class="deck-head">
+      <div class="piles" role="tablist" aria-label="Which pile">
+        <button type="button" role="tab" class="pile" data-pile="review" aria-selected="true">To review <span class="pile-n num" data-count="review"></span></button>
+        <button type="button" role="tab" class="pile" data-pile="later" aria-selected="false">Later <span class="pile-n num" data-count="later"></span></button>
+      </div>
+      <button type="button" class="chip scope" id="scope-btn" aria-haspopup="dialog">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5h14M6 10h8M8.5 15h3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        <span id="scope-label">All accounts</span>
+      </button>
+    </div>
+
+    <section class="deck" id="deck" aria-label="Transactions to review">
+      <div class="stack" id="stack"></div>
+      <div class="deck-state" id="deck-state" hidden></div>
+    </section>
+
+    <div class="deck-actions" id="deck-actions">
+      <button type="button" class="deck-btn later" id="btn-later">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 7 5 12l5 5M5.5 12H15a4 4 0 0 1 4 4v1" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span>Later</span>
+      </button>
+      <button type="button" class="deck-btn more" id="btn-more" aria-label="More actions" aria-haspopup="dialog">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5.5" cy="12" r="1.8" fill="currentColor"/><circle cx="12" cy="12" r="1.8" fill="currentColor"/><circle cx="18.5" cy="12" r="1.8" fill="currentColor"/></svg>
+      </button>
+      <button type="button" class="deck-btn send" id="btn-send">
+        <svg viewBox="0 0 24 24" aria-hidden="true" class="ic-send"><path d="m5 12.5 4.2 4.2L19 7" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span id="send-label">Send</span>
+      </button>
+    </div>
+    <p class="deck-hint" id="deck-hint" hidden><span class="hint-touch">Swipe right to send it to Firefly · left to look at it later</span><span class="hint-keys">Drag the card, or press → to send it to Firefly · ← to look at it later</span></p>
+  </div>
+
+  <aside class="deck-side" aria-label="Up next">
+    <h2>Up next</h2>
+    <ol class="upnext" id="upnext"></ol>
+    <h2 class="keys-title">Keys</h2>
+    <dl class="keys">
+      <dt><kbd>→</kbd></dt><dd>Send to Firefly</dd>
+      <dt><kbd>←</kbd></dt><dd>Later</dd>
+      <dt><kbd>T</kbd></dt><dd>Edit the title</dd>
+      <dt><kbd>C</kbd></dt><dd>Category</dd>
+      <dt><kbd>P</kbd></dt><dd>Payee</dd>
+      <dt><kbd>U</kbd></dt><dd>Undo</dd>
+      <dt><kbd>O</kbd></dt><dd>Open the full editor</dd>
+      <dt><kbd>M</kbd></dt><dd>More actions</dd>
+    </dl>
+  </aside>
+
+  <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+  <dialog class="sheet" id="sheet" aria-labelledby="sheet-title"></dialog>
+  <noscript><p class="empty">The review deck needs JavaScript. <a href="/admin/ui/">Open the list instead</a>.</p></noscript>
+</main>
+<script src="{{asset "review.js"}}" defer></script>
+{{end}}

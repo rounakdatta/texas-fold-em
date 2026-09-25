@@ -98,12 +98,32 @@ Three things that fall out of this design and are worth knowing:
 
 ## The review UI
 
-`/admin/ui/` is a small server-rendered page for the rows the classifier
-flagged for confirmation. Filters across pending / needs-review /
-ready-to-push / pushed; account, category, budget and tag fields are
-name autocompletes backed by your real firefly history; per-merchant
-suggested tags appear as one-click chips; timestamps render in your
-device's local timezone. Push, skip, save edits — all one click.
+`/admin/ui/review` is where the transactions waiting for a human are decided,
+one card at a time. It is built for a phone first, and works as well with a
+keyboard:
+
+- **Swipe right to send** a card to firefly, **left to look at it later** (it
+  waits in a *Later* pile). On a desktop: → and ←. A send waits out a
+  five-second undo window before anything reaches firefly — *Undo*, U or ⌘Z
+  takes it back — and goes through the same push, with the same checks, as
+  everywhere else. If firefly refuses it, the card comes back saying why.
+- **A card shows what matters**: the amount, who it went to (or came from),
+  when (in IST, the way you'd say it), from which account, and the title and
+  category the push will send. Only what is exceptional is flagged: a `___`
+  blank in the title, a missing payee, a refund with a purchase to pick, a
+  possible duplicate, a hold.
+- **The main button names the next step.** A card that can't go yet says what
+  it needs — *Fill in the blank*, *Who was paid?* — and a right swipe opens
+  exactly that: the blank already selected, your past titles and payees for
+  the merchant one tap away, the name on the alert offered as the payee.
+- **Hold** a row that must never be sent, with a reason; its next step
+  becomes *Skip it*. Skips can be undone, and restored from the list.
+- **Work one account at a time**, with a count of what waits on each, newest
+  or oldest first (the order a statement runs in).
+
+`/admin/ui/` lists every transaction by status, with the editor behind each
+row: account, category, budget and tag fields are name autocompletes backed by
+your real firefly history, and per-merchant tags appear as one-tap chips.
 
 Reconciling against a card statement is done in the same place:
 

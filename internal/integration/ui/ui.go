@@ -43,6 +43,9 @@ import (
 //go:embed templates/*.html
 var tmplFS embed.FS
 
+//go:embed static/*
+var staticFS embed.FS
+
 // AuthMode describes how /admin/ui/* routes authenticate human users.
 type AuthMode int
 
@@ -73,6 +76,7 @@ type Handler struct {
 	indexTmpl  *template.Template
 	detailTmpl *template.Template
 	newTmpl    *template.Template // "add a transaction fold never saw"
+	reviewTmpl *template.Template // the swipe deck (review.go)
 	// fireflyPublicURL is the user-facing firefly base (e.g.
 	// https://firefly.taptappers.club) for deep-linking pushed rows to
 	// their firefly transaction. Empty disables the links. Distinct from
@@ -105,7 +109,8 @@ func New(db *sql.DB, pusher *integration.Pusher, log *slog.Logger, adminKey stri
 	// every link preserves the active filter set without hand-built
 	// querystrings. Registered on both templates for uniformity even
 	// though only the index references it today.
-	funcs := template.FuncMap{"filterURL": filterURL, "statusBadge": statusBadge, "confidenceBar": confidenceBar}
+	funcs := template.FuncMap{"filterURL": filterURL, "statusBadge": statusBadge, "confidenceBar": confidenceBar, "asset": assetURL,
+		"blanks": blanksHTML, "statusLabel": statusLabel}
 	indexTmpl, err := template.New("layout.html").Funcs(funcs).ParseFS(tmplFS, "templates/layout.html", "templates/index.html")
 	if err != nil {
 		return nil, fmt.Errorf("parse index template: %w", err)
@@ -118,6 +123,10 @@ func New(db *sql.DB, pusher *integration.Pusher, log *slog.Logger, adminKey stri
 	if err != nil {
 		return nil, fmt.Errorf("parse new-transaction template: %w", err)
 	}
+	reviewTmpl, err := template.New("layout.html").Funcs(funcs).ParseFS(tmplFS, "templates/layout.html", "templates/review.html")
+	if err != nil {
+		return nil, fmt.Errorf("parse review template: %w", err)
+	}
 	return &Handler{
 		db:         db,
 		pusher:     pusher,
@@ -127,6 +136,7 @@ func New(db *sql.DB, pusher *integration.Pusher, log *slog.Logger, adminKey stri
 		indexTmpl:  indexTmpl,
 		detailTmpl: detailTmpl,
 		newTmpl:    newTmpl,
+		reviewTmpl: reviewTmpl,
 	}, nil
 }
 
@@ -152,6 +162,19 @@ func (h *Handler) Mount(mux *http.ServeMux) {
 	mux.Handle("POST /admin/ui/staged/{fold_uuid}/link", h.withAuth(h.handleLink))
 	mux.Handle("POST /admin/ui/reclassify", h.withAuth(h.handleReclassify))
 	mux.Handle("POST /admin/ui/sync-accounts", h.withAuth(h.handleSyncAccounts))
+
+	// The review deck and its JSON API (review.go).
+	mux.Handle("GET /admin/ui/review", h.withAuth(h.handleReview))
+	mux.Handle("GET /admin/ui/static/{file}", h.withAuth(handleStatic))
+	mux.Handle("GET /admin/ui/api/deck", h.withAPI(h.handleDeck))
+	mux.Handle("GET /admin/ui/api/options", h.withAPI(h.handleOptions))
+	mux.Handle("GET /admin/ui/api/rows/{fold_uuid}/suggest", h.withAPI(h.handleCardSuggest))
+	mux.Handle("POST /admin/ui/api/rows/{fold_uuid}/edit", h.withAPI(h.handleCardEdit))
+	mux.Handle("POST /admin/ui/api/rows/{fold_uuid}/send", h.withAPI(h.handleCardSend))
+	mux.Handle("POST /admin/ui/api/rows/{fold_uuid}/later", h.withAPI(h.handleCardLater))
+	mux.Handle("POST /admin/ui/api/rows/{fold_uuid}/hold", h.withAPI(h.handleCardHold))
+	mux.Handle("POST /admin/ui/api/rows/{fold_uuid}/skip", h.withAPI(h.handleCardSkip))
+	mux.Handle("POST /admin/ui/api/rows/{fold_uuid}/restore", h.withAPI(h.handleCardRestore))
 	if h.auth == AuthModeCookie {
 		mux.HandleFunc("GET /admin/ui/login", h.handleLogin)
 	}
@@ -255,6 +278,13 @@ type indexRow struct {
 	// RefundNeedsPick: a refund with no purchase chosen yet (and not marked
 	// "none") — the ones to open and pick in review.
 	RefundNeedsPick bool
+	// Amount the way a person reads it ("₹1,412.87"), and the paying
+	// account by the name a person uses ("Tata Neu card").
+	AmountINR   string
+	SourceShort string
+	// Later: swiped left in the review deck. Hold: must not be sent (why).
+	Later bool
+	Hold  string
 }
 
 // listFilters is the set of WHERE constraints the index list honours.
@@ -346,6 +376,37 @@ func statusBadge(status string) template.HTML {
 	return template.HTML(fmt.Sprintf(`<span class="sicon sicon-%s" title="%s">%s</span>`, status, label, glyph))
 }
 
+// blanksHTML shows a title's "___" as the same fill-in slot the review
+// deck draws, escaping everything else.
+func blanksHTML(title string) template.HTML {
+	parts := strings.Split(title, titleBlank)
+	var b strings.Builder
+	for i, p := range parts {
+		b.WriteString(template.HTMLEscapeString(p))
+		if i < len(parts)-1 {
+			b.WriteString(`<span class="blank-sm" aria-label="blank">what?</span>`)
+		}
+	}
+	return template.HTML(b.String())
+}
+
+// statusLabel is a status in words ("In Firefly", not "pushed").
+func statusLabel(status string) string {
+	switch status {
+	case "needs_review":
+		return "Needs a look"
+	case "ready_to_push":
+		return "Ready"
+	case "pushed":
+		return "In Firefly"
+	case "skipped":
+		return "Skipped"
+	case "pending":
+		return "Arriving"
+	}
+	return status
+}
+
 // confidenceBar renders the classifier confidence (0..1) as a small
 // battery-style gauge — a fill proportional to the score, coloured by
 // band (high/mid/low), with the numeric value alongside. Zero/absent
@@ -434,8 +495,17 @@ func (h *Handler) handleIndex(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	tabs := h.statusTabs(r.Context(), filters, perPage)
+	waiting := 0
+	for _, t := range tabs {
+		if t.Key == "needs_review" || t.Key == "ready_to_push" {
+			waiting += t.Count
+		}
+	}
 	h.render(w, h.indexTmpl, map[string]any{
-		"Title":               "review",
+		"Title":               "Transactions",
+		"Tabs":                tabs,
+		"Waiting":             waiting,
 		"Status":              status,
 		"Filters":             filters,
 		"AccountOptions":      accountOptions,
@@ -452,6 +522,49 @@ func (h *Handler) handleIndex(w http.ResponseWriter, r *http.Request) {
 		"NextPage":            page + 1,
 		"Flash":               flashFromCookie(r, w),
 	})
+}
+
+// statusTab is one of the list's status filters, with its count under the
+// current account filter.
+type statusTab struct {
+	Key, Label string
+	Count      int
+	URL        template.URL
+	Current    bool
+}
+
+// statusTabs names each status the way a person would, not the way the
+// schema does. "Arriving" (not classified yet) and "Skipped" only appear
+// when something is in them.
+func (h *Handler) statusTabs(ctx context.Context, f listFilters, perPage int) []statusTab {
+	counts := map[string]int{}
+	all := 0
+	for _, st := range []string{"needs_review", "ready_to_push", "pushed", "skipped", "pending"} {
+		g := f
+		g.Status = st
+		n, _ := h.countRows(ctx, g)
+		counts[st] = n
+		all += n
+	}
+	var tabs []statusTab
+	// All first: it is where "Transactions" lands, so on a phone (where the
+	// row scrolls sideways) the tab you are on is the one in view.
+	for _, t := range []struct{ key, label string }{
+		{"all", "All"}, {"needs_review", "Needs a look"}, {"ready_to_push", "Ready"}, {"pushed", "In Firefly"},
+		{"skipped", "Skipped"}, {"pending", "Arriving"},
+	} {
+		n := counts[t.key]
+		if t.key == "all" {
+			n = all
+		}
+		if (t.key == "skipped" || t.key == "pending") && n == 0 && f.Status != t.key {
+			continue
+		}
+		g := f
+		g.Status = t.key
+		tabs = append(tabs, statusTab{Key: t.key, Label: t.label, Count: n, URL: filterURL(g, perPage, 0), Current: f.Status == t.key})
+	}
+	return tabs
 }
 
 // countRows returns the total number of staged_fold_txns rows matching
@@ -551,7 +664,8 @@ func (h *Handler) listRows(ctx context.Context, f listFilters, limit, offset int
 		       EXISTS (SELECT 1 FROM staged_fold_txns r
 		               WHERE r.fold_uuid <> s.fold_uuid AND r.status <> 'skipped'
 		                 AND COALESCE(NULLIF(r.confirmed_refund_of,''), r.proposed_refund_of)
-		                     IN ('fold:' || s.fold_uuid, 'journal:' || COALESCE(s.firefly_txn_id, -1)))
+		                     IN ('fold:' || s.fold_uuid, 'journal:' || COALESCE(s.firefly_txn_id, -1))),
+		       s.later_at IS NOT NULL, COALESCE(s.hold_reason, '')
 		FROM staged_fold_txns s
 		WHERE ` + where + `
 		ORDER BY s.txn_timestamp DESC
@@ -585,7 +699,7 @@ func (h *Handler) listRows(ctx context.Context, f listFilters, limit, offset int
 		)
 		if err := rows.Scan(&r.FoldUUID, &tsStr, &amountPaise, &r.Currency, &fAmt, &fCur, &r.Mode, &r.Type,
 			&r.MerchantExtracted, &r.Status, &tier, &conf, &catName, &srcName, &destName, &r.Description, &groupID,
-			&foldPaise, &edited, &dup, &effSrc, &effDst, &isRefund, &refDecided, &r.RefundLinked, &r.Refunded); err != nil {
+			&foldPaise, &edited, &dup, &effSrc, &effDst, &isRefund, &refDecided, &r.RefundLinked, &r.Refunded, &r.Later, &r.Hold); err != nil {
 			return nil, err
 		}
 		// Direction as seen from the account being viewed: under an account
@@ -616,6 +730,7 @@ func (h *Handler) listRows(ctx context.Context, f listFilters, limit, offset int
 			r.TxnTimestamp = tsStr
 		}
 		r.AmountDisplay = paiseToDecimal(amountPaise)
+		r.AmountINR = formatINR(amountPaise)
 		if tier.Valid {
 			r.TierLabel = tierLabel(int(tier.Int64))
 		}
@@ -627,9 +742,15 @@ func (h *Handler) listRows(ctx context.Context, f listFilters, limit, offset int
 		}
 		if srcName.Valid {
 			r.SourceAccountName = srcName.String
+			r.SourceShort = shortAccountName(srcName.String)
 		}
-		if destName.Valid {
+		if destName.Valid && destName.String != "(no name)" { // firefly's placeholder isn't a payee
 			r.DestinationName = destName.String
+			if destName.String == r.MerchantExtracted {
+				// fold's normalised merchant ("gauri shankar enterprises"), not a
+				// firefly name: shown the way the deck shows it
+				r.DestinationName = titleCase(destName.String)
+			}
 		}
 		// Deep-link pushed rows to their firefly transaction (group id
 		// resolved from the mirror). firefly's web route is
@@ -766,12 +887,24 @@ func (h *Handler) handleDetail(w http.ResponseWriter, r *http.Request) {
 
 	refund, refundedBy := h.refundCardFor(r.Context(), uuid)
 	row.IsRefund = refund.Show
+	// The same summary the review deck shows: money, who, when, in words.
+	card, _ := h.loadCard(r.Context(), uuid)
+	title := "Transaction"
+	if card.Amount != "" {
+		title = card.Amount
+		if card.To.Name != "" && card.Direction == "out" {
+			title += " · " + card.To.Name
+		}
+	}
 
 	h.render(w, h.detailTmpl, map[string]any{
-		"Title":           uuid,
+		"Title":           title,
+		"Card":            card,
+		"HasBlank":        strings.Contains(edit.Description, titleBlank),
 		"Refund":          refund,
 		"RefundedBy":      refundedBy,
 		"Status":          row.Status, // for the shared nav's active-state highlight
+		"Nav":             map[bool]string{true: "review", false: "list"}[strings.HasPrefix(back, "/admin/ui/review")],
 		"Row":             row,
 		"Back":            back,
 		"IsPushed":        isPushed,
@@ -953,6 +1086,7 @@ func (h *Handler) handleSave(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/ui/staged/"+uuid, http.StatusSeeOther)
 		return
 	}
+	h.clearLater(r.Context(), uuid)
 	if len(unresolved) > 0 {
 		h.flashErr(w, "saved, but couldn't resolve: "+strings.Join(unresolved, "; ")+
 			" — pick from the autocomplete suggestions or create the account in firefly first")
@@ -987,14 +1121,28 @@ func (h *Handler) handlePush(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/ui/staged/"+uuid, http.StatusSeeOther)
 		return
 	}
+	var hold string
+	_ = h.db.QueryRowContext(r.Context(), `SELECT COALESCE(hold_reason, '') FROM staged_fold_txns WHERE fold_uuid = ?`, uuid).Scan(&hold)
+	if strings.TrimSpace(hold) != "" {
+		h.flashErr(w, "not sent — it's on hold: "+hold+". Clear the hold to send it.")
+		http.Redirect(w, r, "/admin/ui/staged/"+uuid, http.StatusSeeOther)
+		return
+	}
 	report, err := h.pusher.Push(r.Context(), uuid, true)
 	if err != nil {
 		h.flashErr(w, "push failed: "+err.Error())
 		http.Redirect(w, r, "/admin/ui/staged/"+uuid, http.StatusSeeOther)
 		return
 	}
+	h.clearLater(r.Context(), uuid)
 	h.flashOk(w, fmt.Sprintf("pushed (%s) — firefly id %d", report.Action, report.FireflyTxnID))
 	http.Redirect(w, r, back, http.StatusSeeOther)
+}
+
+// clearLater: saving from the editor is the closer look a card in the
+// Later pile was waiting for, so it goes back to the review deck.
+func (h *Handler) clearLater(ctx context.Context, uuid string) {
+	_, _ = h.db.ExecContext(ctx, `UPDATE staged_fold_txns SET later_at = NULL WHERE fold_uuid = ?`, uuid)
 }
 
 // backOr returns back when it's a safe in-app UI path, else the fallback.
@@ -1264,6 +1412,16 @@ func (h *Handler) saveEdits(ctx context.Context, uuid string, form url.Values) (
 	if err != nil {
 		return unresolved, err
 	}
+	// A hold's reason, when the form carried the field ("" releases it).
+	if formHas(form, "hold_reason") {
+		var reason any
+		if v := strings.TrimSpace(form.Get("hold_reason")); v != "" {
+			reason = v
+		}
+		if _, err := h.db.ExecContext(ctx, `UPDATE staged_fold_txns SET hold_reason = ? WHERE fold_uuid = ?`, reason, uuid); err != nil {
+			return unresolved, err
+		}
+	}
 	// Which purchase a refund refunds (the "refund of" picker). Only when
 	// the form carried it, so other clients keep what is stored.
 	if formHas(form, "refund_of") {
@@ -1374,10 +1532,28 @@ func (h *Handler) moneyOverrides(ctx context.Context, uuid string, form url.Valu
 // helpers ////////////////////////////////////////////////////////////////
 
 func (h *Handler) render(w http.ResponseWriter, tmpl *template.Template, data any) {
+	// Every page's app bar carries the Review tab's count, and highlights
+	// the section it belongs to (list pages unless the handler says so).
+	if m, ok := data.(map[string]any); ok {
+		if _, set := m["Nav"]; !set {
+			m["Nav"] = "list"
+		}
+		m["ReviewCount"] = h.reviewCount()
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := tmpl.ExecuteTemplate(w, "layout", data); err != nil {
 		h.log.Warn("render", "err", err)
 	}
+}
+
+// reviewCount is how many cards wait in the review deck (not counting the
+// Later pile) — the number on the Review tab.
+func (h *Handler) reviewCount() int {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	var n int
+	_ = h.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM staged_fold_txns s WHERE `+reviewable+` AND s.later_at IS NULL`).Scan(&n)
+	return n
 }
 
 func (h *Handler) flashOk(w http.ResponseWriter, msg string)  { setFlash(w, "ok", msg) }
