@@ -84,7 +84,7 @@ func TestUI_Detail_RefundPickerAndRefundedBy(t *testing.T) {
 		}
 	}
 	purchase := body(t, u.do(t, http.MethodGet, "/admin/ui/staged/buy-1", nil))
-	if !strings.Contains(purchase, "refunded by") || !strings.Contains(purchase, `/admin/ui/staged/ref-1`) {
+	if !strings.Contains(purchase, "Refunded by") || !strings.Contains(purchase, `/admin/ui/staged/ref-1`) {
 		t.Errorf("purchase page should list the refund under 'refunded by'")
 	}
 	if strings.Contains(purchase, `name="refund_of"`) {
@@ -177,7 +177,7 @@ func TestUI_LinkButton(t *testing.T) {
 	lu := &uiTestHarness{server: srv, db: u.db}
 
 	detail := body(t, lu.do(t, http.MethodGet, "/admin/ui/staged/ref-1", nil))
-	if !strings.Contains(detail, "link in firefly as a refund") {
+	if !strings.Contains(detail, "Link them as a refund") {
 		t.Fatalf("pushed pair should offer the link button")
 	}
 	if kind, msg := flashOf(t, lu.do(t, http.MethodPost, "/admin/ui/staged/ref-1/link", url.Values{})); kind != "ok" || !strings.Contains(msg, "link 44") {
@@ -187,7 +187,7 @@ func TestUI_LinkButton(t *testing.T) {
 		t.Errorf("link body = %s, want inward 6001 (refund), outward 5001 (purchase)", linkBody)
 	}
 	after := body(t, lu.do(t, http.MethodGet, "/admin/ui/staged/ref-1", nil))
-	if !strings.Contains(after, "linked in firefly (link 44)") || strings.Contains(after, "link in firefly as a refund") {
+	if !strings.Contains(after, "Linked in Firefly (link 44)") || strings.Contains(after, "Link them as a refund") {
 		t.Errorf("after linking, the page should show the link and drop the button")
 	}
 }

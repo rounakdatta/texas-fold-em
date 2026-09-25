@@ -2,135 +2,33 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{{.Title}} · texas-fold-em</title>
-  <style>
-    :root { --bg:#0e0e10; --fg:#e7e7ea; --muted:#9aa0a6; --accent:#7c5cff; --warn:#ffb454; --ok:#5cd97c; --err:#ff6b6b; --row:#1a1a1f; --border:#2a2a30; }
-    * { box-sizing: border-box; }
-    body { margin:0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; background:var(--bg); color:var(--fg); line-height:1.45; }
-    header { padding:14px 24px; border-bottom:1px solid var(--border); display:flex; gap:24px; align-items:baseline; }
-    header h1 { font-size:18px; margin:0; font-weight:600; }
-    header nav a { color:var(--muted); margin-right:16px; text-decoration:none; }
-    header nav a:hover { color:var(--fg); }
-    main { padding: 20px 24px; max-width: 1200px; margin: 0 auto; }
-    h2 { margin-top:0; font-weight:600; font-size:16px; color:var(--muted); text-transform:uppercase; letter-spacing:.06em; }
-    table { width:100%; border-collapse: collapse; margin-bottom: 24px; }
-    th, td { padding:8px 10px; text-align:left; border-bottom:1px solid var(--border); font-size:13px; vertical-align:top; }
-    th { color:var(--muted); font-weight:500; text-transform:uppercase; font-size:11px; letter-spacing:.05em; }
-    tr:hover { background:var(--row); }
-    /* Already-pushed rows in the "all" view are dimmed — done, not the
-       focus. Full opacity on hover so they're still readable when needed. */
-    tr.row-pushed { opacity:0.45; }
-    tr.row-pushed:hover { opacity:1; }
-    .pill { padding:2px 8px; border-radius:99px; font-size:11px; font-weight:500; display:inline-block; }
-    .pill-pending { background:#33333a; color:var(--muted); }
-    .pill-needs_review { background:rgba(255,180,84,0.15); color:var(--warn); }
-    .pill-ready_to_push { background:rgba(124,92,255,0.15); color:var(--accent); }
-    .pill-pushed { background:rgba(92,217,124,0.15); color:var(--ok); }
-    .pill-skipped { background:rgba(255,107,107,0.15); color:var(--err); }
-    .tier { font-family: ui-monospace, monospace; font-size:11px; color:var(--muted); }
-    .narration { font-family: ui-monospace, monospace; font-size:12px; color:var(--muted); word-break: break-all; }
-    .amount { font-family: ui-monospace, monospace; font-weight:600; }
-    .amount-out { color:var(--err); }
-    .amount-in { color:var(--ok); }
-    a { color:var(--accent); text-decoration:none; }
-    a:hover { text-decoration:underline; }
-    .btn { display:inline-block; padding:6px 14px; background:var(--accent); color:white; border:none; border-radius:6px; font-size:13px; cursor:pointer; font-family:inherit; }
-    .btn:hover { filter:brightness(1.15); }
-    .btn-warn { background:var(--warn); color:#222; }
-    .btn-err { background:var(--err); }
-    .btn-secondary { background:transparent; color:var(--muted); border:1px solid var(--border); }
-    form { margin: 0; }
-    label { display:block; font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; margin-bottom:4px; margin-top:14px; }
-    input[type=text], input[type=number], input[type=date], input[type=time], textarea, select { width:100%; padding:8px 10px; background:var(--row); border:1px solid var(--border); border-radius:6px; color:var(--fg); font-family:inherit; font-size:13px; }
-    textarea { min-height: 60px; resize: vertical; }
-    .grid { display:grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-    .card { background: var(--row); padding: 16px 20px; border:1px solid var(--border); border-radius:8px; margin-bottom:16px; }
-    .evidence-card { font-size:12px; }
-    .evidence-card .meta { color:var(--muted); }
-    pre { font-family: ui-monospace, monospace; font-size:11px; background:var(--bg); padding:12px; border:1px solid var(--border); border-radius:6px; overflow-x:auto; }
-    .flash { padding:10px 16px; border-radius:6px; margin-bottom:14px; font-size:13px; }
-    .flash-ok { background:rgba(92,217,124,0.1); color:var(--ok); border:1px solid rgba(92,217,124,0.3); }
-    .flash-err { background:rgba(255,107,107,0.1); color:var(--err); border:1px solid rgba(255,107,107,0.3); }
-    .actions { margin-top: 22px; display:flex; gap:10px; }
-    .chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
-    .chip { display:inline-block; padding:3px 10px; border-radius:99px; background:rgba(124,92,255,0.12); color:var(--accent); border:1px solid rgba(124,92,255,0.3); font-size:11px; cursor:pointer; user-select:none; }
-    .chip:hover { background:rgba(124,92,255,0.22); }
-    input[type=date], input[type=time] { color-scheme: dark; } /* light picker icons on the dark theme */
-    small.hint { color:var(--muted); font-size:11px; display:block; margin-top:3px; }
-    header nav a.active { color:var(--fg); font-weight:600; }
-    /* Compact per-row status glyphs (reuse the .pill status colours). */
-    .sicon { display:inline-block; width:1.3em; text-align:center; font-weight:700; font-size:14px; cursor:default; }
-    .sicon-pending { color:var(--muted); }
-    .sicon-needs_review { color:var(--warn); }
-    .sicon-ready_to_push { color:var(--accent); }
-    .sicon-pushed { color:var(--ok); }
-    .sicon-skipped { color:var(--err); }
-    /* Battery-style confidence gauge. */
-    .batt { display:inline-block; width:40px; height:12px; border:1px solid var(--muted); border-radius:2px; position:relative; vertical-align:middle; }
-    .batt::after { content:''; position:absolute; right:-3px; top:50%; transform:translateY(-50%); width:2px; height:6px; background:var(--muted); border-radius:0 1px 1px 0; }
-    .batt-fill { display:block; height:100%; border-radius:1px; }
-    .batt-high .batt-fill { background:var(--ok); }
-    .batt-mid  .batt-fill { background:var(--warn); }
-    .batt-low  .batt-fill { background:var(--err); }
-    .conf-num { font-family:ui-monospace, monospace; font-size:11px; color:var(--muted); margin-left:8px; }
-    .conf-na { color:var(--muted); }
-  </style>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b0b0e" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f4f4f7" media="(prefers-color-scheme: light)">
+  <title>{{.Title}} · fold</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%238b6cff'/%3E%3Cpath d='M9 16.5l4.5 4.5L23 11.5' fill='none' stroke='white' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="{{asset "app.css"}}">
+  {{block "head" .}}{{end}}
 </head>
-<body>
-  <header>
-    <h1>texas-fold-em</h1>
-    <nav>
-      <a href="/admin/ui/?status=all"{{if eq .Status "all"}} class="active"{{end}}>all</a>
-      <a href="/admin/ui/?status=needs_review"{{if eq .Status "needs_review"}} class="active"{{end}}>needs review</a>
-      <a href="/admin/ui/?status=ready_to_push"{{if eq .Status "ready_to_push"}} class="active"{{end}}>ready to push</a>
-      <a href="/admin/ui/?status=pushed"{{if eq .Status "pushed"}} class="active"{{end}}>pushed</a>
-      <a href="/admin/ui/?status=pending"{{if eq .Status "pending"}} class="active"{{end}}>pending</a>
-      <a href="/admin/ui/new"{{if eq .Status "new"}} class="active"{{end}}>+ add transaction</a>
+<body class="{{block "bodyclass" .}}{{end}}">
+  <header class="appbar">
+    <a class="brand" href="/admin/ui/review" aria-label="fold — review">
+      <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M5 10.5l3.2 3.2L15 7" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+      <span class="brand-name">fold</span>
+    </a>
+    <nav class="nav" aria-label="Main">
+      <a href="/admin/ui/review"{{if eq .Nav "review"}} aria-current="page"{{end}}>Review{{if .ReviewCount}} <span class="count num">{{.ReviewCount}}</span>{{end}}</a>
+      <a href="/admin/ui/?status=all"{{if eq .Nav "list"}} aria-current="page"{{end}}>Transactions</a>
+      <a href="/admin/ui/new"{{if eq .Nav "new"}} aria-current="page"{{end}}>Add</a>
     </nav>
   </header>
-  <main>
-    {{if .Flash}}<div class="flash flash-{{.Flash.Kind}}">{{.Flash.Message}}</div>{{end}}
+  {{block "main" .}}
+  <main class="page">
+    {{if .Flash}}<div class="flash flash-{{.Flash.Kind}}" role="status">{{.Flash.Message}}</div>{{end}}
     {{block "content" .}}{{end}}
   </main>
-  <script>
-    // Convert every <time datetime="..."> element from UTC to the
-    // device's local timezone. Server renders a UTC timestamp in
-    // textContent as a fallback for no-JS clients.
-    (function () {
-      const fmt = new Intl.DateTimeFormat(undefined, {
-        year: 'numeric', month: 'short', day: '2-digit',
-        hour: '2-digit', minute: '2-digit'
-      });
-      document.querySelectorAll('time[datetime]').forEach(function (el) {
-        const d = new Date(el.getAttribute('datetime'));
-        if (!isNaN(d.getTime())) el.textContent = fmt.format(d);
-      });
-      // Click-to-add tag chips on the detail page.
-      document.querySelectorAll('[data-tag-chip]').forEach(function (el) {
-        el.addEventListener('click', function (e) {
-          e.preventDefault();
-          const input = document.querySelector('input[name="tags"]');
-          if (!input) return;
-          const newTag = el.getAttribute('data-tag-chip');
-          const cur = input.value.trim();
-          const parts = cur ? cur.split(',').map(function (p) { return p.trim(); }).filter(Boolean) : [];
-          if (parts.indexOf(newTag) === -1) parts.push(newTag);
-          input.value = parts.join(', ');
-          input.focus();
-        });
-      });
-      // "Select all" toggles every row checkbox in the review list.
-      const selectAll = document.getElementById('select-all');
-      if (selectAll) {
-        selectAll.addEventListener('change', function () {
-          document.querySelectorAll('input[name="fold_uuids"]').forEach(function (cb) {
-            cb.checked = selectAll.checked;
-          });
-        });
-      }
-    })();
-  </script>
+  {{end}}
+  <script src="{{asset "app.js"}}" defer></script>
 </body>
 </html>
 {{end}}

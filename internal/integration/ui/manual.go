@@ -33,8 +33,9 @@ func (h *Handler) handleNewForm(w http.ResponseWriter, r *http.Request) {
 	allTags, _ := h.listAllTags(r.Context())
 	date, _ := istDateTime(time.Now())
 	h.render(w, h.newTmpl, map[string]any{
-		"Title":           "add transaction",
-		"Status":          "new", // highlights the nav link
+		"Title":           "Add a transaction",
+		"Status":          "new",
+		"Nav":             "new",
 		"Date":            date,
 		"DestOptions":     destAccounts,
 		"SourceOptions":   srcAccounts,

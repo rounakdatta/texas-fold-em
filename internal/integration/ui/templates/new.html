@@ -1,88 +1,89 @@
 {{define "content"}}
-<p><a href="/admin/ui/">← back</a></p>
+<p style="margin:0 0 14px"><a href="/admin/ui/" class="btn btn-ghost btn-sm" style="margin-left:-10px">← Back</a></p>
 
-<form method="post" action="/admin/ui/new">
-  <div class="card">
-    <h2>add a transaction fold never saw</h2>
-    <p style="color:var(--muted); margin-top:0">For a statement line with no fold row: a charge from before the card was linked to fold, a missed alert, a refund, reversal, fee or waiver. It is saved as <strong>ready to push</strong> — review it, then push as usual.</p>
-    <div class="grid">
-      <div>
-        <label>type</label>
-        <select name="txn_type">
-          <option value="withdrawal">withdrawal — money out</option>
-          <option value="deposit">deposit — money in (refund, reversal, cashback)</option>
-          <option value="transfer">transfer — between your own accounts</option>
-        </select>
+<form method="post" action="/admin/ui/new" style="max-width:760px">
+  <div class="page-head" style="margin-bottom:6px"><h1>Add a transaction</h1></div>
+  <p class="muted" style="margin:0 0 18px">For a statement line fold never saw: a charge from before the card was linked, a missed alert, a refund, a reversal, a fee. It lands ready to send, and goes to Firefly when you send it like any other.</p>
+
+  <div class="panel">
+    <div class="fields">
+      <div class="field"><span class="label">What kind</span>
+        <div class="segmented" role="radiogroup" aria-label="What kind" style="width:fit-content;max-width:100%">
+          <label style="display:contents"><input type="radio" name="txn_type" value="withdrawal" checked class="sr-only"><span class="seg">Money out</span></label>
+          <label style="display:contents"><input type="radio" name="txn_type" value="deposit" class="sr-only"><span class="seg">Money in</span></label>
+          <label style="display:contents"><input type="radio" name="txn_type" value="transfer" class="sr-only"><span class="seg">Transfer</span></label>
+        </div>
+        <small data-kind-hint>A spend: from your card or account to a merchant.</small>
       </div>
-      <div>
-        <label>amount (INR)</label>
-        <input type="text" name="amount" inputmode="decimal" required autocomplete="off" placeholder="as billed on the statement">
+      <label class="field"><span>Title</span>
+        <textarea name="description" rows="2" required placeholder="What was it? This becomes the Firefly title"></textarea>
+      </label>
+      <div class="fields two">
+        <label class="field"><span>Amount (INR)</span>
+          <input type="text" name="amount" inputmode="decimal" required autocomplete="off" placeholder="as billed on the statement">
+        </label>
+        <div class="fields two" style="gap:10px">
+          <label class="field"><span>Date (IST)</span><input type="date" name="date" value="{{.Date}}" required></label>
+          <label class="field"><span>Time (IST)</span><input type="time" name="time" value="12:00"></label>
+        </div>
       </div>
-      <div>
-        <label>date (IST)</label>
-        <input type="date" name="date" value="{{.Date}}" required>
+      <div class="fields two">
+        <label class="field"><span data-from-label>Paid from</span>
+          <input type="text" name="source_name" list="src-options" autocomplete="off" placeholder="the card or account the money left">
+        </label>
+        <label class="field"><span data-to-label>Paid to</span>
+          <input type="text" name="destination_name" list="dest-options" autocomplete="off" placeholder="the merchant — a new name is created on send">
+        </label>
       </div>
-      <div>
-        <label>time (IST)</label>
-        <input type="time" name="time" value="12:00">
+      <div class="fields two">
+        <label class="field"><span>Category</span><input type="text" name="category_name" list="cat-options" autocomplete="off"></label>
+        <label class="field"><span>Budget</span><input type="text" name="budget_name" list="bud-options" autocomplete="off"></label>
       </div>
-      <div>
-        <label>foreign amount (optional)</label>
-        <input type="text" name="foreign_amount" inputmode="decimal" autocomplete="off">
-      </div>
-      <div>
-        <label>foreign currency (optional)</label>
-        <input type="text" name="foreign_currency" maxlength="3" autocomplete="off" placeholder="USD">
-      </div>
-      <div>
-        <label>source account</label>
-        <input type="text" name="source_name" list="src-options" autocomplete="off" placeholder="the card or account the money left">
-        <small class="hint">withdrawal / transfer: your account · deposit: who paid you</small>
-      </div>
-      <div>
-        <label>destination account</label>
-        <input type="text" name="destination_name" list="dest-options" autocomplete="off" placeholder="the merchant, or your account">
-        <small class="hint">withdrawal: the merchant (a new name is created on push) · deposit / transfer: your account</small>
-      </div>
-      <div>
-        <label>category</label>
-        <input type="text" name="category_name" list="cat-options" autocomplete="off">
-      </div>
-      <div>
-        <label>budget</label>
-        <input type="text" name="budget_name" list="bud-options" autocomplete="off">
-      </div>
+      <label class="field"><span>Tags</span><input type="text" name="tags" list="tag-options" autocomplete="off" placeholder="comma-separated"></label>
+      <details class="more">
+        <summary>Abroad, or from a statement line</summary>
+        <div class="fields" style="margin-top:12px">
+          <div class="fields two">
+            <label class="field"><span>Foreign amount</span><input type="text" name="foreign_amount" inputmode="decimal" autocomplete="off"></label>
+            <label class="field"><span>Foreign currency</span><input type="text" name="foreign_currency" maxlength="3" autocomplete="off" placeholder="USD"></label>
+          </div>
+          <label class="field"><span>Statement line</span>
+            <input type="text" name="narration" autocomplete="off" placeholder="e.g. CLEARTRIP PRIVATE LI Mumbai IN">
+            <small>Copied from the statement; kept as the Firefly notes, like fold's own narration.</small>
+          </label>
+        </div>
+      </details>
     </div>
-
-    <label>description</label>
-    <textarea name="description" required placeholder="the firefly title"></textarea>
-
-    <label>tags (comma-separated)</label>
-    <input type="text" name="tags" list="tag-options" autocomplete="off">
-
-    <label>statement line</label>
-    <input type="text" name="narration" autocomplete="off" placeholder="e.g. CLEARTRIP PRIVATE LI Mumbai IN">
-    <small class="hint">copied from the statement; stored as the firefly notes, like fold's narration</small>
-
-    <div class="actions">
-      <button type="submit" class="btn">add transaction</button>
+    <div class="actionbar" style="margin-top:8px">
+      <button type="submit" class="btn">Add transaction</button>
+      <a href="/admin/ui/" class="btn btn-ghost">Cancel</a>
     </div>
   </div>
 
-  <datalist id="dest-options">
-    {{range .DestOptions}}<option value="{{.Name}}">{{end}}
-  </datalist>
-  <datalist id="src-options">
-    {{range .SourceOptions}}<option value="{{.Name}}">{{end}}
-  </datalist>
-  <datalist id="cat-options">
-    {{range .CategoryOptions}}<option value="{{.Name}}">{{end}}
-  </datalist>
-  <datalist id="bud-options">
-    {{range .BudgetOptions}}<option value="{{.Name}}">{{end}}
-  </datalist>
-  <datalist id="tag-options">
-    {{range .TagLibrary}}<option value="{{.}}">{{end}}
-  </datalist>
+  <datalist id="dest-options">{{range .DestOptions}}<option value="{{.Name}}">{{end}}</datalist>
+  <datalist id="src-options">{{range .SourceOptions}}<option value="{{.Name}}">{{end}}</datalist>
+  <datalist id="cat-options">{{range .CategoryOptions}}<option value="{{.Name}}">{{end}}</datalist>
+  <datalist id="bud-options">{{range .BudgetOptions}}<option value="{{.Name}}">{{end}}</datalist>
+  <datalist id="tag-options">{{range .TagLibrary}}<option value="{{.}}">{{end}}</datalist>
 </form>
+<script>
+  // Say what "from" and "to" mean for the kind picked.
+  (function () {
+    var hints = {
+      withdrawal: ['A spend: from your card or account to a merchant.', 'Paid from', 'Paid to', 'the merchant — a new name is created on send'],
+      deposit: ['Money in: a refund, reversal, cashback or salary.', 'From', 'Into', 'your account'],
+      transfer: ['A move between your own accounts, like a card bill payment.', 'From', 'To', 'your other account']
+    };
+    var form = document.currentScript.previousElementSibling;
+    function sync() {
+      var v = form.querySelector('input[name=txn_type]:checked').value, h = hints[v];
+      form.querySelector('[data-kind-hint]').textContent = h[0];
+      form.querySelector('[data-from-label]').textContent = h[1];
+      form.querySelector('[data-to-label]').textContent = h[2];
+      form.querySelector('input[name=destination_name]').placeholder = h[3];
+    }
+    form.querySelectorAll('input[name=txn_type]').forEach(function (r) { r.addEventListener('change', sync); });
+    sync();
+  })();
+</script>
 {{end}}

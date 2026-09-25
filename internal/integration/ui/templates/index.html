@@ -1,102 +1,102 @@
 {{define "content"}}
-<h2>
-  {{.Status}} ({{.TotalCount}})
-  {{if .SelectedAccountName}}<span style="color:var(--accent);font-weight:normal">· {{.SelectedAccountName}}</span>{{end}}
-  {{if gt .NumPages 1}}
-    <span style="color:var(--muted);font-weight:normal;font-size:0.7em">
-      page {{.Page}} of {{.NumPages}} · {{.PerPage}}/page
-    </span>
-  {{end}}
-</h2>
-<form method="get" style="margin:-4px 0 18px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+<div class="page-head">
+  <h1>Transactions</h1>
+  <span class="spacer"></span>
+  <a class="btn btn-quiet btn-sm" href="/admin/ui/new">
+    <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4.5v11M4.5 10h11" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    Add one
+  </a>
+</div>
+
+{{if .Waiting}}
+<a class="review-cta" href="/admin/ui/review{{if .SelectedAccount}}?account={{.SelectedAccount}}{{end}}">
+  <div class="cta-text">
+    <strong><span class="num">{{.Waiting}}</span> waiting for you{{if .SelectedAccountName}} on {{.SelectedAccountName}}{{end}}</strong>
+    <span>Go through them one card at a time: swipe right to send, left for later.</span>
+  </div>
+  <span class="btn">Review</span>
+</a>
+{{end}}
+
+<nav class="segmented" aria-label="Status">
+  {{range .Tabs}}<a href="{{.URL}}"{{if .Current}} aria-current="true"{{end}}>{{.Label}} <span class="n num">{{.Count}}</span></a>{{end}}
+</nav>
+
+<form class="toolbar" method="get">
   <input type="hidden" name="status" value="{{.Status}}">
   <input type="hidden" name="per_page" value="{{.PerPage}}">
-  <span style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">account</span>
-  <select name="account" onchange="this.form.submit()" style="width:auto;min-width:200px">
-    <option value="">all accounts</option>
+  <select name="account" data-autosubmit aria-label="Account">
+    <option value="">All accounts</option>
     {{range .AccountOptions}}
     <option value="{{.ID}}"{{if eq (printf "%d" .ID) $.SelectedAccount}} selected{{end}}>{{.Name}}</option>
     {{end}}
   </select>
-  {{if .SelectedAccount}}<a href="/admin/ui/?status={{.Status}}&amp;per_page={{.PerPage}}" style="font-size:12px">clear</a>{{end}}
-  <noscript><button class="btn btn-secondary" type="submit">apply</button></noscript>
+  {{if .SelectedAccount}}<a class="btn btn-ghost btn-sm" href="/admin/ui/?status={{.Status}}&amp;per_page={{.PerPage}}">Clear</a>{{end}}
+  <noscript><button class="btn btn-quiet btn-sm" type="submit">Apply</button></noscript>
+  {{if gt .NumPages 1}}<span class="muted num" style="margin-left:auto;font-size:13px">Page {{.Page}} of {{.NumPages}}</span>{{end}}
 </form>
+
 {{if eq .TotalCount 0}}
-  <p style="color:var(--muted)">No rows in this state. {{if eq .Status "needs_review"}}If everything's auto-classified, this is the goal — the active-learning loop is doing its job.{{end}}</p>
+  <div class="empty">
+    <svg class="empty-art" viewBox="0 0 64 64" aria-hidden="true"><circle cx="32" cy="32" r="27" fill="none" stroke="currentColor" stroke-width="3" opacity=".35"/><path d="m21 33 7.5 7.5L44 25" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    {{if eq .Status "needs_review"}}<h2>Nothing needs a look</h2><p>Every transaction has what it needs.</p>
+    {{else if eq .Status "ready_to_push"}}<h2>Nothing is ready to send</h2><p>New transactions land here once they're classified.</p>
+    {{else if eq .Status "pushed"}}<h2>Nothing sent yet</h2><p>Transactions you send to Firefly show up here.</p>
+    {{else}}<h2>Nothing here</h2><p>No transactions match{{if .SelectedAccountName}} on {{.SelectedAccountName}}{{end}}.</p>{{end}}
+    {{if .SelectedAccount}}<a class="btn btn-quiet" href="/admin/ui/?status={{.Status}}&amp;per_page={{.PerPage}}">Show all accounts</a>{{end}}
+  </div>
 {{else}}
   <form method="post" action="/admin/ui/reclassify">
     <input type="hidden" name="back" value="{{filterURL .Filters .PerPage .Page}}">
-    <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
-      <button type="submit" class="btn btn-secondary">↻ reclassify selected</button>
-      <span style="font-size:11px;color:var(--muted)">tick rows to re-run the classifier on them (pushed rows excluded)</span>
+    <div class="bulkbar">
+      <label class="muted" style="display:flex;gap:8px;align-items:center;font-size:13px"><input type="checkbox" id="select-all"> Select all</label>
+      <span id="bulk-count" class="muted num" style="font-size:13px"></span>
+      <button type="submit" id="bulk-go" class="btn btn-quiet btn-sm" title="Re-run the classifier on the selected transactions">Reclassify</button>
     </div>
-  <table>
-    <thead>
-      <tr>
-        <th><input type="checkbox" id="select-all" title="select all on this page"></th>
-        <th></th>
-        <th>When</th>
-        <th>Amount</th>
-        <th>Source</th>
-        <th>Destination</th>
-        <th>Category</th>
-        <th>Confidence</th>
-        <th></th>
-      </tr>
-    </thead>
-    <tbody>
+    <ul class="txn-list">
       {{range .Rows}}
-      <tr{{if ne .Status "pushed"}} data-unpushed="1"{{else if eq $.Status "all"}} class="row-pushed"{{end}}>
-        <td>{{if ne .Status "pushed"}}<input type="checkbox" name="fold_uuids" value="{{.FoldUUID}}">{{end}}</td>
-        <td>{{statusBadge .Status}}</td>
-        <td><time datetime="{{.TxnTimestampUTC}}">{{.TxnTimestamp}}</time></td>
-        <td class="amount {{if .Incoming}}amount-in{{else}}amount-out{{end}}">
-          {{if .Incoming}}+{{else}}-{{end}}{{.Currency}} {{.AmountDisplay}}
-          {{if .ForeignDisplay}}<br><span style="color:var(--muted); font-weight:normal">{{.ForeignDisplay}}</span>{{end}}
-          {{if .Edited}}<br><span class="pill pill-ready_to_push" title="corrected — fold saw {{.Currency}} {{.FoldAmountDisplay}}">corrected</span>{{end}}
-          {{if .Manual}}<br><span class="pill pill-pending" title="added by hand from a statement line">manual</span>{{end}}
-          {{if .PossibleDuplicate}}<br><span class="pill pill-needs_review" title="fold.money flags this as a possible duplicate alert">possible duplicate</span>{{end}}
-          {{if .RefundNeedsPick}}<br><span class="pill pill-needs_review" title="a refund with no purchase picked yet — open it and choose one (or none)">refund · pick purchase</span>
-          {{else if .IsRefund}}<br><span class="pill pill-pushed" title="gives money back for a purchase{{if .RefundLinked}} — linked in firefly{{end}}">refund{{if .RefundLinked}} ↔{{end}}</span>{{end}}
-          {{if .Refunded}}<br><span class="pill pill-pending" title="a refund points at this purchase">refunded</span>{{end}}
-        </td>
-        <td style="color:var(--muted)">{{.SourceAccountName}}</td>
-        <td>{{.DestinationName}}{{if .Description}}<br><span style="color:var(--muted); font-weight:normal; font-size:0.9em">{{.Description}}</span>{{end}}</td>
-        <td>{{.CategoryName}}</td>
-        <td>{{confidenceBar .Confidence}}</td>
-        <td><a href="/admin/ui/staged/{{.FoldUUID}}?back={{filterURL $.Filters $.PerPage $.Page | urlquery}}">review →</a>{{if .FireflyURL}} · <a href="{{.FireflyURL}}" target="_blank" rel="noopener">firefly ↗</a>{{end}}</td>
-      </tr>
+      <li class="txn{{if and (eq .Status "pushed") (eq $.Status "all")}} is-pushed{{end}}"{{if ne .Status "pushed"}} data-unpushed="1"{{end}} data-uuid="{{.FoldUUID}}">
+        <span class="sel">{{if ne .Status "pushed"}}<input type="checkbox" name="fold_uuids" value="{{.FoldUUID}}" aria-label="Select this transaction">{{end}}</span>
+        <div class="txn-main">
+          <div class="txn-title"><a href="/admin/ui/staged/{{.FoldUUID}}?back={{filterURL $.Filters $.PerPage $.Page | urlquery}}">{{if .Description}}{{blanks .Description}}{{else if .DestinationName}}{{.DestinationName}}{{else}}Untitled{{end}}</a></div>
+          <div class="txn-sub">{{if .Description}}{{.DestinationName}}{{end}}{{if and .Description .CategoryName}} · {{end}}{{.CategoryName}}</div>
+        </div>
+        <div class="txn-when txn-when-wide"><time datetime="{{.TxnTimestampUTC}}">{{.TxnTimestamp}}</time><div class="muted">{{.SourceShort}}</div></div>
+        <div class="txn-meta">
+          <span class="txn-when-narrow"><time datetime="{{.TxnTimestampUTC}}">{{.TxnTimestamp}}</time>{{if .SourceShort}} · {{.SourceShort}}{{end}}</span>
+          {{if eq $.Status "all"}}<span class="pill{{if eq .Status "pushed"}} pill-in{{else if eq .Status "skipped"}} pill-danger{{else if eq .Status "needs_review"}} pill-attn{{end}}">{{statusLabel .Status}}</span>{{end}}
+          {{if .Hold}}<span class="pill pill-attn" title="{{.Hold}}">on hold</span>{{end}}
+          {{if .Later}}<span class="pill" title="swiped left in review">later</span>{{end}}
+          {{if .Edited}}<span class="pill pill-accent" title="corrected from the statement — the alert said {{.Currency}} {{.FoldAmountDisplay}}">corrected</span>{{end}}
+          {{if .Manual}}<span class="pill" title="added by hand from a statement line">manual</span>{{end}}
+          {{if .PossibleDuplicate}}<span class="pill pill-attn" title="fold.money flags this as a possible duplicate alert">possible duplicate</span>{{end}}
+          {{if .RefundNeedsPick}}<span class="pill pill-attn" title="a refund with no purchase picked yet">refund · pick purchase</span>
+          {{else if .IsRefund}}<span class="pill pill-in" title="gives money back for a purchase{{if .RefundLinked}} — linked in Firefly{{end}}">refund{{if .RefundLinked}} ↔{{end}}</span>{{end}}
+          {{if .Refunded}}<span class="pill" title="a refund points at this purchase">refunded</span>{{end}}
+          {{if .FireflyURL}}<a class="ff-link" href="{{.FireflyURL}}" target="_blank" rel="noopener">Open in Firefly ↗</a>{{end}}
+        </div>
+        <div class="txn-amt{{if .Incoming}} in{{end}}" title="{{if .Incoming}}+{{else}}-{{end}}{{.Currency}} {{.AmountDisplay}}">{{if .Incoming}}+{{end}}{{.AmountINR}}{{if .ForeignDisplay}}<div class="muted" style="font-weight:500;font-size:12.5px">{{.ForeignDisplay}}</div>{{end}}</div>
+      </li>
       {{end}}
-    </tbody>
-  </table>
+    </ul>
   </form>
   {{if gt .NumPages 1}}
-    <nav style="margin-top:16px;display:flex;gap:12px;align-items:center;color:var(--muted)">
-      {{if .HasPrev}}
-        <a href="{{filterURL .Filters .PerPage .PrevPage}}">← prev</a>
-      {{else}}
-        <span style="opacity:0.4">← prev</span>
-      {{end}}
-      <span>page {{.Page}} / {{.NumPages}}</span>
-      {{if .HasNext}}
-        <a href="{{filterURL .Filters .PerPage .NextPage}}">next →</a>
-      {{else}}
-        <span style="opacity:0.4">next →</span>
-      {{end}}
-      <span style="margin-left:auto;font-size:0.85em">
-        showing {{.PerPage}} per page · jump:
-        <a href="{{filterURL .Filters .PerPage 1}}">first</a> ·
-        <a href="{{filterURL .Filters .PerPage .NumPages}}">last</a>
-      </span>
-    </nav>
+  <nav class="pager" aria-label="Pages">
+    {{if .HasPrev}}<a class="btn btn-quiet btn-sm" href="{{filterURL .Filters .PerPage .PrevPage}}">← Newer</a>{{else}}<span class="btn btn-quiet btn-sm" aria-disabled="true" style="opacity:.4">← Newer</span>{{end}}
+    <span class="num">Page {{.Page}} of {{.NumPages}}</span>
+    {{if .HasNext}}<a class="btn btn-quiet btn-sm" href="{{filterURL .Filters .PerPage .NextPage}}">Older →</a>{{else}}<span class="btn btn-quiet btn-sm" aria-disabled="true" style="opacity:.4">Older →</span>{{end}}
+  </nav>
   {{end}}
   {{if eq .Status "all"}}
   <script>
-    // Land the operator on the work: scroll to the first not-yet-pushed
-    // row so the already-pushed (dimmed) ones above are skipped.
+    // Land on the work: in the All view, when the (dimmed) transactions
+    // already in Firefly push the first one that isn't below the fold,
+    // scroll it up to where the eye starts. Otherwise leave the page be.
     (function () {
-      var el = document.querySelector('tr[data-unpushed]');
-      if (el) { el.scrollIntoView({ block: 'center' }); }
+      var el = document.querySelector('li[data-unpushed]');
+      if (el && el.previousElementSibling && el.getBoundingClientRect().top > window.innerHeight * 0.7) {
+        window.scrollTo({ top: window.scrollY + el.getBoundingClientRect().top - 120 });
+      }
     })();
   </script>
   {{end}}

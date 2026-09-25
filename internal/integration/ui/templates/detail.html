@@ -1,168 +1,161 @@
 {{define "content"}}
-<p><a href="{{.Back}}">← back</a></p>
+<p style="margin:0 0 14px"><a href="{{.Back}}" class="btn btn-ghost btn-sm" style="margin-left:-10px">← Back</a></p>
 
-<div class="card">
-  <h2>fold transaction
-    {{if .Row.Manual}}<span class="pill pill-pending" title="added by hand from a statement line fold never received">manual</span>{{end}}
-    {{if .Row.PossibleDuplicate}}<span class="pill pill-needs_review" title="fold.money flags this as a possible duplicate alert — often one to skip">possible duplicate</span>{{end}}
-    {{if .Row.Edited}}<span class="pill pill-ready_to_push" title="amount, foreign amount or date corrected below">corrected</span>{{end}}
-    {{if .Row.IsRefund}}<span class="pill pill-pushed" title="gives money back for a purchase — see “refund of” below">refund</span>{{end}}
-  </h2>
-  <div class="grid">
-    <div>
-      <strong>uuid:</strong> <span class="tier">{{.Row.FoldUUID}}</span><br>
-      <strong>when:</strong> <time datetime="{{.Row.TxnTimestampUTC}}">{{.Row.TxnTimestamp}}</time><br>
-      <strong>mode:</strong> <span class="pill pill-{{.Row.Mode}}">{{.Row.Mode}}</span><br>
-      <strong>type:</strong> {{.Row.Type}}<br>
-      <strong>amount:</strong> <span class="amount {{if eq .Row.Type "OUTGOING"}}amount-out{{else}}amount-in{{end}}">{{if eq .Row.Type "OUTGOING"}}-{{else}}+{{end}}{{.Row.Currency}} {{.Row.AmountDisplay}}</span>{{if .Row.ForeignDisplay}} <span style="color:var(--muted)">(charged {{.Row.ForeignDisplay}})</span>{{end}}
-    </div>
-    <div>
-      <strong>extracted merchant:</strong> {{if .Row.MerchantExtracted}}{{.Row.MerchantExtracted}}{{else}}<span style="color:var(--muted)">—</span>{{end}}<br>
-      <strong>narration:</strong>
-      <div class="narration">{{.Row.Narration}}</div>
-    </div>
-  </div>
-  {{if .Row.RawPayload}}
-  <details style="margin-top:10px">
-    <summary style="cursor:pointer; color:var(--muted); font-size:12px">fold.money's raw payload</summary>
-    <pre>{{.Row.RawPayload}}</pre>
-  </details>
-  {{end}}
-</div>
+<div class="editor">
+  <div class="editor-main" style="display:grid;gap:16px;min-width:0">
+    <section class="panel">
+      <div class="summary">
+        <div class="big{{if eq .Card.Direction "in"}} in{{end}}">{{if eq .Card.Direction "in"}}+{{end}}{{.Card.Amount}}</div>
+        <div class="who">
+          {{if eq .Card.Direction "transfer"}}{{.Card.From.Name}} → {{.Card.To.Name}}
+          {{else if eq .Card.Direction "in"}}<span class="muted" style="font-weight:500">from</span> {{if .Card.From.Name}}{{.Card.From.Name}}{{else}}someone{{end}}
+          {{else}}<span class="muted" style="font-weight:500">to</span> {{if .Card.To.Name}}{{.Card.To.Name}}{{if .Card.To.Place}} <span class="muted" style="font-weight:500">· {{.Card.To.Place}}</span>{{end}}{{else}}<span style="color:var(--accent-2)">nobody yet</span>{{end}}{{end}}
+        </div>
+        <div class="when">{{.Card.Day}} · {{.Card.Clock}}{{if eq .Card.Direction "in"}}{{if .Card.To.Name}} · into {{.Card.To.Name}}{{end}}{{else if ne .Card.Direction "transfer"}}{{if .Card.From.Name}} · {{.Card.From.Name}}{{end}}{{end}}</div>
+        <div class="meta-row" style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
+          <span class="pill{{if eq .Row.Status "pushed"}} pill-in{{else if eq .Row.Status "skipped"}} pill-danger{{else if eq .Row.Status "needs_review"}} pill-attn{{end}}">{{statusLabel .Row.Status}}</span>
+          {{if .Row.Manual}}<span class="pill" title="added by hand from a statement line fold never received">manual</span>{{end}}
+          {{if .Row.PossibleDuplicate}}<span class="pill pill-attn" title="fold.money flags this as a possible duplicate alert — often one to skip">possible duplicate</span>{{end}}
+          {{if .Row.Edited}}<span class="pill pill-accent" title="amount, foreign amount or date corrected below">corrected</span>{{end}}
+          {{if .Row.IsRefund}}<span class="pill pill-in" title="gives money back for a purchase — see “Refund of” below">refund</span>{{end}}
+          {{if .Card.Later}}<span class="pill" title="swiped left in review">later</span>{{end}}
+        </div>
+      </div>
+    </section>
 
-{{if .RefundedBy}}
-<div class="card">
-  <h2>refunded by</h2>
-  {{range .RefundedBy}}
-  <div>
-    <a href="/admin/ui/staged/{{.FoldUUID}}">{{.When}} · +INR {{.Amount}} · {{.Description}}</a>
-    <span class="pill pill-{{.Status}}">{{.Status}}</span>
-    {{if .LinkID}}<span class="pill pill-pushed" title="firefly link {{.LinkID}}">linked in firefly</span>{{end}}
-  </div>
-  {{end}}
-</div>
-{{end}}
+    {{if .Card.Hold}}<div class="banner banner-attn"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3.5 18 17H2z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M10 8.5v3.6M10 14.4v.1" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg><div class="banner-body"><b>On hold.</b> {{.Card.Hold}} It can't be sent until the hold is released — clear the reason below.</div></div>{{end}}
+    {{if .IsPushed}}<div class="banner banner-info"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M10 9v5M10 6.3v.1" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg><div class="banner-body"><b>Already in Firefly.</b>{{if .FireflyPulled}} These are Firefly's current values.{{end}} Saving updates that transaction in place — no duplicate.</div></div>{{end}}
 
-<div class="card evidence-card">
-  <h2>classifier decision</h2>
-  <div class="meta">
-    Tier {{.Row.TierLabel}} · Confidence {{if .Row.Confidence}}{{printf "%.2f" .Row.Confidence}}{{else}}—{{end}} · Status <span class="pill pill-{{.Row.Status}}">{{.Row.Status}}</span>
-  </div>
-  {{if .EvidencePretty}}<pre>{{.EvidencePretty}}</pre>{{end}}
-</div>
+    <form method="post" action="/admin/ui/staged/{{.Row.FoldUUID}}/save" class="panel">
+      <input type="hidden" name="back" value="{{.Back}}">
+      <h2>Details</h2>
+      <div class="fields">
+        <label class="field"><span>Title</span>
+          <textarea name="description" rows="2" placeholder="What was it? e.g. Masala dosa for breakfast">{{.Edit.Description}}</textarea>
+          {{if .HasBlank}}<small style="color:var(--accent-2)">Replace the ___ before sending — Firefly gets the title exactly as written.</small>{{end}}
+        </label>
+        <div class="fields two">
+          <label class="field"><span>Category</span>
+            <input type="text" name="category_name" value="{{.Edit.CategoryName}}" list="cat-options" autocomplete="off">
+            <small>Clear it for no category</small>
+          </label>
+          <div class="field"><span class="label">Tags</span>
+            <input type="text" name="tags" value="{{.Edit.Tags}}" list="tag-options" autocomplete="off" placeholder="lunch, friends" aria-label="Tags, comma-separated">
+            {{if .SuggestedTags}}<div class="chips" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">{{range .SuggestedTags}}<button type="button" class="chip chip-accent" data-tag-chip="{{.}}">+ {{.}}</button>{{end}}</div>
+            <small>Used here before — tap to add</small>{{end}}
+          </div>
+        </div>
+        <div class="fields two">
+          <label class="field"><span>{{if eq .Row.Type "INCOMING"}}Into{{else}}Paid to{{end}}</span>
+            <input type="text" name="destination_name" value="{{.Edit.DestinationAccountName}}" list="dest-options" autocomplete="off" placeholder="{{if eq .Row.Type "INCOMING"}}your account{{else}}the merchant or person{{end}}">
+            <small>{{if eq .Row.Type "INCOMING"}}Which of your accounts it came into{{else}}One of your payees, or a new name — Firefly creates it on send{{end}}</small>
+          </label>
+          <label class="field"><span>{{if eq .Row.Type "INCOMING"}}From{{else}}Paid from{{end}}</span>
+            <input type="text" name="source_name" value="{{.Edit.SourceAccountName}}" list="src-options" autocomplete="off" placeholder="{{if eq .Row.Type "INCOMING"}}who paid you{{else}}your card or account{{end}}">
+          </label>
+        </div>
+        <div class="fields two">
+          <label class="field"><span>Amount ({{.Row.Currency}})</span>
+            <input type="text" name="amount" value="{{.Edit.Amount}}" inputmode="decimal" autocomplete="off">
+            <small>What the statement billed{{if .Row.Edited}} · the alert said {{.Row.Currency}} {{.Row.AmountDisplay}}{{end}}</small>
+          </label>
+          {{if .Edit.ForeignCurrency}}
+          <label class="field"><span>Foreign amount ({{.Edit.ForeignCurrency}})</span>
+            <input type="text" name="foreign_amount" value="{{.Edit.ForeignAmount}}" inputmode="decimal" autocomplete="off">
+            <small>e.g. the tipped total — the alert only saw {{.Row.ForeignDisplay}}</small>
+          </label>
+          {{end}}
+        </div>
+        <div class="fields two">
+          <label class="field"><span>Date (IST)</span><input type="date" name="date" value="{{.Edit.Date}}"></label>
+          <label class="field"><span>Time (IST)</span><input type="time" name="time" value="{{.Edit.Time}}"></label>
+        </div>
+        <label class="field"><span>Budget</span>
+          <input type="text" name="budget_name" value="{{.Edit.BudgetName}}" list="bud-options" autocomplete="off">
+          <small>Clear it for no budget</small>
+        </label>
+        {{if .Refund.Show}}
+        <label class="field"><span>Refund of</span>
+          <select name="refund_of">
+            {{range .Refund.Options}}<option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>{{end}}
+          </select>
+          <small>The purchase this gives money back for{{if .Refund.Current}}{{if .Refund.Confirmed}} (your pick){{else}} (the classifier's pick){{end}}{{end}}. Firefly links the two as a “Refund”, so the purchase shows it was refunded.
+            {{if .Refund.LinkID}}<b style="color:var(--in)">Linked in Firefly (link {{.Refund.LinkID}})</b> — changing it here won't move that link.{{end}}
+            {{if .Refund.Waiting}}The link is made when that purchase is sent.{{end}}</small>
+        </label>
+        {{end}}
+        {{if not .IsPushed}}
+        <label class="field"><span>On hold because…</span>
+          <input type="text" name="hold_reason" value="{{.Card.Hold}}" autocomplete="off" placeholder="leave empty unless this must not be sent">
+          <small>A held transaction can't be sent until this is cleared.</small>
+        </label>
+        {{end}}
+      </div>
 
-<form method="post" action="/admin/ui/sync-accounts" style="margin:0 0 10px">
-  <input type="hidden" name="back" value="/admin/ui/staged/{{.Row.FoldUUID}}">
-  <button type="submit" class="btn" style="font-size:0.85em">↻ sync accounts from firefly</button>
-  <small class="hint">just created an account in firefly? sync so it appears in the pickers below</small>
-</form>
+      <div class="actionbar">
+        {{if .IsPushed}}
+        <button type="submit" formaction="/admin/ui/staged/{{.Row.FoldUUID}}/update" class="btn">Save &amp; update Firefly</button>
+        {{else}}
+        <button type="submit" class="btn btn-quiet">Save</button>
+        <button type="submit" formaction="/admin/ui/staged/{{.Row.FoldUUID}}/push" class="btn btn-send">Save &amp; send to Firefly</button>
+        <span class="spacer"></span>
+        <button type="submit" formaction="/admin/ui/staged/{{.Row.FoldUUID}}/skip" class="btn btn-danger-text" formnovalidate>Skip — never send</button>
+        {{end}}
+      </div>
 
-<form method="post" action="/admin/ui/staged/{{.Row.FoldUUID}}/save">
-  <input type="hidden" name="back" value="{{.Back}}">
-  <div class="card">
-    <h2>review &amp; edit</h2>
-    {{if .IsPushed}}<p style="color:var(--warn); margin-top:0">⚠ already pushed to firefly.{{if .FireflyPulled}} The current firefly values were pulled in below —{{end}} saving will <strong>update the existing transaction in place</strong> (no duplicate).</p>{{end}}
-    <div class="grid">
-      <div>
-        <label>destination account</label>
-        <input type="text" name="destination_name" value="{{.Edit.DestinationAccountName}}" list="dest-options" autocomplete="off" placeholder="merchant name (autocompletes)">
-        <small class="hint">where the money went — pick from your firefly expense accounts</small>
-      </div>
-      <div>
-        <label>source account</label>
-        <input type="text" name="source_name" value="{{.Edit.SourceAccountName}}" list="src-options" autocomplete="off" placeholder="card/bank account">
-        <small class="hint">which of your accounts paid</small>
-      </div>
-      <div>
-        <label>category</label>
-        <input type="text" name="category_name" value="{{.Edit.CategoryName}}" list="cat-options" autocomplete="off">
-        <small class="hint">clear it for no category</small>
-      </div>
-      <div>
-        <label>budget</label>
-        <input type="text" name="budget_name" value="{{.Edit.BudgetName}}" list="bud-options" autocomplete="off">
-        <small class="hint">clear it for no budget</small>
-      </div>
-    </div>
-
-    <div class="grid">
-      <div>
-        <label>amount ({{.Row.Currency}})</label>
-        <input type="text" name="amount" value="{{.Edit.Amount}}" inputmode="decimal" autocomplete="off">
-        <small class="hint">what the statement billed · fold saw {{.Row.Currency}} {{.Row.AmountDisplay}}</small>
-      </div>
-      {{if .Edit.ForeignCurrency}}
-      <div>
-        <label>foreign amount ({{.Edit.ForeignCurrency}})</label>
-        <input type="text" name="foreign_amount" value="{{.Edit.ForeignAmount}}" inputmode="decimal" autocomplete="off">
-        <small class="hint">e.g. the tipped total — the card alert only saw {{.Row.ForeignDisplay}}</small>
-      </div>
+      {{if .Refund.CanLink}}
+      <div class="banner banner-info" style="margin-top:6px"><div class="banner-body"><b>Not linked in Firefly yet.</b> This refund and its purchase are both in Firefly.
+        <div class="banner-actions"><button type="submit" formaction="/admin/ui/staged/{{.Row.FoldUUID}}/link" formnovalidate class="btn btn-sm">Link them as a refund</button></div>
+        <small class="hint">Creates the Firefly “Refund” link only; nothing else is sent.</small></div></div>
       {{end}}
-      <div>
-        <label>date (IST)</label>
-        <input type="date" name="date" value="{{.Edit.Date}}">
-      </div>
-      <div>
-        <label>time (IST)</label>
-        <input type="time" name="time" value="{{.Edit.Time}}">
-      </div>
-    </div>
 
-    {{if .Refund.Show}}
-    <label>refund of</label>
-    <select name="refund_of">
-      {{range .Refund.Options}}<option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>{{end}}
-    </select>
-    <small class="hint">the purchase this gives money back for{{if .Refund.Current}}{{if .Refund.Confirmed}} (your pick){{else}} (the classifier's pick){{end}}{{end}} — push records it in firefly as a native “Refund” link, so the purchase shows “is (partially) refunded by” this.
-      {{if .Refund.LinkID}}<strong style="color:var(--ok)">✓ linked in firefly (link {{.Refund.LinkID}})</strong> — changing it here won't move that link.{{end}}
-      {{if .Refund.Waiting}}The link is made when that purchase is pushed.{{end}}</small>
+      <datalist id="dest-options">{{range .DestOptions}}<option value="{{.Name}}">{{end}}</datalist>
+      <datalist id="src-options">{{range .SourceOptions}}<option value="{{.Name}}">{{end}}</datalist>
+      <datalist id="cat-options">{{range .CategoryOptions}}<option value="{{.Name}}">{{end}}</datalist>
+      <datalist id="bud-options">{{range .BudgetOptions}}<option value="{{.Name}}">{{end}}</datalist>
+      <datalist id="tag-options">{{range .TagLibrary}}<option value="{{.}}">{{end}}</datalist>
+    </form>
+  </div>
+
+  <aside style="display:grid;gap:16px;min-width:0">
+    <section class="panel">
+      <h2>What the bank said</h2>
+      <p class="mono" style="margin:0 0 10px">{{.Row.Narration}}</p>
+      {{if .Card.Note}}<p class="note-quote" style="margin:0 0 10px">{{.Card.Note}}</p>{{end}}
+      <dl class="kv">
+        <dt>Alert time</dt><dd><time datetime="{{.Row.TxnTimestampUTC}}">{{.Row.TxnTimestamp}}</time></dd>
+        <dt>Alert amount</dt><dd class="num">{{if eq .Row.Type "OUTGOING"}}−{{else}}+{{end}}{{.Row.Currency}} {{.Row.AmountDisplay}}{{if .Row.ForeignDisplay}} ({{.Row.ForeignDisplay}}){{end}}</dd>
+        <dt>Mode</dt><dd>{{.Row.Mode}}</dd>
+        {{if .Row.MerchantExtracted}}<dt>Merchant</dt><dd>{{.Row.MerchantExtracted}}</dd>{{end}}
+      </dl>
+    </section>
+
+    {{if .RefundedBy}}
+    <section class="panel">
+      <h2>Refunded by</h2>
+      {{range .RefundedBy}}
+      <p style="margin:0 0 8px"><a href="/admin/ui/staged/{{.FoldUUID}}">{{.When}} · +INR {{.Amount}} · {{.Description}}</a>
+        <span class="pill">{{statusLabel .Status}}</span>{{if .LinkID}} <span class="pill pill-in" title="firefly link {{.LinkID}}">linked in Firefly</span>{{end}}</p>
+      {{end}}
+    </section>
     {{end}}
 
-    <label>description</label>
-    <textarea name="description">{{.Edit.Description}}</textarea>
+    <section class="panel">
+      <h2>How it was classified</h2>
+      <p class="muted" style="margin:0 0 10px;font-size:13.5px">Tier {{.Row.TierLabel}} · confidence {{if .Row.Confidence}}{{printf "%.2f" .Row.Confidence}}{{else}}—{{end}}</p>
+      {{if .EvidencePretty}}<details class="more"><summary>The classifier's evidence</summary><pre>{{.EvidencePretty}}</pre></details>{{end}}
+      {{if .Row.RawPayload}}<details class="more" style="margin-top:10px"><summary>fold.money's raw payload</summary><pre>{{.Row.RawPayload}}</pre></details>{{end}}
+      <p class="mono muted" style="margin:12px 0 0">{{.Row.FoldUUID}}</p>
+    </section>
 
-    <label>tags (comma-separated)</label>
-    <input type="text" name="tags" value="{{.Edit.Tags}}" list="tag-options" autocomplete="off" placeholder="lunch, friends">
-    {{if .SuggestedTags}}
-      <small class="hint">used previously at this merchant — click to add:</small>
-      <div class="chips">
-        {{range .SuggestedTags}}<span class="chip" data-tag-chip="{{.}}">{{.}}</span>{{end}}
-      </div>
-    {{end}}
-
-    <div class="actions">
-      {{if .IsPushed}}
-      <button type="submit" formaction="/admin/ui/staged/{{.Row.FoldUUID}}/update" class="btn btn-warn">save &amp; update firefly</button>
-      {{else}}
-      <button type="submit" class="btn">save edits</button>
-      <button type="submit" formaction="/admin/ui/staged/{{.Row.FoldUUID}}/push" class="btn btn-warn">save &amp; push to firefly</button>
-      <button type="submit" formaction="/admin/ui/staged/{{.Row.FoldUUID}}/skip" class="btn btn-err" formnovalidate>skip (don't push)</button>
-      {{end}}
-    </div>
-  </div>
-
-  {{if .Refund.CanLink}}
-  <div class="card">
-    <strong>not linked in firefly yet</strong> — this refund and its purchase are both in firefly.
-    <button type="submit" formaction="/admin/ui/staged/{{.Row.FoldUUID}}/link" formnovalidate class="btn">link in firefly as a refund</button>
-    <small class="hint">creates the firefly “Refund” link only; nothing else is sent</small>
-  </div>
-  {{end}}
-
-  <datalist id="dest-options">
-    {{range .DestOptions}}<option value="{{.Name}}">{{end}}
-  </datalist>
-  <datalist id="src-options">
-    {{range .SourceOptions}}<option value="{{.Name}}">{{end}}
-  </datalist>
-  <datalist id="cat-options">
-    {{range .CategoryOptions}}<option value="{{.Name}}">{{end}}
-  </datalist>
-  <datalist id="bud-options">
-    {{range .BudgetOptions}}<option value="{{.Name}}">{{end}}
-  </datalist>
-  <datalist id="tag-options">
-    {{range .TagLibrary}}<option value="{{.}}">{{end}}
-  </datalist>
-</form>
+    <section class="panel">
+      <h2>Accounts</h2>
+      <p class="hint" style="margin:0 0 10px">Just made an account in Firefly? Sync, and it shows up in the pickers.</p>
+      <form method="post" action="/admin/ui/sync-accounts">
+        <input type="hidden" name="back" value="/admin/ui/staged/{{.Row.FoldUUID}}">
+        <button type="submit" class="btn btn-quiet btn-sm">Sync accounts from Firefly</button>
+      </form>
+    </section>
+  </aside>
+</div>
 {{end}}
