@@ -5,13 +5,13 @@
   <div class="editor-main" style="display:grid;gap:16px;min-width:0">
     <section class="panel">
       <div class="summary">
-        <div class="big{{if eq .Card.Direction "in"}} in{{end}}">{{if eq .Card.Direction "in"}}<span class="sign">+</span>{{else if eq .Card.Direction "out"}}<span class="sign">–</span>{{end}}{{rupees .Card.Amount}}</div>
+        <div class="big{{if eq .Card.Type "deposit"}} in{{end}}">{{if eq .Card.Type "deposit"}}<span class="sign">+</span>{{else if eq .Card.Type "withdrawal"}}<span class="sign">–</span>{{end}}{{rupees .Card.Amount}}</div>
         <div class="who">
-          {{if eq .Card.Direction "transfer"}}{{.Card.From.Name}} → {{.Card.To.Name}}
-          {{else if eq .Card.Direction "in"}}<span class="muted" style="font-weight:500">from</span> {{if .Card.From.Name}}{{.Card.From.Name}}{{else}}someone{{end}}
+          {{if eq .Card.Type "transfer"}}{{if .Card.From.Name}}{{.Card.From.Name}}{{else}}<span style="color:var(--accent-2)">which account?</span>{{end}} <span class="muted" style="font-weight:500">→</span> {{if .Card.To.Name}}{{.Card.To.Name}}{{else}}<span style="color:var(--accent-2)">which account?</span>{{end}}
+          {{else if eq .Card.Type "deposit"}}<span class="muted" style="font-weight:500">from</span> {{if .Card.From.Name}}{{.Card.From.Name}}{{else}}someone{{end}}
           {{else}}<span class="muted" style="font-weight:500">to</span> {{if .Card.To.Name}}{{.Card.To.Name}}{{if .Card.To.Place}} <span class="muted" style="font-weight:500">· {{.Card.To.Place}}</span>{{end}}{{else}}<span style="color:var(--accent-2)">nobody yet</span>{{end}}{{end}}
         </div>
-        <div class="when">{{.Card.Day}} · {{.Card.Clock}}{{if eq .Card.Direction "in"}}{{if .Card.To.Name}} · into {{.Card.To.Name}}{{end}}{{else if ne .Card.Direction "transfer"}}{{if .Card.From.Name}} · {{.Card.From.Name}}{{end}}{{end}}</div>
+        <div class="when">{{.Card.Day}} · {{.Card.Clock}}{{if eq .Card.Type "deposit"}}{{if .Card.To.Name}} · into {{.Card.To.Name}}{{end}}{{else if eq .Card.Type "withdrawal"}}{{if .Card.From.Name}} · {{.Card.From.Name}}{{end}}{{end}}</div>
         <div class="meta-row" style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
           <span class="pill{{if eq .Row.Status "pushed"}} pill-in{{else if eq .Row.Status "skipped"}} pill-danger{{else if eq .Row.Status "needs_review"}} pill-todo{{end}}">{{statusLabel .Row.Status}}</span>
           {{if .Row.Manual}}<span class="pill" title="added by hand from a statement line fold never received">manual</span>{{end}}
@@ -24,12 +24,20 @@
     </section>
 
     {{if .Card.Hold}}<div class="banner banner-attn"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3.5 18 17H2z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M10 8.5v3.6M10 14.4v.1" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg><div class="banner-body"><b>On hold:</b> {{sentence .Card.Hold}} It can't be sent until the hold is released — clear the reason below.</div></div>{{end}}
+    {{if .Card.ProblemText}}<div class="banner banner-attn"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3.5 18 17H2z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M10 8.5v3.6M10 14.4v.1" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg><div class="banner-body"><b>It can't be sent like this.</b> {{.Card.ProblemText}}{{if eq .Card.Problem "swapped"}}
+      <div class="banner-actions"><button type="button" class="btn btn-sm btn-quiet" data-swap-sides>Swap them</button></div>{{end}}</div></div>{{end}}
     {{if .IsPushed}}<div class="banner banner-info"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M10 9v5M10 6.3v.1" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg><div class="banner-body"><b>Already in Firefly.</b>{{if .FireflyPulled}} These are Firefly's current values.{{end}} Saving updates that transaction in place — no duplicate.</div></div>{{end}}
 
-    <form method="post" action="/admin/ui/staged/{{.Row.FoldUUID}}/save" class="panel">
+    <form method="post" action="/admin/ui/staged/{{.Row.FoldUUID}}/save" class="panel" data-dir="{{.Row.Type}}">
       <input type="hidden" name="back" value="{{.Back}}">
       <h2>Details</h2>
       <div class="fields">
+        <div class="field"><span class="label" id="type-label">Type</span>
+          <div class="segmented" role="radiogroup" aria-labelledby="type-label" style="width:fit-content;max-width:100%">
+            {{range .TypeOptions}}<label style="display:contents"><input type="radio" name="txn_type" value="{{.Value}}"{{if .Selected}} checked{{end}} class="sr-only" data-hint="{{.Hint}}"><span class="seg">{{.Label}}</span></label>{{end}}
+          </div>
+          <small data-type-hint>{{range .TypeOptions}}{{if .Selected}}{{.Hint}}{{end}}{{end}}</small>
+        </div>
         <label class="field"><span>Title</span>
           <textarea name="description" rows="2" placeholder="What was it? e.g. Masala dosa for breakfast">{{.Edit.Description}}</textarea>
           {{if .HasBlank}}<small style="color:var(--accent-2)">Replace the ___ before sending — Firefly gets the title exactly as written.</small>{{end}}
@@ -46,12 +54,13 @@
           </div>
         </div>
         <div class="fields two">
-          <label class="field"><span>{{if eq .Row.Type "INCOMING"}}Into{{else}}Paid to{{end}}</span>
-            <input type="text" name="destination_name" value="{{.Edit.DestinationAccountName}}" list="dest-options" autocomplete="off" placeholder="{{if eq .Row.Type "INCOMING"}}your account{{else}}the merchant or person{{end}}">
-            <small>{{if eq .Row.Type "INCOMING"}}Which of your accounts it came into{{else}}One of your payees, or a new name — Firefly creates it on send{{end}}</small>
+          <label class="field"><span data-to-label>{{if eq .Row.Type "INCOMING"}}Into{{else if eq .Card.Type "transfer"}}To{{else}}Paid to{{end}}</span>
+            <input type="text" name="destination_name" value="{{.Edit.DestinationAccountName}}" list="{{if or (eq .Row.Type "INCOMING") (eq .Card.Type "transfer")}}own-options{{else}}payee-options{{end}}" autocomplete="off" placeholder="{{if eq .Row.Type "INCOMING"}}your account{{else if eq .Card.Type "transfer"}}your other account{{else}}the merchant or person{{end}}">
+            <small data-to-hint>{{if eq .Row.Type "INCOMING"}}Which of your accounts it came into{{else if eq .Card.Type "transfer"}}Another of your own accounts{{else}}One of your payees, or a new name — Firefly creates it on send{{end}}</small>
           </label>
-          <label class="field"><span>{{if eq .Row.Type "INCOMING"}}From{{else}}Paid from{{end}}</span>
-            <input type="text" name="source_name" value="{{.Edit.SourceAccountName}}" list="src-options" autocomplete="off" placeholder="{{if eq .Row.Type "INCOMING"}}who paid you{{else}}your card or account{{end}}">
+          <label class="field"><span data-from-label>{{if eq .Row.Type "INCOMING"}}From{{else}}Paid from{{end}}</span>
+            <input type="text" name="source_name" value="{{.Edit.SourceAccountName}}" list="{{if and (eq .Row.Type "INCOMING") (ne .Card.Type "transfer")}}payer-options{{else}}own-options{{end}}" autocomplete="off" placeholder="{{if eq .Row.Type "INCOMING"}}{{if eq .Card.Type "transfer"}}your other account{{else}}who paid you{{end}}{{else}}your card or account{{end}}">
+            <small data-from-hint>{{if eq .Row.Type "INCOMING"}}{{if eq .Card.Type "transfer"}}Another of your own accounts{{else}}Someone who has paid you, or a new name{{end}}{{else}}Which of your accounts paid{{end}}</small>
           </label>
         </div>
         <div class="fields two">
@@ -109,12 +118,51 @@
         <small class="hint">Creates the Firefly “Refund” link only; nothing else is sent.</small></div></div>
       {{end}}
 
-      <datalist id="dest-options">{{range .DestOptions}}<option value="{{.Name}}">{{end}}</datalist>
-      <datalist id="src-options">{{range .SourceOptions}}<option value="{{.Name}}">{{end}}</datalist>
+      <datalist id="own-options">{{range .OwnOptions}}<option value="{{.Name}}">{{end}}</datalist>
+      <datalist id="payee-options">{{range .PayeeOptions}}<option value="{{.Name}}">{{end}}</datalist>
+      <datalist id="payer-options">{{range .PayerOptions}}<option value="{{.Name}}">{{end}}</datalist>
       <datalist id="cat-options">{{range .CategoryOptions}}<option value="{{.Name}}">{{end}}</datalist>
       <datalist id="bud-options">{{range .BudgetOptions}}<option value="{{.Name}}">{{end}}</datalist>
       <datalist id="tag-options">{{range .TagLibrary}}<option value="{{.}}">{{end}}</datalist>
     </form>
+    <script>
+      // The type decides what each account field takes: your own accounts on
+      // a transfer's both sides, payees on a withdrawal, payers on a deposit.
+      (function () {
+        var form = document.currentScript.previousElementSibling;
+        var incoming = form.dataset.dir === 'INCOMING';
+        var to = form.querySelector('input[name=destination_name]'), from = form.querySelector('input[name=source_name]');
+        var own = 'Another of your own accounts';
+        function sync() {
+          var r = form.querySelector('input[name=txn_type]:checked');
+          if (!r) return;
+          var t = r.value, transfer = t === 'transfer';
+          form.querySelector('[data-type-hint]').textContent = r.dataset.hint;
+          if (incoming) {
+            from.setAttribute('list', transfer ? 'own-options' : 'payer-options');
+            from.placeholder = transfer ? 'your other account' : 'who paid you';
+            form.querySelector('[data-from-hint]').textContent = transfer ? own : 'Someone who has paid you, or a new name';
+          } else {
+            to.setAttribute('list', transfer ? 'own-options' : 'payee-options');
+            to.placeholder = transfer ? 'your other account' : 'the merchant or person';
+            form.querySelector('[data-to-label]').textContent = transfer ? 'To' : 'Paid to';
+            form.querySelector('[data-to-hint]').textContent = transfer ? own : 'One of your payees, or a new name — Firefly creates it on send';
+          }
+        }
+        form.querySelectorAll('input[name=txn_type]').forEach(function (x) { x.addEventListener('change', sync); });
+        // saved the wrong way round: one click swaps the two fields, and
+        // saving keeps it
+        var swap = document.querySelector('[data-swap-sides]');
+        if (swap) swap.addEventListener('click', function () {
+          var v = to.value; to.value = from.value; from.value = v;
+          swap.disabled = true;
+          swap.textContent = 'Swapped — save to keep it';
+          // the plain Save, never one that writes to Firefly
+          var save = form.querySelector('.actionbar button[type=submit]:not([formaction])');
+          if (save) save.focus();
+        });
+      })();
+    </script>
   </div>
 
   <aside style="display:grid;gap:16px;min-width:0">

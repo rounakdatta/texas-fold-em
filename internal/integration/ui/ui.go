@@ -854,6 +854,7 @@ func (h *Handler) handleDetail(w http.ResponseWriter, r *http.Request) {
 	// path we'll cache, but for personal-scale traffic it's fine.
 	destAccounts, _ := h.listAccountsByKind(r.Context(), "destination")
 	srcAccounts, _ := h.listAccountsByKind(r.Context(), "source")
+	ownOpts, payeeOpts, payerOpts := h.nameLists(r.Context())
 	categories, _ := h.listCategories(r.Context())
 	budgets, _ := h.listBudgets(r.Context())
 	allTags, _ := h.listAllTags(r.Context())
@@ -883,8 +884,10 @@ func (h *Handler) handleDetail(w http.ResponseWriter, r *http.Request) {
 	// the transaction in place rather than creating a duplicate.
 	isPushed := row.Status == "pushed"
 	fireflyPulled := false
+	liveType := ""
 	if isPushed && h.pusher != nil {
 		if v, ok := h.pusher.CurrentFireflyView(r.Context(), uuid); ok {
+			liveType = v.Type
 			edit.DestinationAccountName = v.DestinationName
 			edit.SourceAccountName = v.SourceName
 			edit.CategoryName = v.CategoryName
@@ -918,14 +921,29 @@ func (h *Handler) handleDetail(w http.ResponseWriter, r *http.Request) {
 	title := "Transaction"
 	if card.Amount != "" {
 		title = card.Amount
-		if card.To.Name != "" && card.Direction == "out" {
+		if card.To.Name != "" && card.Type == integration.TypeWithdrawal {
 			title += " · " + card.To.Name
 		}
+	}
+	// The Type field: the kinds the bank's direction allows, with the one
+	// push will send picked — firefly's own for a row already there.
+	typeValue := card.Type
+	if integration.TypeAllowed(row.Type, liveType) {
+		typeValue = liveType
+	}
+	type typeOpt struct {
+		Value, Label, Hint string
+		Selected           bool
+	}
+	var typeOpts []typeOpt
+	for _, t := range integration.TypesFor(row.Type) {
+		typeOpts = append(typeOpts, typeOpt{Value: t, Label: typeLabel(t), Hint: typeHint(t, row.Type), Selected: t == typeValue})
 	}
 
 	h.render(w, h.detailTmpl, map[string]any{
 		"Title":           title,
 		"Card":            card,
+		"TypeOptions":     typeOpts,
 		"HasBlank":        strings.Contains(edit.Description, titleBlank),
 		"Refund":          refund,
 		"RefundedBy":      refundedBy,
@@ -940,6 +958,9 @@ func (h *Handler) handleDetail(w http.ResponseWriter, r *http.Request) {
 		"Flash":           flashFromCookie(r, w),
 		"DestOptions":     destAccounts,
 		"SourceOptions":   srcAccounts,
+		"OwnOptions":      ownOpts,
+		"PayeeOptions":    payeeOpts,
+		"PayerOptions":    payerOpts,
 		"CategoryOptions": categories,
 		"BudgetOptions":   budgets,
 		"TagLibrary":      allTags,
@@ -1330,43 +1351,33 @@ func (h *Handler) saveEdits(ctx context.Context, uuid string, form url.Values) (
 	desc := strings.TrimSpace(form.Get("description"))
 	tagsStr := strings.TrimSpace(form.Get("tags"))
 
-	// Effective firefly type governs whether an unmatched destination name
-	// is allowed. A withdrawal's expense account is auto-created by firefly
-	// from the name, so an unmatched name is a NEW account, not an error.
-	// A deposit/transfer destination must be an existing asset, so there an
-	// unmatched name is a genuine unresolved field.
-	var effType string
-	_ = h.db.QueryRowContext(ctx, `
-		SELECT COALESCE(NULLIF(confirmed_txn_type,''), NULLIF(proposed_txn_type,''),
-		                CASE WHEN type='INCOMING' THEN 'deposit' ELSE 'withdrawal' END)
-		FROM staged_fold_txns WHERE fold_uuid = ?`, uuid).Scan(&effType)
+	// The kind of move governs what each side may be (see resolveSides): the
+	// form's own pick when it carries one (the editor's Type field, a card's
+	// type choice), else what the row is now.
+	var dir, confType string
+	_ = h.db.QueryRowContext(ctx, `SELECT type, COALESCE(confirmed_txn_type, '') FROM staged_fold_txns WHERE fold_uuid = ?`, uuid).Scan(&dir, &confType)
+	effType, typeVal := h.formType(ctx, uuid, dir, form)
+	if typeVal == nil {
+		typeVal = nullableStr(confType)
+	}
 
 	var dstID, srcID, catID, budID any
 	var dstName any    // set instead of dstID for a new expense account (withdrawal)
 	var srcNameVal any // set instead of srcID for a new revenue account (deposit)
-	if destName != "" {
-		if id := h.resolveAccountID(ctx, "destination", destName); id != 0 {
-			dstID = id
-		} else if effType == "withdrawal" {
-			// Novel merchant: keep the typed name so the push creates the
-			// firefly expense account by that name (not "unresolved").
-			dstName = destName
-		} else {
-			unresolved = append(unresolved, fmt.Sprintf("destination %q", destName))
-		}
+	if t := strings.ToLower(strings.TrimSpace(form.Get("txn_type"))); t != "" && !integration.TypeAllowed(dir, t) {
+		unresolved = append(unresolved, fmt.Sprintf("type %q (%s)", t, integration.TypeProblemText(integration.ProblemDirection, dir, t)))
 	}
-	if srcName != "" {
-		if id := h.resolveAccountID(ctx, "source", srcName); id != 0 {
-			srcID = id
-		} else if effType == "deposit" {
-			// Deposit payer: keep the typed name so the push creates the
-			// firefly REVENUE account by that name — symmetric to a
-			// withdrawal's new expense destination. (A withdrawal/transfer
-			// source must be an existing asset, so there it stays unresolved.)
-			srcNameVal = srcName
-		} else {
-			unresolved = append(unresolved, fmt.Sprintf("source %q", srcName))
-		}
+	src, dst, bad := h.resolveSides(ctx, dir, effType, srcName, destName)
+	unresolved = append(unresolved, bad...)
+	if src.ID != 0 {
+		srcID = src.ID
+	} else if src.Name != "" {
+		srcNameVal = src.Name
+	}
+	if dst.ID != 0 {
+		dstID = dst.ID
+	} else if dst.Name != "" {
+		dstName = dst.Name
 	}
 	if catName != "" {
 		if id := h.resolveCategoryID(ctx, catName); id != 0 {
@@ -1429,12 +1440,13 @@ func (h *Handler) saveEdits(ctx context.Context, uuid string, form url.Values) (
 		    confirmed_amount_paise             = ?,
 		    confirmed_foreign_amount_paise     = ?,
 		    confirmed_txn_timestamp            = ?,
+		    confirmed_txn_type                 = ?,
 		    reviewed_at                        = CURRENT_TIMESTAMP,
 		    updated_at                         = CURRENT_TIMESTAMP,
 		    status = CASE WHEN status='needs_review' THEN 'ready_to_push' ELSE status END
 		WHERE fold_uuid = ?
 	`, srcID, srcNameVal, dstID, dstName, catID, budID, nullableStrFromForm(desc), tagsJSON,
-		amtOv, fxOv, tsOv, uuid)
+		amtOv, fxOv, tsOv, typeVal, uuid)
 	if err != nil {
 		return unresolved, err
 	}
@@ -1466,6 +1478,159 @@ func (h *Handler) saveEdits(ctx context.Context, uuid string, form url.Values) (
 func formHas(form url.Values, key string) bool {
 	_, ok := form[key]
 	return ok
+}
+
+// formType is the kind of move a save is for, and the confirmed_txn_type to
+// store: the form's txn_type when it carries a valid one for the row's
+// direction (an empty one hands the type back to fold's inference), else nil
+// for the value to store — the caller keeps what is stored — with the type
+// the row has now.
+func (h *Handler) formType(ctx context.Context, uuid, dir string, form url.Values) (string, any) {
+	if formHas(form, "txn_type") {
+		t := strings.ToLower(strings.TrimSpace(form.Get("txn_type")))
+		if integration.TypeAllowed(dir, t) {
+			return t, t
+		}
+		if t == "" {
+			return h.inferredType(ctx, uuid, dir), sql.NullString{}
+		}
+	}
+	c, _ := h.loadCard(ctx, uuid)
+	if c.Type == "" {
+		return integration.DefaultType(dir), nil
+	}
+	return c.Type, nil
+}
+
+// typeLabel is Firefly's word for a type, as the pages show it.
+func typeLabel(t string) string {
+	switch t {
+	case integration.TypeDeposit:
+		return "Deposit"
+	case integration.TypeTransfer:
+		return "Transfer"
+	}
+	return "Withdrawal"
+}
+
+// typeHint says what a type means for this row, in a line.
+func typeHint(t, dir string) string {
+	switch t {
+	case integration.TypeDeposit:
+		return "Someone paid you: a refund, salary, interest, a friend's share."
+	case integration.TypeTransfer:
+		if dir == "INCOMING" {
+			return "It came from another of your accounts, like a card bill paid from the bank."
+		}
+		return "It went to another of your accounts, like a card bill paid from the bank."
+	}
+	return "You paid someone: a merchant, a person, a fee."
+}
+
+// inferredType is the type fold would give the row with no one's choice on
+// it: the classifier's guess where the direction allows it, and a transfer
+// when both sides are the user's own accounts.
+func (h *Handler) inferredType(ctx context.Context, uuid, dir string) string {
+	var propType, srcName, dstName string
+	var srcID, dstID sql.NullInt64
+	err := h.db.QueryRowContext(ctx, `SELECT COALESCE(s.proposed_txn_type, ''), `+effectiveAccountIDSQL("source")+`,
+		COALESCE(NULLIF(s.confirmed_source_account_name, ''), NULLIF(s.proposed_source_account_name, ''), ''),
+		`+effectiveAccountIDSQL("destination")+`,
+		COALESCE(NULLIF(s.confirmed_destination_account_name, ''), NULLIF(s.proposed_destination_account_name, ''), '')
+		FROM staged_fold_txns s WHERE s.fold_uuid = ?`, uuid).Scan(&propType, &srcID, &srcName, &dstID, &dstName)
+	if err != nil {
+		return integration.DefaultType(dir)
+	}
+	return integration.CheckType(ctx, h.db, dir, "", propType, cardSide(srcID, srcName), cardSide(dstID, dstName)).Type
+}
+
+// resolveSides turns the form's two names into the accounts a save stores,
+// by the kind of move (dir is the bank's INCOMING | OUTGOING):
+//   - the row's own side is one of the user's accounts;
+//   - a withdrawal's other side is someone paid — an existing payee (an
+//     expense account), or a new name firefly creates on send;
+//   - a deposit's other side is someone who paid — an existing payer (a
+//     revenue account), or a new name;
+//   - a transfer's other side is another of the user's accounts, and
+//     nothing else.
+//
+// A withdrawal or deposit never resolves a name to one of the user's own
+// accounts: a name that is one stays a name, and the type check then says
+// it's a transfer instead of quietly booking one. bad lists what didn't
+// resolve, in the form's own words.
+func (h *Handler) resolveSides(ctx context.Context, dir, txnType, srcName, dstName string) (src, dst integration.Side, bad []string) {
+	incoming := dir == "INCOMING"
+	ownName, otherName := srcName, dstName
+	ownField, otherField := "source", "destination"
+	if incoming {
+		ownName, otherName = dstName, srcName
+		ownField, otherField = "destination", "source"
+	}
+	var own, other integration.Side
+	if ownName != "" {
+		if id := integration.AssetByName(ctx, h.db, ownName); id != 0 {
+			own.ID = id
+		} else if id := h.resolveAccountID(ctx, ownField, ownName); id != 0 {
+			own.ID = id
+		} else {
+			bad = append(bad, fmt.Sprintf("%s %q", ownField, ownName))
+		}
+	}
+	if otherName != "" {
+		switch txnType {
+		case integration.TypeTransfer:
+			if id := integration.AssetByName(ctx, h.db, otherName); id != 0 {
+				other.ID = id
+			} else {
+				bad = append(bad, fmt.Sprintf("%s %q (a transfer needs one of your accounts)", otherField, otherName))
+			}
+		case integration.TypeDeposit:
+			if id := h.accountOfKind(ctx, "revenue", otherName); id != 0 {
+				other.ID = id
+			} else {
+				other.Name = otherName // a new payer
+			}
+		default:
+			if id := h.accountOfKind(ctx, "expense", otherName); id != 0 {
+				other.ID = id
+			} else {
+				other.Name = otherName // a new payee
+			}
+		}
+	}
+	if incoming {
+		return other, own, bad
+	}
+	return own, other, bad
+}
+
+// accountOfKind finds an existing account of one kind by name (any case):
+// "expense" (someone paid) or "revenue" (someone who paid), from firefly's
+// account list first, then the transactions' history. 0 when there is none.
+func (h *Handler) accountOfKind(ctx context.Context, kind, name string) int64 {
+	var id sql.NullInt64
+	_ = h.db.QueryRowContext(ctx,
+		`SELECT firefly_id FROM firefly_accounts WHERE LOWER(name) = LOWER(?) AND type = ? AND active = 1 ORDER BY firefly_id LIMIT 1`,
+		name, kind).Scan(&id)
+	if id.Valid {
+		return id.Int64
+	}
+	q := `SELECT destination_account_id FROM firefly_txns WHERE txn_type = 'withdrawal' AND LOWER(destination_account_name) = LOWER(?)
+	      AND destination_account_id IS NOT NULL ORDER BY date DESC LIMIT 1`
+	if kind == "revenue" {
+		q = `SELECT source_account_id FROM firefly_txns WHERE txn_type = 'deposit' AND LOWER(source_account_name) = LOWER(?)
+		     AND source_account_id IS NOT NULL ORDER BY date DESC LIMIT 1`
+	}
+	_ = h.db.QueryRowContext(ctx, q, name).Scan(&id)
+	return id.Int64
+}
+
+// nullableStr is a string as a nullable column value: NULL when empty.
+func nullableStr(s string) any {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	return s
 }
 
 // moneyOverrides turns the form's amount / foreign amount / date+time into

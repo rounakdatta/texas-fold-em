@@ -64,6 +64,51 @@ func (h *Handler) listAccountsByKind(ctx context.Context, kind string) ([]nameOp
 	return out, rows.Err()
 }
 
+// nameLists are the three kinds of name an editor's account fields offer:
+// the user's own accounts (a row's own side, and a transfer's other side),
+// payees (expense accounts: a withdrawal's other side) and payers (revenue
+// accounts: a deposit's other side). Payees and payers never include a name
+// that is one of the user's own accounts — Firefly keeps same-named duplicates,
+// and picking one is how money between the user's accounts got booked as a
+// purchase or a payment.
+func (h *Handler) nameLists(ctx context.Context) (own, payees, payers []nameOption) {
+	mine := map[string]bool{}
+	rows, err := h.db.QueryContext(ctx, `SELECT firefly_id, name FROM firefly_accounts WHERE type = 'asset' AND active = 1 AND name <> '' ORDER BY name COLLATE NOCASE`)
+	if err == nil {
+		for rows.Next() {
+			var n nameOption
+			if rows.Scan(&n.ID, &n.Name) == nil {
+				own = append(own, n)
+				mine[strings.ToLower(n.Name)] = true
+			}
+		}
+		rows.Close()
+	}
+	all, _ := h.listAccountsByKind(ctx, "destination")
+	for _, n := range all {
+		if !mine[strings.ToLower(n.Name)] {
+			payees = append(payees, n)
+		}
+	}
+	rows, err = h.db.QueryContext(ctx, `
+		SELECT id, name FROM (
+			SELECT source_account_id AS id, source_account_name AS name FROM firefly_txns
+			WHERE txn_type = 'deposit' AND source_account_id IS NOT NULL AND source_account_name NOT IN ('', '(no name)')
+			UNION
+			SELECT firefly_id, name FROM firefly_accounts WHERE type = 'revenue' AND active = 1 AND name NOT IN ('', '(no name)')
+		) GROUP BY LOWER(name) ORDER BY name COLLATE NOCASE`)
+	if err == nil {
+		for rows.Next() {
+			var n nameOption
+			if rows.Scan(&n.ID, &n.Name) == nil && !mine[strings.ToLower(n.Name)] {
+				payers = append(payers, n)
+			}
+		}
+		rows.Close()
+	}
+	return own, payees, payers
+}
+
 // listFilterAccounts returns the distinct source accounts that actually
 // appear on staged rows (effective source = confirmed ?? proposed),
 // resolved to display names and sorted alphabetically. This backs the
