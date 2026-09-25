@@ -276,7 +276,9 @@
   const nodes = new Map(); // uuid -> element, for the cards on screen
   let flying = new Set();  // elements animating out; left alone by render
 
-  function fmtCount(n) { return n > 0 ? String(n) : ''; }
+  // counts read the way the server writes them: 1,247 (Indian grouping)
+  const group = n => Number(n || 0).toLocaleString('en-IN');
+  function fmtCount(n) { return n > 0 ? group(n) : ''; }
 
   function render() {
     for (const el of document.querySelectorAll('[data-count]')) {
@@ -285,7 +287,7 @@
     }
     const navCount = document.querySelector('.nav a[aria-current="page"] .count');
     if (navCount && state.loaded && state.pile === 'review' && !state.account) {
-      navCount.textContent = String(state.counts.review || 0);
+      navCount.textContent = group(state.counts.review);
       navCount.hidden = !state.counts.review;
     }
     for (const b of document.querySelectorAll('.pile')) b.setAttribute('aria-selected', String(b.dataset.pile === state.pile));
@@ -417,7 +419,7 @@
       title = 'All caught up';
       line = 'Nothing left to rope in.';
       if (state.counts.later) actions.append(h('button', { type: 'button', class: 'btn', onclick: () => switchPile('later'),
-        text: state.counts.later === 1 ? '1 card saved for later' : state.counts.later + ' cards saved for later' }));
+        text: state.counts.later === 1 ? '1 card saved for later' : group(state.counts.later) + ' cards saved for later' }));
     }
     actions.append(h('a', { href: '/admin/ui/?status=all', text: 'See every transaction' }));
     const art = h('img', { class: 'empty-art', src: app.dataset.art || '', alt: '', width: '150', height: '135' });
