@@ -699,7 +699,8 @@ func TestUI_IndexAllStatus(t *testing.T) {
 		t.Errorf("expected the All tab, current, with 3, got: %q", snippet(body, ">All <"))
 	}
 	// In the mixed view each row says its status in words.
-	for _, want := range []string{`class="pill pill-attn">Needs a look</span>`, `class="pill">Ready</span>`, `class="pill pill-in">In Firefly</span>`} {
+	// ("needs a look" is something to do, not something wrong: blue, not red)
+	for _, want := range []string{`class="pill pill-todo">Needs a look</span>`, `class="pill">Ready</span>`, `class="pill pill-in">In Firefly</span>`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("all view missing status %q", want)
 		}
@@ -1147,9 +1148,10 @@ func TestUI_Index_CorrectedAmountAndDuplicateFlag(t *testing.T) {
 	resp := u.do(t, "GET", "/admin/ui/?status=needs_review", nil)
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	// The corrected amount reads the Indian way; the hint says what the
-	// alert said (it used to say "fold saw", which only fold's author reads).
-	for _, want := range []string{"₹2,400", ">corrected</span>", "the alert said INR 2384.75", ">possible duplicate</span>"} {
+	// The corrected amount reads the Indian way, with fold's raised rupee
+	// sign; the hint says what the alert said (it used to say "fold saw",
+	// which only fold's author reads).
+	for _, want := range []string{`<span class="cur">₹</span>2,400`, ">corrected</span>", "the alert said INR 2384.75", ">possible duplicate</span>"} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("list missing %q", want)
 		}

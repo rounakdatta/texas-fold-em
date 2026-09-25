@@ -5,7 +5,7 @@
   <div class="editor-main" style="display:grid;gap:16px;min-width:0">
     <section class="panel">
       <div class="summary">
-        <div class="big{{if eq .Card.Direction "in"}} in{{end}}">{{if eq .Card.Direction "in"}}+{{end}}{{.Card.Amount}}</div>
+        <div class="big{{if eq .Card.Direction "in"}} in{{end}}">{{if eq .Card.Direction "in"}}<span class="sign">+</span>{{else if eq .Card.Direction "out"}}<span class="sign">–</span>{{end}}{{rupees .Card.Amount}}</div>
         <div class="who">
           {{if eq .Card.Direction "transfer"}}{{.Card.From.Name}} → {{.Card.To.Name}}
           {{else if eq .Card.Direction "in"}}<span class="muted" style="font-weight:500">from</span> {{if .Card.From.Name}}{{.Card.From.Name}}{{else}}someone{{end}}
@@ -13,7 +13,7 @@
         </div>
         <div class="when">{{.Card.Day}} · {{.Card.Clock}}{{if eq .Card.Direction "in"}}{{if .Card.To.Name}} · into {{.Card.To.Name}}{{end}}{{else if ne .Card.Direction "transfer"}}{{if .Card.From.Name}} · {{.Card.From.Name}}{{end}}{{end}}</div>
         <div class="meta-row" style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
-          <span class="pill{{if eq .Row.Status "pushed"}} pill-in{{else if eq .Row.Status "skipped"}} pill-danger{{else if eq .Row.Status "needs_review"}} pill-attn{{end}}">{{statusLabel .Row.Status}}</span>
+          <span class="pill{{if eq .Row.Status "pushed"}} pill-in{{else if eq .Row.Status "skipped"}} pill-danger{{else if eq .Row.Status "needs_review"}} pill-todo{{end}}">{{statusLabel .Row.Status}}</span>
           {{if .Row.Manual}}<span class="pill" title="added by hand from a statement line fold never received">manual</span>{{end}}
           {{if .Row.PossibleDuplicate}}<span class="pill pill-attn" title="fold.money flags this as a possible duplicate alert — often one to skip">possible duplicate</span>{{end}}
           {{if .Row.Edited}}<span class="pill pill-accent" title="amount, foreign amount or date corrected below">corrected</span>{{end}}
@@ -23,7 +23,7 @@
       </div>
     </section>
 
-    {{if .Card.Hold}}<div class="banner banner-attn"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3.5 18 17H2z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M10 8.5v3.6M10 14.4v.1" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg><div class="banner-body"><b>On hold.</b> {{.Card.Hold}} It can't be sent until the hold is released — clear the reason below.</div></div>{{end}}
+    {{if .Card.Hold}}<div class="banner banner-attn"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3.5 18 17H2z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M10 8.5v3.6M10 14.4v.1" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg><div class="banner-body"><b>On hold:</b> {{sentence .Card.Hold}} It can't be sent until the hold is released — clear the reason below.</div></div>{{end}}
     {{if .IsPushed}}<div class="banner banner-info"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M10 9v5M10 6.3v.1" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg><div class="banner-body"><b>Already in Firefly.</b>{{if .FireflyPulled}} These are Firefly's current values.{{end}} Saving updates that transaction in place — no duplicate.</div></div>{{end}}
 
     <form method="post" action="/admin/ui/staged/{{.Row.FoldUUID}}/save" class="panel">

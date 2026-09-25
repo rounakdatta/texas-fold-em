@@ -110,7 +110,8 @@ func New(db *sql.DB, pusher *integration.Pusher, log *slog.Logger, adminKey stri
 	// querystrings. Registered on both templates for uniformity even
 	// though only the index references it today.
 	funcs := template.FuncMap{"filterURL": filterURL, "statusBadge": statusBadge, "confidenceBar": confidenceBar, "asset": assetURL,
-		"blanks": blanksHTML, "statusLabel": statusLabel}
+		"blanks": blanksHTML, "statusLabel": statusLabel, "rupees": rupeesHTML,
+		"count": func(n int) string { return groupIndian(int64(n)) }, "sentence": sentence}
 	indexTmpl, err := template.New("layout.html").Funcs(funcs).ParseFS(tmplFS, "templates/layout.html", "templates/index.html")
 	if err != nil {
 		return nil, fmt.Errorf("parse index template: %w", err)
@@ -374,6 +375,27 @@ func statusBadge(status string) template.HTML {
 			template.HTMLEscapeString(status)))
 	}
 	return template.HTML(fmt.Sprintf(`<span class="sicon sicon-%s" title="%s">%s</span>`, status, label, glyph))
+}
+
+// sentence ends someone's note with a stop, whatever they typed, so the
+// words after it read as a new sentence ("never billed by AU — skip it.").
+func sentence(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" || strings.ContainsRune(".!?…", []rune(s)[len([]rune(s))-1]) {
+		return s
+	}
+	return s + "."
+}
+
+// rupeesHTML writes a formatted amount the way the pages show money, as
+// fold does: the rupee sign raised small beside the number
+// ("₹2,400" → <span class="cur">₹</span>2,400).
+func rupeesHTML(s string) template.HTML {
+	rest, ok := strings.CutPrefix(s, "₹")
+	if !ok {
+		return template.HTML(template.HTMLEscapeString(s))
+	}
+	return template.HTML(`<span class="cur">₹</span>` + template.HTMLEscapeString(rest))
 }
 
 // blanksHTML shows a title's "___" as the same fill-in slot the review

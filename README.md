@@ -125,6 +125,14 @@ keyboard:
 row: account, category, budget and tag fields are name autocompletes backed by
 your real firefly history, and per-merchant tags appear as one-tap chips.
 
+It dresses like fold.money, so moving between the two feels like one product:
+navy ink on cool paper, white cards with hairline borders, fold blue for the
+actions, small capitals for labels, and the rupee sign raised beside its
+number. The cowboy is the favicon, the app bar's mark and the home-screen icon
+(add it to your phone's home screen and it opens straight on the deck). The
+type is [Outfit](https://github.com/Outfitio/Outfit-Fonts) (SIL OFL 1.1), the
+nearest open face to fold's own, served from the binary with everything else.
+
 Reconciling against a card statement is done in the same place:
 
 - **Correct the money and the date.** A card alert fires at authorisation, so

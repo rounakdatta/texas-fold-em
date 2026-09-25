@@ -488,7 +488,8 @@ func TestReview_TheDeckPageRendersItsShell(t *testing.T) {
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
 	body := string(b)
-	for _, want := range []string{`id="deck-app"`, `/admin/ui/static/review.js?v=`, `aria-current="page">Review <span class="count num">1</span>`,
+	// (the nav item carries an icon before its word)
+	for _, want := range []string{`id="deck-app"`, `/admin/ui/static/review.js?v=`, `aria-current="page"><svg`, `</svg>Review <span class="count num">1</span>`,
 		`&#34;short&#34;:&#34;Tata Neu card&#34;`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("review page lacks %q", want)
@@ -651,5 +652,82 @@ func TestReview_MoneyInNeedsItsAccountAndTakesAPayer(t *testing.T) {
 		COALESCE(CAST(confirmed_destination_account_id AS TEXT),'') FROM staged_fold_txns WHERE fold_uuid='in1'`).Scan(&src, &dst)
 	if src != "A Shop" || dst == "" {
 		t.Errorf("stored source %q, destination %q: the payer is the source, the account the destination", src, dst)
+	}
+}
+
+// The brand travels with every page: the mark in the app bar, the favicon
+// and the home-screen icons, the web manifest (fetched with the cookie,
+// since the UI sits behind a login), and the font — each served with a type
+// a browser will accept.
+func TestReview_EveryPageCarriesTheBrand(t *testing.T) {
+	rh := newReviewHarness(t)
+	resp, err := http.Get(rh.srv.URL + "/admin/ui/review")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	body := string(b)
+	for _, want := range []string{
+		`<title>Review · texas fold ’em</title>`,
+		`class="brand-mark" src="/admin/ui/static/brand-mark.svg?v=`,
+		`rel="icon" href="/admin/ui/static/favicon.svg?v=`,
+		`rel="apple-touch-icon" href="/admin/ui/static/apple-touch-icon.png?v=`,
+		`rel="manifest" href="/admin/ui/static/manifest.webmanifest?v=`, `crossorigin="use-credentials"`,
+		`font-family: "Outfit"`, `/admin/ui/static/outfit-latin.woff2?v=`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("review page lacks %q", want)
+		}
+	}
+	for file, ctype := range map[string]string{
+		"favicon.svg": "image/svg+xml", "brand-mark.svg": "image/svg+xml", "cowboy.svg": "image/svg+xml",
+		"favicon-32.png": "image/png", "apple-touch-icon.png": "image/png", "icon-maskable-512.png": "image/png",
+		"outfit-latin.woff2": "font/woff2", "outfit-latin-ext.woff2": "font/woff2",
+		"manifest.webmanifest": "application/manifest+json", "outfit-OFL.txt": "text/plain; charset=utf-8",
+	} {
+		r, err := http.Get(rh.srv.URL + assetURL(file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		n, _ := io.Copy(io.Discard, r.Body)
+		r.Body.Close()
+		if r.StatusCode != 200 || r.Header.Get("Content-Type") != ctype || n == 0 {
+			t.Errorf("%s: %d %q (%d bytes), want %q", file, r.StatusCode, r.Header.Get("Content-Type"), n, ctype)
+		}
+	}
+	// the manifest names the app, starts it on the deck, and every icon it
+	// lists is there
+	r, _ := http.Get(rh.srv.URL + assetURL("manifest.webmanifest"))
+	var m struct {
+		Name     string `json:"name"`
+		StartURL string `json:"start_url"`
+		Display  string `json:"display"`
+		Icons    []struct {
+			Src string `json:"src"`
+		} `json:"icons"`
+	}
+	mb, _ := io.ReadAll(r.Body)
+	r.Body.Close()
+	if err := json.Unmarshal(mb, &m); err != nil || m.Name != "texas fold ’em" || m.StartURL != "/admin/ui/review" || m.Display != "standalone" || len(m.Icons) < 3 {
+		t.Errorf("manifest = %s (%v)", mb, err)
+	}
+	for _, ic := range m.Icons {
+		ir, err := http.Get(rh.srv.URL + ic.Src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ir.Body.Close()
+		if ir.StatusCode != 200 || ir.Header.Get("Content-Type") != "image/png" {
+			t.Errorf("manifest icon %s: %d %s", ic.Src, ir.StatusCode, ir.Header.Get("Content-Type"))
+		}
+	}
+}
+
+func TestSentence(t *testing.T) {
+	for in, want := range map[string]string{"never billed by AU — skip it": "never billed by AU — skip it.", "done.": "done.", "why?": "why?", " ": "", "wait…": "wait…"} {
+		if got := sentence(in); got != want {
+			t.Errorf("sentence(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
