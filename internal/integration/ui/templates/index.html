@@ -56,7 +56,8 @@
           {{if .Edited}}<br><span class="pill pill-ready_to_push" title="corrected — fold saw {{.Currency}} {{.FoldAmountDisplay}}">corrected</span>{{end}}
           {{if .Manual}}<br><span class="pill pill-pending" title="added by hand from a statement line">manual</span>{{end}}
           {{if .PossibleDuplicate}}<br><span class="pill pill-needs_review" title="fold.money flags this as a possible duplicate alert">possible duplicate</span>{{end}}
-          {{if .IsRefund}}<br><span class="pill pill-pushed" title="gives money back for a purchase{{if .RefundLinked}} — linked in firefly{{end}}">refund{{if .RefundLinked}} ↔{{end}}</span>{{end}}
+          {{if .RefundNeedsPick}}<br><span class="pill pill-needs_review" title="a refund with no purchase picked yet — open it and choose one (or none)">refund · pick purchase</span>
+          {{else if .IsRefund}}<br><span class="pill pill-pushed" title="gives money back for a purchase{{if .RefundLinked}} — linked in firefly{{end}}">refund{{if .RefundLinked}} ↔{{end}}</span>{{end}}
           {{if .Refunded}}<br><span class="pill pill-pending" title="a refund points at this purchase">refunded</span>{{end}}
         </td>
         <td style="color:var(--muted)">{{.SourceAccountName}}</td>
