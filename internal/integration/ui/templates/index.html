@@ -11,15 +11,16 @@
 {{if .Waiting}}
 <a class="review-cta" href="/admin/ui/review{{if .SelectedAccount}}?account={{.SelectedAccount}}{{end}}">
   <div class="cta-text">
-    <strong><span class="num">{{.Waiting}}</span> waiting for you{{if .SelectedAccountName}} on {{.SelectedAccountName}}{{end}}</strong>
-    <span>Go through them one card at a time: swipe right to send, left for later.</span>
+    <strong><span class="num">{{count .Waiting}}</span> waiting for you{{if .SelectedAccountName}} on {{.SelectedAccountName}}{{end}}</strong>
+    <span class="cta-line">Go through them one card at a time: swipe right to send, left for later.</span>
   </div>
-  <span class="btn">Review</span>
+  <span class="btn btn-light">Review</span>
+  <img class="cta-art" src="{{asset "cowboy.svg"}}" alt="" width="150" height="135">
 </a>
 {{end}}
 
 <nav class="segmented" aria-label="Status">
-  {{range .Tabs}}<a href="{{.URL}}"{{if .Current}} aria-current="true"{{end}}>{{.Label}} <span class="n num">{{.Count}}</span></a>{{end}}
+  {{range .Tabs}}<a href="{{.URL}}"{{if .Current}} aria-current="true"{{end}}>{{.Label}} <span class="n num">{{count .Count}}</span></a>{{end}}
 </nav>
 
 <form class="toolbar" method="get">
@@ -38,7 +39,7 @@
 
 {{if eq .TotalCount 0}}
   <div class="empty">
-    <svg class="empty-art" viewBox="0 0 64 64" aria-hidden="true"><circle cx="32" cy="32" r="27" fill="none" stroke="currentColor" stroke-width="3" opacity=".35"/><path d="m21 33 7.5 7.5L44 25" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <img class="empty-art" src="{{asset "cowboy.svg"}}" alt="" width="150" height="135">
     {{if eq .Status "needs_review"}}<h2>Nothing needs a look</h2><p>Every transaction has what it needs.</p>
     {{else if eq .Status "ready_to_push"}}<h2>Nothing is ready to send</h2><p>New transactions land here once they're classified.</p>
     {{else if eq .Status "pushed"}}<h2>Nothing sent yet</h2><p>Transactions you send to Firefly show up here.</p>
@@ -64,18 +65,18 @@
         <div class="txn-when txn-when-wide"><time datetime="{{.TxnTimestampUTC}}">{{.TxnTimestamp}}</time><div class="muted">{{.SourceShort}}</div></div>
         <div class="txn-meta">
           <span class="txn-when-narrow"><time datetime="{{.TxnTimestampUTC}}">{{.TxnTimestamp}}</time>{{if .SourceShort}} · {{.SourceShort}}{{end}}</span>
-          {{if eq $.Status "all"}}<span class="pill{{if eq .Status "pushed"}} pill-in{{else if eq .Status "skipped"}} pill-danger{{else if eq .Status "needs_review"}} pill-attn{{end}}">{{statusLabel .Status}}</span>{{end}}
+          {{if eq $.Status "all"}}<span class="pill{{if eq .Status "pushed"}} pill-in{{else if eq .Status "skipped"}} pill-danger{{else if eq .Status "needs_review"}} pill-todo{{end}}">{{statusLabel .Status}}</span>{{end}}
           {{if .Hold}}<span class="pill pill-attn" title="{{.Hold}}">on hold</span>{{end}}
           {{if .Later}}<span class="pill" title="swiped left in review">later</span>{{end}}
           {{if .Edited}}<span class="pill pill-accent" title="corrected from the statement — the alert said {{.Currency}} {{.FoldAmountDisplay}}">corrected</span>{{end}}
           {{if .Manual}}<span class="pill" title="added by hand from a statement line">manual</span>{{end}}
           {{if .PossibleDuplicate}}<span class="pill pill-attn" title="fold.money flags this as a possible duplicate alert">possible duplicate</span>{{end}}
-          {{if .RefundNeedsPick}}<span class="pill pill-attn" title="a refund with no purchase picked yet">refund · pick purchase</span>
+          {{if .RefundNeedsPick}}<span class="pill pill-todo" title="a refund with no purchase picked yet">refund · pick purchase</span>
           {{else if .IsRefund}}<span class="pill pill-in" title="gives money back for a purchase{{if .RefundLinked}} — linked in Firefly{{end}}">refund{{if .RefundLinked}} ↔{{end}}</span>{{end}}
           {{if .Refunded}}<span class="pill" title="a refund points at this purchase">refunded</span>{{end}}
           {{if .FireflyURL}}<a class="ff-link" href="{{.FireflyURL}}" target="_blank" rel="noopener">Open in Firefly ↗</a>{{end}}
         </div>
-        <div class="txn-amt{{if .Incoming}} in{{end}}" title="{{if .Incoming}}+{{else}}-{{end}}{{.Currency}} {{.AmountDisplay}}">{{if .Incoming}}+{{end}}{{.AmountINR}}{{if .ForeignDisplay}}<div class="muted" style="font-weight:500;font-size:12.5px">{{.ForeignDisplay}}</div>{{end}}</div>
+        <div class="txn-amt{{if .Incoming}} in{{end}}" title="{{if .Incoming}}+{{else}}-{{end}}{{.Currency}} {{.AmountDisplay}}">{{if .Incoming}}<span class="sign">+</span>{{else}}<span class="sign">–</span>{{end}}{{rupees .AmountINR}}{{if .ForeignDisplay}}<div class="muted" style="font-weight:500;font-size:12.5px">{{.ForeignDisplay}}</div>{{end}}</div>
       </li>
       {{end}}
     </ul>

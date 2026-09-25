@@ -32,6 +32,18 @@ func loadAssetHashes() {
 	}
 }
 
+// staticTypes names the types a slim container's mime table may not know
+// (alpine ships no /etc/mime.types): a font served as text is refused.
+var staticTypes = map[string]string{
+	".css":         "text/css; charset=utf-8",
+	".js":          "text/javascript; charset=utf-8",
+	".svg":         "image/svg+xml",
+	".png":         "image/png",
+	".woff2":       "font/woff2",
+	".webmanifest": "application/manifest+json",
+	".txt":         "text/plain; charset=utf-8",
+}
+
 // assetURL is the template func: {{asset "app.css"}}.
 func assetURL(name string) string {
 	assetHashOnce.Do(loadAssetHashes)
@@ -46,7 +58,9 @@ func handleStatic(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if ct := mime.TypeByExtension(path.Ext(name)); ct != "" {
+	if ct := staticTypes[path.Ext(name)]; ct != "" {
+		w.Header().Set("Content-Type", ct)
+	} else if ct := mime.TypeByExtension(path.Ext(name)); ct != "" {
 		w.Header().Set("Content-Type", ct)
 	}
 	if v := r.URL.Query().Get("v"); v != "" && v == assetHashes[name] {

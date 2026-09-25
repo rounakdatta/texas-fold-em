@@ -1,6 +1,8 @@
 /* The review deck. Phone first: the card owns the screen between the app
    bar and the thumb-height action bar; on a desktop it sits beside an
-   "up next" list with the keys spelled out. */
+   "up next" list with the keys spelled out. The card is one of fold's
+   transaction cards grown up: a header row over a hairline, the money large
+   with its rupee sign raised, the category as fold's capital chip. */
 
 /* The deck owns horizontal swipes. Without this, a swipe that the page
    can't scroll becomes the browser's own "swipe back" and leaves the page
@@ -10,20 +12,20 @@ html:has(body.deck-body), body.deck-body { overscroll-behavior-x: none; overscro
   display: grid; grid-template-columns: minmax(0, 1fr);
   height: calc(100dvh - var(--appbar-h));
   max-width: 1120px; margin: 0 auto;
-  padding: 10px 14px 0;
+  padding: 12px 14px 0;
 }
 .deck-main { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
 .deck-main > .flash { margin: 0 0 8px; }
 
-.deck-head { display: flex; align-items: center; gap: 10px; min-height: 40px; width: 100%; max-width: 460px; margin: 0 auto; }
+.deck-head { display: flex; align-items: center; gap: 10px; min-height: 42px; width: 100%; max-width: 460px; margin: 0 auto; }
 @media (min-width: 980px) and (min-height: 620px) { .deck-head { max-width: 480px; } }
-.piles { flex: none; display: inline-flex; padding: 3px; gap: 2px; border-radius: 12px; background: var(--surface-2); border: 1px solid var(--line); }
-.pile { height: 32px; padding: 0 12px; border: 0; border-radius: 9px; background: transparent; color: var(--fg-2); font-weight: 600; font-size: 13.5px; cursor: pointer; white-space: nowrap; }
+.piles { flex: none; display: inline-flex; padding: 3px; gap: 2px; border-radius: 11px; background: var(--surface-3); }
+.pile { height: 34px; padding: 0 12px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--fg-2); font-weight: 600; font-size: 14px; cursor: pointer; white-space: nowrap; }
 .pile[aria-selected="true"] { background: var(--surface); color: var(--fg); box-shadow: var(--shadow-sm); }
-.pile-n { color: var(--fg-3); margin-left: 4px; font-weight: 600; }
+.pile-n { color: var(--fg-3); margin-left: 5px; font-weight: 500; }
 .pile-n:empty { display: none; }
-.scope { margin-left: auto; min-width: 0; }
-.scope svg { flex: none; }
+.scope { margin-left: auto; min-width: 0; height: 38px; }
+.scope svg { flex: none; color: var(--fg-2); }
 .scope span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
 .deck { flex: 1; min-height: 0; min-width: 0; position: relative; display: flex; justify-content: center; padding: 12px 0 34px; }
@@ -47,8 +49,8 @@ html:has(body.deck-body), body.deck-body { overscroll-behavior-x: none; overscro
 /* the cards behind shrink toward their bottom edge, so a sliver of each
    peeks out under the top card: a deck, not a single page */
 .card.is-next, .card.is-after { transform-origin: 50% 100%; pointer-events: none; }
-.card.is-next { transform: translateY(11px) scale(.955); opacity: .8; }
-.card.is-after { transform: translateY(22px) scale(.91); opacity: .45; }
+.card.is-next { transform: translateY(11px) scale(.955); opacity: .85; }
+.card.is-after { transform: translateY(22px) scale(.91); opacity: .5; }
 .card.is-hidden { display: none; }
 .card.is-top { z-index: 3; }
 /* the cards behind show their edge, not their words: a sliver of text
@@ -58,67 +60,74 @@ html:has(body.deck-body), body.deck-body { overscroll-behavior-x: none; overscro
 .card.is-top .card-scroll { opacity: 1; transition: opacity .18s; }
 .card.is-next { z-index: 2; }
 .card.is-after { z-index: 1; }
-.card-scroll { flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 18px 20px 16px; display: flex; flex-direction: column; gap: 18px;
+.card-scroll { flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 0 20px 18px; display: flex; flex-direction: column; gap: 18px;
   /* a scroll container starts its own touch-action scope, so the card's
      pan-y has to be restated here or horizontal swipes inside it go to
      the browser */
   touch-action: pan-y; }
 
 .stamp {
-  position: absolute; top: 22px; z-index: 5; pointer-events: none;
+  position: absolute; top: 20px; z-index: 5; pointer-events: none;
   padding: 6px 14px; border-radius: 10px; border: 3px solid currentColor;
-  font-weight: 800; font-size: 20px; letter-spacing: .06em; text-transform: uppercase;
-  opacity: 0; background: color-mix(in srgb, var(--surface) 70%, transparent);
+  font-weight: 700; font-size: 20px; letter-spacing: .08em; text-transform: uppercase;
+  opacity: 0; background: color-mix(in srgb, var(--surface) 78%, transparent);
 }
-.stamp-send { left: 20px; color: var(--send-2); transform: rotate(-10deg); }
+.stamp-send { left: 20px; color: var(--accent); transform: rotate(-10deg); }
 /* a card that can't go yet names its next step, in the step's colour */
-.stamp-title, .stamp-payee, .stamp-editor, .stamp-account { color: var(--accent-2); }
-.stamp-skip { color: var(--later); }
+.stamp-title, .stamp-payee, .stamp-editor, .stamp-account { color: var(--ink); }
+.stamp-skip { color: var(--danger-fill); }
 .stamp-later { right: 20px; color: var(--later); transform: rotate(10deg); }
 
-.card-top { display: flex; align-items: center; gap: 10px; font-size: 13.5px; color: var(--fg-2); }
-.acct { display: inline-flex; align-items: center; gap: 7px; font-weight: 600; min-width: 0; }
-.acct svg { width: 18px; height: 18px; flex: none; color: var(--fg-3); }
+/* fold's card header: whose account and when, over a hairline */
+.card-top { display: flex; align-items: center; gap: 10px; font-size: 14px; color: var(--fg-2); margin: 0 -20px; padding: 15px 20px 14px; border-bottom: 1px solid var(--line); }
+.acct { display: inline-flex; align-items: center; gap: 8px; font-weight: 500; min-width: 0; }
+.acct svg { width: 18px; height: 18px; flex: none; color: var(--fg-2); }
 .acct span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 button.acct { background: none; border: 0; padding: 0; font: inherit; cursor: pointer; }
-.acct.is-missing, .acct.is-missing svg { color: var(--accent-2); }
+.acct.is-missing, .acct.is-missing svg { color: var(--accent-2); font-weight: 600; }
 .when { margin-left: auto; white-space: nowrap; color: var(--fg-3); font-variant-numeric: tabular-nums; }
 
 /* the money sits in the middle of the card, like a receipt; what you might
    edit sits low, near the thumb */
-.hero { flex: 1 0 auto; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 10px; padding: 10px 0 14px; min-height: 150px; }
+.hero { flex: 1 0 auto; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 10px; padding: 10px 0 12px; min-height: 150px; }
+/* a payee's initials on a tint of its own, the same tint every time — pale,
+   as fold's colour is: in its marks, never in its chrome */
 .avatar {
-  width: 58px; height: 58px; border-radius: 18px; display: grid; place-items: center; margin-bottom: 4px;
-  font-weight: 750; font-size: 22px; letter-spacing: -0.02em; color: #fff;
-  background: hsl(var(--h, 260) 42% 42%);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .08);
+  width: 60px; height: 60px; border-radius: 18px; display: grid; place-items: center; margin-bottom: 4px;
+  font-weight: 700; font-size: 22px; letter-spacing: -0.02em;
+  color: hsl(var(--h, 225) 46% 30%); background: hsl(var(--h, 225) 72% 94%);
+  box-shadow: inset 0 0 0 1px hsl(var(--h, 225) 45% 86%);
+}
+@media (prefers-color-scheme: dark) {
+  .avatar { color: hsl(var(--h, 225) 80% 84%); background: hsl(var(--h, 225) 32% 25%); box-shadow: inset 0 0 0 1px hsl(var(--h, 225) 30% 33%); }
 }
 .avatar svg { width: 28px; height: 28px; }
-.avatar.is-missing { background: var(--accent-soft); color: var(--accent-2); box-shadow: inset 0 0 0 1.5px var(--accent-2); }
-.avatar.is-mine { background: var(--surface-3); color: var(--fg-2); }
-@media (prefers-color-scheme: light) { .avatar { background: hsl(var(--h, 260) 48% 52%); } }
-.amount { font-size: clamp(38px, 11vw, 50px); line-height: 1; font-weight: 750; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; }
+.avatar.is-missing { background: var(--accent-soft); color: var(--accent-2); box-shadow: inset 0 0 0 1.5px var(--accent); }
+.avatar.is-mine { background: var(--surface-2); color: var(--fg); box-shadow: inset 0 0 0 1px var(--line); }
+.amount { font-size: clamp(40px, 11.5vw, 52px); line-height: 1; font-weight: 600; letter-spacing: -0.025em; font-variant-numeric: tabular-nums; }
+.amount .cur { margin-right: 0.08em; }
+.amount .sign { margin-right: 0.05em; }
 .dir-in .amount { color: var(--in); }
-.amount-note { font-size: 13px; color: var(--fg-3); }
+.amount-note { font-size: 13.5px; color: var(--fg-3); }
 .who { display: flex; flex-wrap: wrap; justify-content: center; align-items: baseline; gap: 2px 8px; font-size: 20px; line-height: 1.3; max-width: 100%; }
 .who-pre { color: var(--fg-3); font-size: 15px; }
-.who-name { font-weight: 700; color: var(--fg); background: none; border: 0; padding: 0; cursor: pointer; font-size: inherit; overflow-wrap: anywhere; }
+.who-name { font-weight: 600; color: var(--fg); background: none; border: 0; padding: 0; cursor: pointer; font-size: inherit; overflow-wrap: anywhere; letter-spacing: -0.01em; }
 .who-name:hover { text-decoration: underline; text-decoration-color: var(--line-2); text-underline-offset: 4px; }
 .who-name.is-missing { color: var(--accent-2); }
 .who-place { color: var(--fg-3); font-size: 14.5px; flex-basis: 100%; }
 /* the name on the alert, offered: a question, one tap to take it */
 .who-guess { flex-basis: auto; margin-top: 6px; display: inline-flex; align-items: center; min-height: 34px; padding: 0 14px;
-  border-radius: 99px; border: 1.5px dashed var(--accent-2); background: var(--accent-soft); color: var(--accent-2);
+  border-radius: 99px; border: 1.5px dashed var(--accent); background: var(--accent-soft); color: var(--accent-2);
   font-size: 15px; font-weight: 600; cursor: pointer; max-width: 100%; }
 .who-break { flex-basis: 100%; height: 0; }
 .who-guess span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .who-guess:hover { background: color-mix(in srgb, var(--accent) 22%, transparent); }
 .transfer-arrow { color: var(--fg-3); }
 
-.what { display: flex; flex-direction: column; gap: 10px; padding-top: 14px; border-top: 1px solid var(--line); }
+.what { display: flex; flex-direction: column; gap: 12px; padding-top: 16px; border-top: 1px solid var(--line); }
 .title-btn {
   display: flex; align-items: flex-start; gap: 10px; width: 100%; text-align: left; background: none; border: 0; padding: 0;
-  font-size: 19px; line-height: 1.45; font-weight: 600; color: var(--fg); cursor: pointer;
+  font-size: 19px; line-height: 1.45; font-weight: 500; color: var(--fg); cursor: pointer; letter-spacing: -0.005em;
 }
 .title-btn .t { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .title-btn .pen { width: 17px; height: 17px; flex: none; margin-top: 6px; color: var(--fg-3); }
@@ -126,7 +135,7 @@ button.acct { background: none; border: 0; padding: 0; font: inherit; cursor: po
 /* a blank is a slot waiting to be filled, not a word */
 .blank {
   display: inline-block; min-width: 4.2em; padding: 0 .55em; margin: 0 .12em;
-  border: 1.5px dashed var(--accent-2); border-radius: 8px; background: var(--accent-soft);
+  border: 1.5px dashed var(--accent); border-radius: 8px; background: var(--accent-soft);
   color: var(--accent-2); font-weight: 600; font-size: .86em; line-height: 1.55; text-align: center;
   vertical-align: 1px;
 }
@@ -134,14 +143,15 @@ button.acct { background: none; border: 0; padding: 0; font: inherit; cursor: po
 .meta-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 
 .attn { display: flex; flex-direction: column; gap: 10px; }
-.attn .banner { font-size: 14px; }
-.attn .banner b { font-weight: 650; }
+.attn .banner { font-size: 14.5px; }
+.attn .banner b { font-weight: 600; }
 
-.foot { margin-top: auto; display: flex; flex-direction: column; gap: 8px; font-size: 13.5px; color: var(--fg-3); }
-.foot .note-quote { font-size: 14px; }
-.bank { display: flex; gap: 6px; min-width: 0; }
-.bank b { font-weight: 600; color: var(--fg-2); flex: none; }
-.bank span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* the bank's words as fold writes a detail: the label in capitals, the value beside it */
+.foot { margin-top: auto; display: flex; flex-direction: column; gap: 10px; font-size: 14px; color: var(--fg-2); }
+.foot .note-quote { font-size: 14.5px; }
+.bank { display: flex; align-items: baseline; gap: 12px; min-width: 0; margin: 0; }
+.bank b { flex: none; font-size: 11.5px; font-weight: 600; letter-spacing: var(--caps); text-transform: uppercase; color: var(--fg-3); }
+.bank span { margin-left: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-2); }
 .card-error { margin: 0 20px 14px; }
 
 /* a card that can't go yet: the right swipe resists and springs back */
@@ -150,13 +160,14 @@ button.acct { background: none; border: 0; padding: 0; font: inherit; cursor: po
 
 /* ---- skeleton & states --------------------------------------------------- */
 .card.skeleton { background: var(--surface); }
+.card.skeleton .card-scroll { padding-top: 18px; }
 .skeleton .sk { background: var(--surface-2); border-radius: 8px; }
 .skeleton .sk { animation: sk 1.4s ease-in-out infinite; }
 @keyframes sk { 50% { opacity: .55; } }
 .deck-state { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
-.deck-state .empty { padding: 20px; max-width: 380px; }
-.deck-state .empty p { margin: 6px 0 0; }
-.deck-state .actions { display: flex; flex-direction: column; gap: 10px; align-items: center; margin-top: 18px; }
+.deck-state .empty { padding: 20px; max-width: 400px; }
+.deck-state .empty p { margin: 6px 0 0; font-size: 15.5px; }
+.deck-state .actions { display: flex; flex-direction: column; gap: 10px; align-items: center; margin-top: 20px; }
 
 /* ---- action bar (thumb height) -------------------------------------------- */
 .deck-actions {
@@ -164,32 +175,33 @@ button.acct { background: none; border: 0; padding: 0; font: inherit; cursor: po
   width: 100%; max-width: 460px; margin: 0 auto;
   padding: 6px 0 calc(12px + env(safe-area-inset-bottom));
 }
+/* fold's pill buttons: white with a pressable border, or a solid call to action */
 .deck-btn {
-  min-width: 0; padding: 0 12px;
-  height: 58px; border-radius: 18px; border: 1px solid var(--line);
+  min-width: 0; padding: 0 14px;
+  height: 58px; border-radius: 999px; border: 1px solid var(--line-2);
   display: inline-flex; align-items: center; justify-content: center; gap: 8px;
-  font-weight: 700; font-size: 16px; cursor: pointer; user-select: none;
+  font-weight: 600; font-size: 16.5px; cursor: pointer; user-select: none;
   background: var(--surface); color: var(--fg);
-  transition: transform .08s, filter .12s, background .12s;
+  transition: transform .08s, filter .12s, background .12s, border-color .12s;
 }
 .deck-btn svg { width: 24px; height: 24px; flex: none; }
 .deck-btn:active { transform: scale(.97); }
-.deck-btn.later { color: var(--later); min-width: 96px; padding: 0 16px; }
-.deck-btn.later:hover { background: var(--later-soft); }
-.deck-btn.more { width: 54px; color: var(--fg-2); }
-.deck-btn.more:hover { background: var(--surface-2); }
-.deck-btn.send { background: var(--send); border-color: transparent; color: #fff; box-shadow: 0 6px 18px color-mix(in srgb, var(--send) 35%, transparent); }
-.deck-btn.send:hover { filter: brightness(1.07); }
-.deck-btn.send.is-step { background: var(--accent); box-shadow: 0 6px 18px color-mix(in srgb, var(--accent) 30%, transparent); }
-.deck-btn.send.is-skip { background: var(--later); color: #1b1307; box-shadow: 0 6px 18px color-mix(in srgb, var(--later) 30%, transparent); }
+.deck-btn.later { min-width: 96px; padding: 0 18px; }
+.deck-btn.later svg { color: var(--fg-2); }
+.deck-btn.later:hover, .deck-btn.more:hover { border-color: var(--fg-3); }
+.deck-btn.more { width: 58px; padding: 0; color: var(--fg-2); }
+.deck-btn.send { background: var(--send); border-color: transparent; color: #ffffff; box-shadow: 0 8px 20px color-mix(in srgb, var(--send) 30%, transparent); }
+.deck-btn.send:hover { filter: brightness(1.06); }
+.deck-btn.send.is-step { background: var(--ink); color: var(--ink-fg); box-shadow: 0 8px 20px color-mix(in srgb, var(--ink) 24%, transparent); }
+.deck-btn.send.is-skip { background: var(--danger-fill); color: #ffffff; box-shadow: 0 8px 20px color-mix(in srgb, var(--danger-fill) 28%, transparent); }
 .deck-btn.send span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* set by fitSend in review.js when the label wouldn't fit: first the icon
    goes, then a little size — never the words */
 .deck-btn.send.is-tight svg { display: none; }
-.deck-btn.send.is-tighter { font-size: 14.5px; letter-spacing: -0.01em; }
+.deck-btn.send.is-tighter { font-size: 15px; letter-spacing: -0.01em; }
 .deck-btn[disabled] { opacity: .45; cursor: default; box-shadow: none; }
 .deck-page.is-empty .deck-actions, .deck-page.is-empty .deck-hint { visibility: hidden; }
-.deck-hint { text-align: center; font-size: 12.5px; color: var(--fg-3); margin: -4px 0 8px; }
+.deck-hint { text-align: center; font-size: 13px; color: var(--fg-3); margin: -4px 0 8px; }
 .hint-keys { display: none; }
 @media (hover: hover) and (pointer: fine) { .hint-touch { display: none; } .hint-keys { display: inline; } }
 
@@ -199,24 +211,24 @@ button.acct { background: none; border: 0; padding: 0; font: inherit; cursor: po
 /* ---- side panel (desktop) --------------------------------------------------- */
 .deck-side { display: none; }
 @media (min-width: 980px) and (min-height: 620px) {
-  .deck-page { grid-template-columns: minmax(0, 480px) 300px; justify-content: center; column-gap: 64px; padding-top: 16px; }
+  .deck-page { grid-template-columns: minmax(0, 480px) 300px; justify-content: center; column-gap: 64px; padding-top: 18px; }
   .deck { flex: 1 1 auto; max-height: 600px; }
   .deck-btn.later { min-width: 140px; }
-  .deck-btn.more { width: 58px; }
   .deck-side { display: block; overflow: auto; padding: 4px 0 20px; }
-  .deck-side h2 { font-size: 13px; color: var(--fg-3); font-weight: 650; margin: 0 0 10px; }
-  .keys-title { margin-top: 26px !important; }
-  .upnext { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-  .upnext li button { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 10px; text-align: left; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface); cursor: pointer; }
+  .deck-side h2 { font-size: 12px; font-weight: 600; letter-spacing: var(--caps); text-transform: uppercase; color: var(--fg-2); margin: 10px 0 12px; }
+  .keys-title { margin-top: 28px !important; }
+  .upnext { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+  .upnext li button { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 10px; text-align: left; padding: 11px 14px; border-radius: var(--radius); border: 1px solid var(--line); background: var(--surface); cursor: pointer; box-shadow: var(--shadow-sm); }
   .upnext li button:hover { border-color: var(--line-2); }
-  .upnext .u-who { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .upnext .u-amt { font-weight: 650; font-size: 14px; font-variant-numeric: tabular-nums; }
-  .upnext .u-title { font-size: 12.5px; color: var(--fg-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .upnext .u-day { font-size: 12px; color: var(--fg-3); text-align: right; white-space: nowrap; }
-  .upnext .u-attn { color: var(--accent-2); }
-  .keys { display: grid; grid-template-columns: auto 1fr; gap: 8px 12px; margin: 0; font-size: 13.5px; color: var(--fg-2); align-items: center; }
+  .upnext .u-who { font-weight: 600; font-size: 14.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .upnext .u-amt { font-weight: 600; font-size: 15px; font-variant-numeric: tabular-nums; text-align: right; }
+  .upnext .u-amt.is-in { color: var(--in); }
+  .upnext .u-title { font-size: 13px; color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .upnext .u-day { font-size: 12.5px; color: var(--fg-3); text-align: right; white-space: nowrap; }
+  .upnext .u-attn { color: var(--accent-2); font-weight: 500; }
+  .keys { display: grid; grid-template-columns: auto 1fr; gap: 8px 12px; margin: 0; font-size: 14px; color: var(--fg-2); align-items: center; }
   .keys dt { margin: 0; }
-  kbd { display: inline-grid; place-items: center; min-width: 26px; height: 24px; padding: 0 6px; border-radius: 6px; border: 1px solid var(--line-2); border-bottom-width: 2px; background: var(--surface-2); font-family: var(--font); font-size: 12.5px; font-weight: 650; color: var(--fg); }
+  kbd { display: inline-grid; place-items: center; min-width: 28px; height: 26px; padding: 0 7px; border-radius: 7px; border: 1px solid var(--line-2); border-bottom-width: 2px; background: var(--surface); font-family: var(--font); font-size: 13px; font-weight: 600; color: var(--fg); }
   .keys dd { margin: 0; }
   .stack, .deck-actions { max-width: 480px; }
 }
@@ -224,7 +236,8 @@ button.acct { background: none; border: 0; padding: 0; font: inherit; cursor: po
 /* little height (a phone on its side, a small phone): the money and the
    title must both fit, so the avatar goes and everything tightens */
 @media (max-height: 620px) {
-  .card-scroll { padding: 12px 16px 14px; gap: 10px; }
+  .card-scroll { padding: 0 16px 14px; gap: 10px; }
+  .card-top { margin: 0 -16px; padding: 11px 16px 10px; }
   .hero { flex: 1 0 auto; min-height: 0; padding: 2px 0 6px; gap: 6px; }
   .avatar { width: 40px; height: 40px; border-radius: 12px; font-size: 17px; }
   .amount { font-size: 34px; }
@@ -232,13 +245,15 @@ button.acct { background: none; border: 0; padding: 0; font: inherit; cursor: po
   .what { padding-top: 10px; gap: 8px; }
   .title-btn { font-size: 17px; }
   .deck { padding: 8px 0 26px; }
-  .deck-btn { height: 48px; border-radius: 15px; font-size: 15px; }
+  .deck-btn { height: 48px; font-size: 15px; }
+  .deck-btn.more { width: 48px; }
   .deck-hint { display: none; }
 }
 @media (max-height: 460px) {
   .avatar { display: none; }
   .deck-head { min-height: 34px; }
   .pile { height: 28px; }
+  .scope { height: 32px; }
 }
 /* a narrow phone: the buttons keep their words, lose some air */
 @media (max-width: 360px) {
@@ -267,7 +282,7 @@ button.acct { background: none; border: 0; padding: 0; font: inherit; cursor: po
   .deck-head { grid-column: 2; grid-row: 1; max-width: none; }
   .deck { grid-column: 2; grid-row: 2 / 6; padding: 6px 0 18px; }
   .deck-actions { display: contents; }
-  .deck-btn { width: 100%; }
+  .deck-btn { width: 100%; border-radius: 22px; }
   #btn-later { grid-column: 1; grid-row: 3; height: 76px; flex-direction: column; gap: 4px; min-width: 0; }
   #btn-more { grid-column: 1; grid-row: 4; margin-top: 10px; height: 44px; width: 100%; }
   #btn-send { grid-column: 3; grid-row: 3 / 5; height: auto; min-height: 76px; flex-direction: column; gap: 4px; padding: 10px; }

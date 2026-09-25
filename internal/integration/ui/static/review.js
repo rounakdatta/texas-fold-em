@@ -92,7 +92,6 @@
     refund: '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7.5 5 4 8.5 7.5 12M4.5 8.5H12a4 4 0 0 1 0 8h-2" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>',
     swap: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 8.5h13.5M15 5l3.5 3.5L15 12M19 15.5H5.5M9 12l-3.5 3.5L9 19" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>',
     close: '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>',
-    done: '<svg viewBox="0 0 64 64" aria-hidden="true"><circle cx="32" cy="32" r="27" fill="none" stroke="currentColor" stroke-width="3" opacity=".35"/><path d="m21 33 7.5 7.5L44 25" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   };
   const icon = name => { const t = document.createElement('template'); t.innerHTML = SVG[name]; return t.content.firstChild; };
 
@@ -130,6 +129,15 @@
     return out;
   }
 
+  // Money the way fold writes it: the rupee sign raised small, a spend's
+  // sign quiet ("– ₹398"), money in signed (and green, from the CSS).
+  function money(amount, direction) {
+    const sign = direction === 'in' ? '+' : direction === 'out' ? '–' : '';
+    const m = /^₹(.*)$/.exec(amount || '');
+    return [sign ? h('span', { class: 'sign', 'aria-hidden': 'true', text: sign }) : null,
+            m ? h('span', { class: 'cur', text: '₹' }) : null, m ? m[1] : amount];
+  }
+
   function spoken(c) {
     const who = c.direction === 'in' ? 'from ' + (c.from.name || 'someone') : 'to ' + (c.to.name || 'someone');
     return `${c.amount} ${who}, ${c.day} ${c.clock}`;
@@ -158,7 +166,7 @@
     // The money and who it went to.
     const hero = h('div', { class: 'hero' });
     hero.append(avatar(c));
-    hero.append(h('div', { class: 'amount num' }, c.direction === 'in' ? '+' + c.amount : c.amount));
+    hero.append(h('div', { class: 'amount num' }, money(c.amount, c.direction)));
     const notes = [];
     if (c.foreign) notes.push(c.foreign);
     if (c.foldAmount) notes.push('the alert said ' + c.foldAmount);
@@ -191,7 +199,7 @@
       h('span', { class: 't' }, ...titleNodes(c.title)), icon('pen')));
     const meta = h('div', { class: 'meta-row' });
     meta.append(c.category
-      ? h('button', { type: 'button', class: 'chip', 'data-act': 'category', 'aria-label': 'Category: ' + c.category + '. Change', text: c.category })
+      ? h('button', { type: 'button', class: 'chip chip-cat', 'data-act': 'category', 'aria-label': 'Category: ' + c.category + '. Change', text: c.category })
       : h('button', { type: 'button', class: 'chip chip-quiet', 'data-act': 'category', text: '+ Category' }));
     for (const t of c.tags || []) meta.append(h('span', { class: 'tag', text: '#' + t }));
     what.append(meta);
@@ -381,8 +389,9 @@
     const s = h('div', { class: 'card skeleton', 'aria-hidden': 'true' });
     const inner = h('div', { class: 'card-scroll' },
       h('div', { class: 'sk', style: 'height:14px;width:55%' }),
-      h('div', { class: 'sk', style: 'height:44px;width:40%;margin-top:18px' }),
-      h('div', { class: 'sk', style: 'height:20px;width:70%' }),
+      h('div', { class: 'sk', style: 'height:60px;width:60px;margin:26px auto 0;border-radius:18px' }),
+      h('div', { class: 'sk', style: 'height:44px;width:44%;margin:0 auto' }),
+      h('div', { class: 'sk', style: 'height:20px;width:52%;margin:0 auto' }),
       h('div', { class: 'sk', style: 'height:18px;width:85%;margin-top:22px' }),
       h('div', { class: 'sk', style: 'height:28px;width:28%' }));
     s.append(inner);
@@ -404,12 +413,12 @@
       actions.append(h('button', { type: 'button', class: 'btn', onclick: () => setScope('', state.order), text: 'Show all accounts' }));
     } else {
       title = 'All caught up';
-      line = 'Nothing is waiting to go to Firefly.';
+      line = 'Nothing left to rope in.';
       if (state.counts.later) actions.append(h('button', { type: 'button', class: 'btn', onclick: () => switchPile('later'),
         text: state.counts.later === 1 ? '1 card saved for later' : state.counts.later + ' cards saved for later' }));
     }
     actions.append(h('a', { href: '/admin/ui/?status=all', text: 'See every transaction' }));
-    const art = h('div', { class: 'empty-art' }); art.append(icon('done'));
+    const art = h('img', { class: 'empty-art', src: app.dataset.art || '', alt: '', width: '150', height: '135' });
     return h('div', { class: 'empty' }, art, h('h2', { text: title }), h('p', { text: line }), actions);
   }
 
@@ -435,7 +444,7 @@
     for (const c of state.cards.slice(1, 8)) {
       const l = upNextLines(c);
       upnextEl.append(h('li', {}, h('button', { type: 'button', onclick: () => bringToTop(c.uuid), 'aria-label': 'Review next: ' + spoken(c) },
-        h('span', { class: 'u-who', text: l.head }), h('span', { class: 'u-amt num', text: (c.direction === 'in' ? '+' : '') + c.amount }),
+        h('span', { class: 'u-who', text: l.head }), h('span', { class: 'u-amt num' + (c.direction === 'in' ? ' is-in' : '') }, money(c.amount, c.direction)),
         h('span', { class: 'u-title' + (l.blocked ? ' u-attn' : ''), text: l.sub }), h('span', { class: 'u-day', text: c.day }))));
     }
     if (!upnextEl.childNodes.length) upnextEl.append(h('li', { class: 'muted', text: 'Nothing else in this pile.' }));

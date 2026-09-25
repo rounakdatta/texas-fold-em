@@ -1,7 +1,7 @@
 {{define "head"}}<link rel="stylesheet" href="{{asset "review.css"}}">{{end}}
 {{define "bodyclass"}}deck-body{{end}}
 {{define "main"}}
-<main class="deck-page" id="deck-app" data-accounts="{{.AccountsJSON}}">
+<main class="deck-page" id="deck-app" data-accounts="{{.AccountsJSON}}" data-art="{{asset "cowboy.svg"}}">
   <h1 class="sr-only">Review transactions</h1>
   <div class="deck-main">
     {{if .Flash}}<div class="flash flash-{{.Flash.Kind}}" role="status">{{.Flash.Message}}</div>{{end}}
