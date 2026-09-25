@@ -215,3 +215,28 @@ func TestUI_RefundPicker_CapsLargerCandidates(t *testing.T) {
 		t.Errorf("the exact purchase (1 day before) should still be listed and selected")
 	}
 }
+
+// A refund with no purchase chosen yet is badged for picking; one with a
+// purchase (or marked none) isn't.
+func TestUI_Index_RefundNeedsPickBadge(t *testing.T) {
+	u := newUITestHarness(t, AuthModeBypass)
+	seedRefundPair(t, u, "ready_to_push", "ready_to_push")
+	page := body(t, u.do(t, http.MethodGet, "/admin/ui/?status=all&per_page=50", nil))
+	if r := rowHTML(page, "ref-1"); strings.Contains(r, "pick purchase") || !strings.Contains(r, ">refund<") {
+		t.Errorf("a refund with its purchase shouldn't need a pick: %s", r)
+	}
+	if _, err := u.db.DB.Exec(`UPDATE staged_fold_txns SET proposed_refund_of = NULL WHERE fold_uuid = 'ref-1'`); err != nil {
+		t.Fatal(err)
+	}
+	page = body(t, u.do(t, http.MethodGet, "/admin/ui/?status=all&per_page=50", nil))
+	if r := rowHTML(page, "ref-1"); !strings.Contains(r, "refund · pick purchase") {
+		t.Errorf("a refund with no purchase should be badged for picking: %s", r)
+	}
+	if _, err := u.db.DB.Exec(`UPDATE staged_fold_txns SET confirmed_refund_of = 'none' WHERE fold_uuid = 'ref-1'`); err != nil {
+		t.Fatal(err)
+	}
+	page = body(t, u.do(t, http.MethodGet, "/admin/ui/?status=all&per_page=50", nil))
+	if r := rowHTML(page, "ref-1"); strings.Contains(r, "pick purchase") {
+		t.Errorf("a refund marked none shouldn't need a pick: %s", r)
+	}
+}

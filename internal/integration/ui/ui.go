@@ -252,6 +252,9 @@ type indexRow struct {
 	IsRefund     bool
 	RefundLinked bool
 	Refunded     bool
+	// RefundNeedsPick: a refund with no purchase chosen yet (and not marked
+	// "none") — the ones to open and pick in review.
+	RefundNeedsPick bool
 }
 
 // listFilters is the set of WHERE constraints the index list honours.
@@ -536,8 +539,14 @@ func (h *Handler) listRows(ctx context.Context, f listFilters, limit, offset int
 		        OR s.confirmed_txn_timestamp IS NOT NULL),
 		       ` + possibleDuplicateSQL("s.raw_payload") + `,
 		       ` + effectiveAccountIDSQL("source") + `, ` + effectiveAccountIDSQL("destination") + `,
-		       s.classifier_tier = 5 OR COALESCE(NULLIF(s.confirmed_refund_of,''), s.proposed_refund_of, '') LIKE 'fold:%'
-		         OR COALESCE(NULLIF(s.confirmed_refund_of,''), s.proposed_refund_of, '') LIKE 'journal:%',
+		       -- refund-shaped: the refund tier made it, it points at a purchase
+		       -- (or is marked none), or it's money in filed under Refund
+		       s.classifier_tier = 5 OR COALESCE(NULLIF(s.confirmed_refund_of,''), s.proposed_refund_of, '') <> ''
+		         OR (s.type = 'INCOMING' AND COALESCE(s.confirmed_category_id, s.proposed_category_id) IN
+		             (SELECT category_id FROM firefly_txns WHERE LOWER(category_name) = 'refund')),
+		       COALESCE(NULLIF(s.confirmed_refund_of,''), s.proposed_refund_of, '') LIKE 'fold:%'
+		         OR COALESCE(NULLIF(s.confirmed_refund_of,''), s.proposed_refund_of, '') LIKE 'journal:%'
+		         OR COALESCE(NULLIF(s.confirmed_refund_of,''), s.proposed_refund_of, '') = 'none',
 		       COALESCE(s.firefly_link_id, 0) <> 0,
 		       EXISTS (SELECT 1 FROM staged_fold_txns r
 		               WHERE r.fold_uuid <> s.fold_uuid AND r.status <> 'skipped'
@@ -572,10 +581,11 @@ func (h *Handler) listRows(ctx context.Context, f listFilters, limit, offset int
 			effSrc      sql.NullInt64
 			effDst      sql.NullInt64
 			isRefund    sql.NullBool
+			refDecided  sql.NullBool
 		)
 		if err := rows.Scan(&r.FoldUUID, &tsStr, &amountPaise, &r.Currency, &fAmt, &fCur, &r.Mode, &r.Type,
 			&r.MerchantExtracted, &r.Status, &tier, &conf, &catName, &srcName, &destName, &r.Description, &groupID,
-			&foldPaise, &edited, &dup, &effSrc, &effDst, &isRefund, &r.RefundLinked, &r.Refunded); err != nil {
+			&foldPaise, &edited, &dup, &effSrc, &effDst, &isRefund, &refDecided, &r.RefundLinked, &r.Refunded); err != nil {
 			return nil, err
 		}
 		// Direction as seen from the account being viewed: under an account
@@ -593,6 +603,7 @@ func (h *Handler) listRows(ctx context.Context, f listFilters, limit, offset int
 		}
 		r.Edited, r.Manual, r.PossibleDuplicate = edited == 1, r.Mode == manualMode, dup == 1
 		r.IsRefund = isRefund.Valid && isRefund.Bool
+		r.RefundNeedsPick = r.IsRefund && !(refDecided.Valid && refDecided.Bool) && r.Status != "skipped"
 		r.FoldAmountDisplay = paiseToDecimal(foldPaise)
 		r.ForeignDisplay = foreignDisplay(fAmt, fCur)
 		// Two views of the timestamp: a server-rendered fallback for
