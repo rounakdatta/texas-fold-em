@@ -91,9 +91,29 @@
     alert: '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3.5 18 17H2z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M10 8.5v3.6M10 14.4v.1" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>',
     refund: '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7.5 5 4 8.5 7.5 12M4.5 8.5H12a4 4 0 0 1 0 8h-2" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>',
     swap: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 8.5h13.5M15 5l3.5 3.5L15 12M19 15.5H5.5M9 12l-3.5 3.5L9 19" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    out: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17 17 7M9 7h8v8" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    in: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 7 7 17M15 17H7V9" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>',
     close: '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>',
   };
   const icon = name => { const t = document.createElement('template'); t.innerHTML = SVG[name]; return t.content.firstChild; };
+
+  // ---- the kind of move -------------------------------------------------------------
+  // Firefly's three types. A card offers the two its direction allows —
+  // money out is a withdrawal or a transfer, money in a deposit or a
+  // transfer — and shows the one push will send.
+  const TYPE_LABEL = { withdrawal: 'Withdrawal', deposit: 'Deposit', transfer: 'Transfer' };
+  const TYPE_ICON = { withdrawal: 'out', deposit: 'in', transfer: 'swap' };
+  function typeMeaning(t, c) {
+    if (t === 'withdrawal') return 'you paid someone';
+    if (t === 'deposit') return 'someone paid you';
+    return c.direction === 'in' ? 'from another of your accounts' : 'to another of your accounts';
+  }
+  // The side that isn't the account the row is on.
+  const otherOf = c => c.direction === 'in' ? c.from : c.to;
+  const ownOf = c => c.direction === 'in' ? c.to : c.from;
+  // a side's name as Firefly spells it: the account's full name, or a
+  // payee's name with its place ("Chai Corner, Market Road")
+  const fullName = p => (p && (p.full || [p.name, p.place].filter(Boolean).join(', '))) || '';
 
   // ---- what the card needs next ----------------------------------------------------
   // The primary button always names the next step: "Send" when the card is
@@ -102,8 +122,21 @@
     const b = c.blockers || [];
     // (stamp: what the card says as it is dragged right)
     if (b.includes('hold')) return { kind: 'skip', label: 'Skip it', stamp: 'Skip' };
+    // the kind of move first: it decides what the other side can be
+    // (the banner says which type it can be; the button stays short enough
+    // for the narrowest phone)
+    if (b.includes('type')) return { kind: 'retype', label: 'Fix the type', stamp: 'Fix type' };
+    if (b.includes('swap')) return { kind: 'swap', label: 'Swap them', stamp: 'Swap' };
+    // your own account as who was paid: a transfer, unless someone chose
+    // the type — then it's the name that's wrong
+    if (b.includes('mine')) return c.typeChosen
+      ? { kind: 'payee', label: c.direction === 'in' ? 'Who paid?' : 'Who was paid?', stamp: c.direction === 'in' ? 'Add payer' : 'Add payee' }
+      : { kind: 'transfer', label: 'Make it a transfer', stamp: 'Transfer' };
     // who before what: the title suggestions are the payee's past titles
-    if (b.includes('payee')) return c.direction === 'in' ? { kind: 'payee', label: 'Who paid?', stamp: 'Add payer' } : { kind: 'payee', label: 'Who was paid?', stamp: 'Add payee' };
+    if (b.includes('payee')) {
+      if (c.type === 'transfer') return { kind: 'payee', label: 'Which account?', stamp: 'Pick account' };
+      return c.direction === 'in' ? { kind: 'payee', label: 'Who paid?', stamp: 'Add payer' } : { kind: 'payee', label: 'Who was paid?', stamp: 'Add payee' };
+    }
     if (b.includes('source')) return { kind: 'account', label: 'Pick the account', stamp: 'Pick account' };
     if (b.includes('title-empty')) return { kind: 'title', label: 'Add a title', stamp: 'Add title' };
     if (b.includes('title-blank')) return { kind: 'title', label: 'Fill in the blank', stamp: 'Fill in' };
@@ -130,22 +163,40 @@
   }
 
   // Money the way fold writes it: the rupee sign raised small, a spend's
-  // sign quiet ("– ₹398"), money in signed (and green, from the CSS).
-  function money(amount, direction) {
-    const sign = direction === 'in' ? '+' : direction === 'out' ? '–' : '';
+  // sign quiet ("– ₹398"), a deposit signed (and green, from the CSS), a
+  // transfer unsigned — nothing was gained or lost, it moved.
+  function money(amount, type) {
+    const sign = type === 'deposit' ? '+' : type === 'withdrawal' ? '–' : '';
     const m = /^₹(.*)$/.exec(amount || '');
     return [sign ? h('span', { class: 'sign', 'aria-hidden': 'true', text: sign }) : null,
             m ? h('span', { class: 'cur', text: '₹' }) : null, m ? m[1] : amount];
   }
 
   function spoken(c) {
-    const who = c.direction === 'in' ? 'from ' + (c.from.name || 'someone') : 'to ' + (c.to.name || 'someone');
-    return `${c.amount} ${who}, ${c.day} ${c.clock}`;
+    const other = otherOf(c).name || (c.type === 'transfer' ? 'another account' : 'someone');
+    return `${TYPE_LABEL[c.type] || ''}: ${c.amount} ${c.direction === 'in' ? 'from' : 'to'} ${other}, ${c.day} ${c.clock}`;
+  }
+
+  // The type control: the two kinds this card can be, the one push will
+  // send pressed. Picking the other asks for what it needs first — a
+  // transfer, which of your accounts; a withdrawal, who was paid — so a card
+  // is never left half-changed. (Toggle buttons, not radios: a radio group
+  // selects as the arrow keys move, and here selecting saves or opens a
+  // picker.)
+  function typeControl(c) {
+    const g = h('div', { class: 'type-seg', role: 'group', 'aria-label': 'Type' });
+    for (const t of c.types || []) {
+      const on = t === c.type;
+      g.append(h('button', { type: 'button', class: 'type-opt', 'aria-pressed': String(on),
+        'data-act': 'type', 'data-type': t, title: TYPE_LABEL[t] + ' — ' + typeMeaning(t, c) },
+        icon(TYPE_ICON[t]), h('span', { text: TYPE_LABEL[t] })));
+    }
+    return g;
   }
 
   // ---- card -----------------------------------------------------------------
   function buildCard(c) {
-    const el = h('article', { class: 'card dir-' + c.direction, 'aria-label': spoken(c), dataset: { uuid: c.uuid } });
+    const el = h('article', { class: 'card type-' + c.type + ' dir-' + c.direction, 'aria-label': spoken(c), dataset: { uuid: c.uuid } });
     // dragged right, a card that can't go yet says what comes next instead
     const step = nextStep(c);
     el.append(h('div', { class: 'stamp stamp-send stamp-' + step.kind, 'aria-hidden': 'true', text: step.stamp }),
@@ -154,27 +205,31 @@
     el.append(scroll);
 
     // Whose account, and when — the small print a person reads last.
-    const mine = c.direction === 'in' ? c.to : c.from;
-    const acct = c.direction === 'transfer'
-      ? h('span', { class: 'acct' }, icon('swap'), h('span', { text: 'Transfer' }))
-      : !mine.name
-        ? h('button', { type: 'button', class: 'acct is-missing', 'data-act': 'account' }, icon('bank'), h('span', { text: 'Which account?' }))
-        : h('span', { class: 'acct', title: mine.full || mine.name || '' },
-            icon(/card$/i.test(mine.name || '') ? 'card' : 'bank'), h('span', { text: mine.name }));
+    const mine = ownOf(c);
+    const acct = !mine.name || (c.blockers || []).includes('source')
+      ? h('button', { type: 'button', class: 'acct is-missing', 'data-act': 'account' }, icon('bank'), h('span', { text: 'Which account?' }))
+      : h('span', { class: 'acct', title: mine.full || mine.name || '' },
+          icon(/card$/i.test(mine.name || '') ? 'card' : 'bank'), h('span', { text: mine.name }));
     scroll.append(h('header', { class: 'card-top' }, acct, h('span', { class: 'when' }, c.day, ' · ', c.clock)));
 
     // The money and who it went to.
     const hero = h('div', { class: 'hero' });
+    hero.append(typeControl(c));
     hero.append(avatar(c));
-    hero.append(h('div', { class: 'amount num' }, money(c.amount, c.direction)));
+    hero.append(h('div', { class: 'amount num' }, money(c.amount, c.type)));
     const notes = [];
     if (c.foreign) notes.push(c.foreign);
     if (c.foldAmount) notes.push('the alert said ' + c.foldAmount);
     if (notes.length) hero.append(h('div', { class: 'amount-note' }, notes.join(' · ')));
     const who = h('div', { class: 'who' });
-    if (c.direction === 'transfer') {
-      who.append(h('span', { class: 'who-name', text: c.from.name }), h('span', { class: 'transfer-arrow', 'aria-label': 'to', text: '→' }), h('span', { class: 'who-name', text: c.to.name }));
-    } else if (c.direction === 'in') {
+    if (c.type === 'transfer') {
+      // the other of your accounts: tap it to pick another
+      const other = otherOf(c);
+      const ask = 'Which account?';
+      who.append(h('span', { class: 'who-pre', text: c.direction === 'in' ? 'from' : 'to' }),
+        h('button', { type: 'button', class: 'who-name' + (other.name ? '' : ' is-missing'), 'data-act': 'payee', title: other.full || '',
+          'aria-label': other.name ? (c.direction === 'in' ? 'From ' : 'To ') + other.name + '. Change the account' : ask, text: other.name || ask }));
+    } else if (c.type === 'deposit') {
       who.append(h('span', { class: 'who-pre', text: 'from' }),
         h('button', { type: 'button', class: 'who-name' + (c.from.name ? '' : ' is-missing'), 'data-act': 'payee', text: c.from.name || 'Who paid?' }));
       if (c.from.place) who.append(h('span', { class: 'who-place', text: c.from.place }));
@@ -210,6 +265,7 @@
     if (c.error) attn.append(banner('alert', h('span', {}, h('b', { text: 'Not sent. ' }), c.error),
       h('button', { type: 'button', class: 'btn btn-sm btn-quiet', 'data-act': 'editor', text: 'Open the editor' })));
     if (c.hold) attn.append(banner('alert', h('span', {}, h('b', { text: 'On hold: ' }), sentence(c.hold), ' It won’t be sent.')));
+    if (c.problemText) attn.append(banner('alert', c.problemText, problemActions(c)));
     if (c.duplicate) attn.append(banner('alert', 'fold.money thinks this may be a duplicate alert.',
       h('button', { type: 'button', class: 'btn btn-sm btn-quiet', 'data-act': 'skip', text: 'Skip it' })));
     if (c.refund && c.refund.needsPick && refundChoices(c).length) attn.append(banner('refund', 'A refund. Which purchase did it come back for?',
@@ -233,10 +289,16 @@
   // A name worth offering reads as a name: not a UPI handle
   // ("q453326208@ybl"), a reference number or a raw statement line.
   const nameLike = s => !!s && !/^Statement:/.test(s) && !/\d{4,}|@|\//.test(s) && s.length <= 40;
+  const ownName = s => { const v = (s || '').trim().toLowerCase(); return !!v && accounts.some(a => a.name.toLowerCase() === v || a.short.toLowerCase() === v); };
   function guessFor(c) {
-    if (c.direction === 'out') return (c.blockers || []).includes('payee') && nameLike(c.to.name) ? c.to.name : '';
-    if (c.direction !== 'in' || c.from.name) return '';
+    if (c.type === 'transfer') return '';
     const said = (c.bankSaid || '').trim();
+    // one of your own accounts named as who paid (or was paid) is the wrong
+    // name — a bank's ₹1 check is from the bank, not from your account
+    // there — and what the bank line says is the likely right one
+    if (otherOf(c).mine) return nameLike(said) && !ownName(said) ? said : '';
+    if (c.direction === 'out') return (c.blockers || []).includes('payee') && nameLike(c.to.name) ? c.to.name : '';
+    if (c.from.name) return '';
     return nameLike(said) ? said : '';
   }
 
@@ -255,8 +317,8 @@
   // A payee's initials on a colour of its own, the same colour every time:
   // the deck reads faster when Zomato always looks like Zomato.
   function avatar(c) {
-    const p = c.direction === 'in' ? c.from : c.to;
-    if (c.direction === 'transfer') { const a = h('div', { class: 'avatar is-mine', 'aria-hidden': 'true' }); a.append(icon('bank')); return a; }
+    const p = otherOf(c);
+    if (c.type === 'transfer' || p.mine) { const a = h('div', { class: 'avatar is-mine', 'aria-hidden': 'true' }); a.append(icon(/card$/i.test(p.name || '') ? 'card' : 'bank')); return a; }
     if ((c.blockers || []).includes('payee') || !p.name) return h('div', { class: 'avatar is-missing', 'aria-hidden': 'true', text: '?' });
     const words = p.name.replace(/[^\p{L}\p{N} ]+/gu, ' ').split(/\s+/).filter(Boolean);
     const letters = (words.length > 1 ? words[0][0] + words[1][0] : (words[0] || '?')[0]).toUpperCase();
@@ -268,8 +330,25 @@
   function banner(iconName, body, action) {
     // amber for what could go wrong (a hold, a duplicate, a failed send);
     // a plain question is just a question
+    const acts = [].concat(action || []).filter(Boolean);
     return h('div', { class: 'banner ' + (iconName === 'refund' ? 'banner-info' : 'banner-attn') }, icon(iconName),
-      h('div', { class: 'banner-body' }, body, action ? h('div', { class: 'banner-actions' }, action) : null));
+      h('div', { class: 'banner-body' }, body, acts.length ? h('div', { class: 'banner-actions' }, acts) : null));
+  }
+
+  // The way out of each thing that doesn't fit, one tap each.
+  function problemActions(c) {
+    const b = (text, act) => h('button', { type: 'button', class: 'btn btn-sm btn-quiet', 'data-act': act, text });
+    const pickWho = b(c.direction === 'in' ? 'Pick who paid' : 'Pick who was paid', 'payee');
+    switch (c.problem) {
+      case 'swapped': return [b('Swap them', 'swap')];
+      case 'other-is-mine': return c.typeChosen ? [pickWho, b('Make it a transfer', 'transfer')] : [b('Make it a transfer', 'transfer'), pickWho];
+      case 'other-not-mine':
+      case 'same-account': return [b('Pick the account', 'payee'), b('Make it a ' + TYPE_LABEL[c.types[0]].toLowerCase(), 'retype')];
+      case 'other-kind': return [pickWho];
+      case 'direction': return [b('Make it a ' + TYPE_LABEL[c.types[0]].toLowerCase(), 'retype')];
+      case 'own-not-mine': return [b('Pick the account', 'account')];
+    }
+    return [];
   }
 
   // ---- rendering ------------------------------------------------------------
@@ -304,7 +383,12 @@
       if (!el || el.dataset.v !== c._v) {
         const fresh = buildCard(c);
         fresh.dataset.v = c._v || '';
-        if (el) { fresh.className = el.className; el.replaceWith(fresh); } else stackEl.append(fresh);
+        if (el) {
+          // it keeps its place in the stack, and takes its new kind (an
+          // edit can turn a transfer into a deposit)
+          for (const k of ['is-top', 'is-next', 'is-after']) if (el.classList.contains(k)) fresh.classList.add(k);
+          el.replaceWith(fresh);
+        } else stackEl.append(fresh);
         el = fresh;
         nodes.set(c.uuid, el);
       }
@@ -431,7 +515,7 @@
   function upNextLines(c) {
     const norm = x => (x || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
     const plain = t => t.replace(/_{3}/g, '…').trim();
-    const payee = c.direction === 'in' ? c.from.name : c.direction === 'transfer' ? [c.from.name, c.to.name].filter(Boolean).join(' → ') : c.to.name;
+    const payee = c.type === 'transfer' ? [c.from.name, c.to.name].filter(Boolean).join(' → ') : otherOf(c).name;
     const step = nextStep(c);
     const blocked = step.kind !== 'send';
     const head = payee || (c.title.trim() ? plain(c.title) : '') || c.bankSaid || 'Someone';
@@ -448,7 +532,7 @@
     for (const c of state.cards.slice(1, 8)) {
       const l = upNextLines(c);
       upnextEl.append(h('li', {}, h('button', { type: 'button', onclick: () => bringToTop(c.uuid), 'aria-label': 'Review next: ' + spoken(c) },
-        h('span', { class: 'u-who', text: l.head }), h('span', { class: 'u-amt num' + (c.direction === 'in' ? ' is-in' : '') }, money(c.amount, c.direction)),
+        h('span', { class: 'u-who', text: l.head }), h('span', { class: 'u-amt num' + (c.type === 'deposit' ? ' is-in' : '') }, money(c.amount, c.type)),
         h('span', { class: 'u-title' + (l.blocked ? ' u-attn' : ''), text: l.sub }), h('span', { class: 'u-day', text: c.day }))));
     }
     if (!upnextEl.childNodes.length) upnextEl.append(h('li', { class: 'muted', text: 'Nothing else in this pile.' }));
@@ -559,8 +643,8 @@
   }
 
   function short(c) {
-    const who = c.direction === 'in' ? c.from.name : c.to.name;
-    return c.amount + (who ? ' ' + who : '');
+    const who = otherOf(c).name;
+    return c.amount + (who ? (c.type === 'transfer' ? (c.direction === 'in' ? ' from ' : ' to ') : ' ') + who : '');
   }
 
   async function run(p, keepalive) {
@@ -649,7 +733,10 @@
 
   function doStep(c, step) {
     if (step.kind === 'title') openTitle(c);
-    else if (step.kind === 'payee') openPayee(c);
+    else if (step.kind === 'payee') openOther(c);
+    else if (step.kind === 'transfer') makeTransfer(c);
+    else if (step.kind === 'swap') swapSides(c);
+    else if (step.kind === 'retype') switchType(c, c.types[0]);
     else if (step.kind === 'account') openAccount(c);
     else if (step.kind === 'editor') location.href = c.editUrl;
     else if (step.kind === 'skip') decide('skip');
@@ -751,18 +838,22 @@
       if (!act) return;
       const c = state.cards.find(x => x.uuid === el.dataset.uuid);
       if (!c) return;
-      runAct(act.dataset.act, c);
+      runAct(act.dataset.act, c, act);
     }, true);
   }
 
-  function runAct(act, c) {
+  function runAct(act, c, el) {
     if (act === 'title') openTitle(c);
     else if (act === 'category') openCategory(c);
-    else if (act === 'payee') openPayee(c);
+    else if (act === 'payee') openOther(c);
+    else if (act === 'type') switchType(c, el && el.dataset.type);
+    else if (act === 'transfer') makeTransfer(c);
+    else if (act === 'swap') swapSides(c);
+    else if (act === 'retype') switchType(c, c.types[0]);
     else if (act === 'refund') openRefund(c);
     else if (act === 'skip') { bringToTop(c.uuid); decide('skip'); }
     else if (act === 'editor') location.href = c.editUrl;
-    else if (act === 'guess') { const g = guessFor(c); if (g) edit(c, { payee: g }).catch(() => {}); }
+    else if (act === 'guess') { const g = guessFor(c); if (g) edit(c, { type: c.type, payee: g }).catch(() => {}); }
     else if (act === 'account') openAccount(c);
   }
 
@@ -781,9 +872,16 @@
 
   function replaceCard(fresh) {
     fresh._v = String(Date.now());
+    // a keyboard stays where it was: on the type control, redrawn
+    const ae = document.activeElement;
+    const refocus = ae && ae.closest && ae.closest('.type-seg') && (ae.closest('.card') || {}).dataset?.uuid === fresh.uuid;
     const i = state.cards.findIndex(x => x.uuid === fresh.uuid);
     if (i >= 0) state.cards[i] = fresh;
     render();
+    if (refocus) {
+      const b = (nodes.get(fresh.uuid) || document).querySelector('.type-opt[aria-pressed="true"]');
+      if (b) b.focus();
+    }
   }
 
   // ---- sheets -------------------------------------------------------------------
@@ -871,28 +969,116 @@
     paint();
   }
 
-  async function openPayee(c) {
+  // The other side, by the card's type: one of your accounts for a
+  // transfer, a payee or a payer otherwise.
+  function openOther(c) { return c.type === 'transfer' ? openTransferAccount(c) : openPayee(c); }
+
+  // A side "as it stands" is empty when the card is still asking for it
+  // (the name on the alert shows there, but nobody has said so).
+  const otherMissing = c => !otherOf(c).name || ((c.blockers || []).includes('payee') && !c.problem);
+
+  // Picking the other type. When the other side as it stands fits the new
+  // type — or there is none yet — the type changes at once. When it can't
+  // (a merchant is never the other end of a transfer; your own account is
+  // never who was paid) the picker for the new other side opens first, and
+  // the two are saved together: a card is never left half-changed.
+  function switchType(c, t) {
+    if (!t || t === c.type || !(c.types || []).includes(t)) return;
+    const other = otherOf(c);
+    if (t === 'transfer') {
+      if (other.mine) return edit(c, { type: t, payee: fullName(other) }).catch(() => {});
+      if (otherMissing(c)) return edit(c, { type: t }).catch(() => {});
+      return openTransferAccount(c);
+    }
+    if (other.mine) return openPayee(c, { switchTo: t });
+    edit(c, { type: t }).catch(() => {});
+  }
+
+  // A card saved the wrong way round already reads the right way round; this
+  // stores it that way.
+  function swapSides(c) {
+    return edit(c, { type: c.type, account: fullName(ownOf(c)), payee: fullName(otherOf(c)) }).catch(() => {});
+  }
+
+  // "Make it a transfer": one tap when the other side already names one of
+  // your accounts (the ₹1 a bank sends to check an account, booked from the
+  // bank's own name); otherwise, which account.
+  function makeTransfer(c) {
+    const other = otherOf(c);
+    if (other.mine && c.type !== 'transfer') return edit(c, { type: 'transfer', payee: fullName(other) }).catch(() => {});
+    openTransferAccount(c);
+  }
+
+  // The other end of a transfer: one of your own accounts and nothing else,
+  // the ones this account usually moves money with first. There is nothing
+  // to type — a transfer can't go to a name that isn't an account.
+  async function openTransferAccount(c) {
     const incoming = c.direction === 'in';
-    const other = incoming ? c.from : c.to;
+    const own = ownOf(c), other = otherOf(c);
+    const switching = c.type !== 'transfer';
+    const list = h('div', { class: 'pick-list', role: 'listbox' });
+    const choose = async a => {
+      closeSheet();
+      if (switching || a.name !== fullName(other)) await edit(c, { type: 'transfer', payee: a.name }).catch(() => {});
+    };
+    openSheet(incoming ? 'From which account?' : 'To which account?', h('div', { class: 'fields' },
+      h('p', { class: 'hint', text: switching
+        ? (incoming ? 'Money from another of your own accounts is a transfer. Pick which one.' : 'Money to another of your own accounts is a transfer. Pick which one.')
+        : 'A transfer moves money between two of your own accounts.' }), list));
+    const [o, s] = await Promise.all([options(), suggestions(c)]);
+    const ownFull = fullName(own).toLowerCase();
+    const accts = (o.accounts || []).filter(a => !ownFull || a.name.toLowerCase() !== ownFull);
+    const byName = new Map(accts.map(a => [a.name.toLowerCase(), a]));
+    const current = c.type === 'transfer' ? fullName(other).toLowerCase() : '';
+    const usual = (s.accounts || []).map(x => ({ a: byName.get(x.value.toLowerCase()), hint: x.hint })).filter(x => x.a);
+    const shown = new Set();
+    if (usual.length) list.append(h('div', { class: 'pick-group', text: incoming ? 'Usually from' : 'Usually to' }));
+    for (const x of usual) {
+      shown.add(x.a.name);
+      list.append(pickButton(x.a.short, x.hint, () => choose(x.a), x.a.name.toLowerCase() === current));
+    }
+    const rest = accts.filter(a => !shown.has(a.name));
+    if (usual.length && rest.length) list.append(h('div', { class: 'pick-group', text: 'Your other accounts' }));
+    for (const a of rest) list.append(pickButton(a.short, '', () => choose(a), a.name.toLowerCase() === current));
+    if (!accts.length) list.append(h('p', { class: 'hint', text: 'No other accounts yet — they come from Firefly.' }));
+    for (const b of list.querySelectorAll('.pick')) b.setAttribute('role', 'option');
+  }
+
+  // Who was paid, or who paid: a payee or a payer — never one of your own
+  // accounts. Money to or from those is a transfer, and a name that is one
+  // offers exactly that. The type goes with the pick (the card's, or the one
+  // being switched to), so what is saved is what was on screen.
+  async function openPayee(c, opts = {}) {
+    const incoming = c.direction === 'in';
+    const t = opts.switchTo || (c.type === 'transfer' ? c.types[0] : c.type);
+    const switching = t !== c.type;
+    const other = otherOf(c), own = ownOf(c);
     const input = h('input', { type: 'search', placeholder: incoming ? 'Who paid you?' : 'Who was paid?', 'aria-label': incoming ? 'Payer' : 'Payee', autocomplete: 'off' });
-    const missing = incoming ? !c.from.name : (c.blockers || []).includes('payee');
+    const missing = otherMissing(c) || other.mine;
     const current = missing ? '' : [other.name, other.place].filter(Boolean).join(', ');
     const guess = guessFor(c);
     input.value = current;
     const list = h('div', { class: 'pick-list', role: 'listbox' });
-    const choose = async v => { closeSheet(); if (v !== current) await edit(c, { payee: v }).catch(() => {}); };
-    openSheet(incoming ? 'Paid by' : 'Paid to', h('div', { class: 'fields' }, input,
-      h('p', { class: 'hint', text: incoming ? 'Pick someone who has paid you before, or type a new name. Firefly creates it when this is sent.' : 'Pick one of your payees, or type a new name. Firefly creates it when this is sent.' }), list));
+    const choose = async v => { closeSheet(); if (v !== current || switching) await edit(c, { type: t, payee: v }).catch(() => {}); };
+    const toTransfer = async a => { closeSheet(); await edit(c, { type: 'transfer', payee: a.name }).catch(() => {}); };
+    const hint = switching
+      ? (incoming ? 'Pick who paid you, or type a new name, and it becomes a deposit.' : 'Pick who was paid, or type a new name, and it becomes a withdrawal.')
+      : (incoming ? 'Pick someone who has paid you before, or type a new name. Firefly creates it when this is sent.' : 'Pick one of your payees, or type a new name. Firefly creates it when this is sent.');
+    openSheet(incoming ? 'Paid by' : 'Paid to', h('div', { class: 'fields' }, input, h('p', { class: 'hint', text: hint }), list));
     setTimeout(() => input.select(), 40); // typing replaces the current name
     const [o, s] = await Promise.all([options(), suggestions(c)]);
-    const names = incoming ? (o.payers || []) : o.payees;
+    const names = incoming ? (o.payers || []) : (o.payees || []);
+    const ownFull = fullName(own).toLowerCase();
+    const accts = o.accounts || [];
+    const isAcct = (a, q) => a.name.toLowerCase() === q || a.short.toLowerCase() === q;
+    const isOwn = v => accts.some(a => isAcct(a, (v || '').trim().toLowerCase()));
     const paint = () => {
       const q = input.value.trim();
       const ql = q.toLowerCase();
       list.replaceChildren();
       if (!ql || q === current) {
-        const past = incoming ? [] : (s.payees || []).filter(x => x.value !== guess);
-        if (guess) {
+        const past = incoming ? [] : (s.payees || []).filter(x => x.value !== guess && !isOwn(x.value));
+        if (guess && !isOwn(guess)) {
           list.append(h('div', { class: 'pick-group', text: incoming ? 'On the bank line' : 'On the alert' }));
           const known = names.find(p => p.toLowerCase() === guess.toLowerCase());
           list.append(pickButton(known || guess, known ? '' : incoming ? 'new payer' : 'new payee', () => choose(known || guess)));
@@ -903,6 +1089,19 @@
         }
         return;
       }
+      // your own accounts are never a payee: typing one offers the transfer
+      const exactOwn = accts.find(a => isAcct(a, ql));
+      const ownHits = accts.filter(a => a.name.toLowerCase() !== ownFull &&
+        (a.name.toLowerCase().startsWith(ql) || a.short.toLowerCase().startsWith(ql)));
+      const transfers = () => {
+        if (!ownHits.length) return;
+        list.append(h('div', { class: 'pick-group', text: 'Your accounts — that makes it a transfer' }));
+        for (const a of ownHits) list.append(pickButton((incoming ? 'Transfer from ' : 'Transfer to ') + a.short, '', () => toTransfer(a)));
+      };
+      if (exactOwn && exactOwn.name.toLowerCase() === ownFull) {
+        list.append(h('p', { class: 'hint', text: exactOwn.short + ' is the account this is on.' }));
+      }
+      if (exactOwn) transfers();
       const starts = [], has = [];
       for (const p of names) {
         const pl = p.toLowerCase();
@@ -911,8 +1110,10 @@
       }
       const hits = starts.concat(has).slice(0, 30);
       const exact = hits.some(p => p.toLowerCase() === ql);
-      if (!exact) list.append(pickButton('Use “' + q + '”', incoming ? 'new payer' : 'new payee', () => choose(q)));
+      if (!exact && !exactOwn) list.append(pickButton('Use “' + q + '”', incoming ? 'new payer' : 'new payee', () => choose(q)));
+      if (hits.length && exactOwn && ownHits.length) list.append(h('div', { class: 'pick-group', text: incoming ? 'Payers' : 'Payees' }));
       for (const p of hits) list.append(pickButton(p, '', () => choose(p)));
+      if (!exactOwn) transfers();
     };
     input.addEventListener('input', paint);
     input.addEventListener('keydown', e => { if (e.key === 'Enter') { const b = list.querySelector('.pick'); if (b) { e.preventDefault(); b.click(); } } });
@@ -925,11 +1126,17 @@
   function openAccount(c) {
     const incoming = c.direction === 'in';
     const list = h('div', { class: 'pick-list' });
-    const mine = incoming ? c.to : c.from;
+    const mine = ownOf(c);
+    // a transfer's other end is not a choice for this end
+    const skip = c.type === 'transfer' ? fullName(otherOf(c)) : '';
     const choose = async a => { closeSheet(); await edit(c, { account: a.name }).catch(() => {}); };
-    for (const a of accounts) list.append(pickButton(a.short, a.short !== a.name ? a.name : '', () => choose(a), a.name === mine.full || a.short === mine.name));
+    for (const a of accounts) {
+      if (skip && a.name === skip) continue;
+      list.append(pickButton(a.short, a.short !== a.name ? a.name : '', () => choose(a), a.name === mine.full || a.short === mine.name));
+    }
     if (!accounts.length) list.append(h('p', { class: 'hint', text: 'No accounts yet — sync them from Firefly in the full editor.' }));
-    openSheet(incoming ? 'Which account did it come into?' : 'Which account paid?', h('div', { class: 'fields' }, list));
+    openSheet(c.type === 'transfer' ? (incoming ? 'Which account did it move into?' : 'Which account did it move from?')
+      : incoming ? 'Which account did it come into?' : 'Which account paid?', h('div', { class: 'fields' }, list));
   }
 
   function openRefund(c) {
@@ -946,9 +1153,14 @@
     const add = (label, hint, fn) => list.append(pickButton(label, hint, () => { closeSheet(); fn(); }));
     add('Edit the title', 'T', () => openTitle(c));
     add('Change the category', 'C', () => openCategory(c));
-    if (c.direction === 'out') add('Change who was paid', 'P', () => openPayee(c));
-    if (c.direction === 'in') add('Change who paid', 'P', () => openPayee(c));
-    if (c.direction !== 'transfer') add(c.direction === 'in' ? 'Change the account it came into' : 'Change the account that paid', '', () => openAccount(c));
+    if (c.type === 'transfer') {
+      add(c.direction === 'in' ? 'Change the account it moved from' : 'Change the account it moved to', 'P', () => openTransferAccount(c));
+      add(c.direction === 'in' ? 'Change the account it moved into' : 'Change the account it moved from', '', () => openAccount(c));
+    } else {
+      add(c.direction === 'in' ? 'Change who paid' : 'Change who was paid', 'P', () => openPayee(c));
+      add(c.direction === 'in' ? 'Change the account it came into' : 'Change the account that paid', '', () => openAccount(c));
+    }
+    for (const t of c.types || []) if (t !== c.type) add('Make it a ' + TYPE_LABEL[t].toLowerCase(), typeMeaning(t, c), () => switchType(c, t));
     if (c.refund) add('Which purchase it refunds', '', () => openRefund(c));
     add('Open the full editor', 'O', () => { location.href = c.editUrl; });
     if (state.pile === 'later') add('Move back to review', '', () => moveBack(c));
@@ -1041,7 +1253,7 @@
       case 'arrowleft': e.preventDefault(); decide('later'); break;
       case 't': case 'e': e.preventDefault(); openTitle(c); break;
       case 'c': e.preventDefault(); openCategory(c); break;
-      case 'p': if (c.direction !== 'transfer') { e.preventDefault(); openPayee(c); } break;
+      case 'p': e.preventDefault(); openOther(c); break;
       case 'o': e.preventDefault(); location.href = c.editUrl; break;
       case 'm': e.preventDefault(); openMore(c); break;
       case 'u': e.preventDefault(); undo(); break;

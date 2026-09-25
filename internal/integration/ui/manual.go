@@ -28,6 +28,7 @@ import (
 func (h *Handler) handleNewForm(w http.ResponseWriter, r *http.Request) {
 	destAccounts, _ := h.listAccountsByKind(r.Context(), "destination")
 	srcAccounts, _ := h.listAccountsByKind(r.Context(), "source")
+	ownOpts, payeeOpts, payerOpts := h.nameLists(r.Context())
 	categories, _ := h.listCategories(r.Context())
 	budgets, _ := h.listBudgets(r.Context())
 	allTags, _ := h.listAllTags(r.Context())
@@ -39,6 +40,9 @@ func (h *Handler) handleNewForm(w http.ResponseWriter, r *http.Request) {
 		"Date":            date,
 		"DestOptions":     destAccounts,
 		"SourceOptions":   srcAccounts,
+		"OwnOptions":      ownOpts,
+		"PayeeOptions":    payeeOpts,
+		"PayerOptions":    payerOpts,
 		"CategoryOptions": categories,
 		"BudgetOptions":   budgets,
 		"TagLibrary":      allTags,

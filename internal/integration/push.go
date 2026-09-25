@@ -32,6 +32,12 @@ var PushNotReadyError = errors.New("push: row is not in ready_to_push status")
 // message rather than a confusing 401/403.
 var PushReadOnlyError = errors.New("push: TEXAS_FOLDEM_FIREFLY_READONLY is set; refusing to write")
 
+// PushTypeError is returned, before anything reaches firefly, when a row's
+// type doesn't fit its accounts: a withdrawal paid to one of the user's own
+// accounts, a transfer to a merchant (see txntype.go). The wrapped message
+// says which, in words the review UI can show as they are.
+var PushTypeError = errors.New("push: the type doesn't fit the accounts")
+
 // PushReport is the structured outcome of a push attempt.
 type PushReport struct {
 	FoldUUID       string    `json:"fold_uuid"`
@@ -185,6 +191,9 @@ func (p *Pusher) Push(ctx context.Context, foldUUID string, confirm bool) (PushR
 		}, nil
 	}
 
+	if err := p.typeFits(ctx, row); err != nil {
+		return PushReport{}, err
+	}
 	body := p.buildCreateRequest(ctx, row)
 
 	if !confirm {
@@ -351,42 +360,7 @@ func (p *Pusher) fetchPushableRow(ctx context.Context, foldUUID string) (pushabl
 // human never edited anything) is pushable directly with whatever the
 // classifier proposed.
 func (p *Pusher) buildCreateRequest(ctx context.Context, row pushableRow) firefly.CreateTransactionRequest {
-	// Source resolved as a UNIT (same rule as destination): a confirmed
-	// choice fully overrides the proposal, including a name-only NEW account.
-	// A name-only source is the DEPOSIT payer — firefly creates the REVENUE
-	// account from the name, exactly as it creates an expense account for a
-	// withdrawal's destination.
-	var srcID int64
-	var srcName string
-	switch {
-	case row.ConfirmedSourceAccountID.Valid:
-		srcID = row.ConfirmedSourceAccountID.Int64
-	case strings.TrimSpace(row.ConfirmedSourceAccountName.String) != "":
-		srcName = strings.TrimSpace(row.ConfirmedSourceAccountName.String)
-	case row.ProposedSourceAccountID.Valid:
-		srcID = row.ProposedSourceAccountID.Int64
-	default:
-		srcName = strings.TrimSpace(row.ProposedSourceAccountName.String)
-	}
-	// Destination resolved as a UNIT: a human correction (confirmed) fully
-	// overrides the classifier's proposal — crucially including a name-only
-	// NEW account, which must NOT fall back to the stale proposed id. That
-	// fallback was the bug where correcting a mis-classified merchant to a
-	// new account (confirmed name, null id) was silently ignored in favour
-	// of the old proposed account id. Only when NOTHING was confirmed do we
-	// use the proposal.
-	var destID int64
-	var destName string
-	switch {
-	case row.ConfirmedDestinationAccountID.Valid:
-		destID = row.ConfirmedDestinationAccountID.Int64
-	case strings.TrimSpace(row.ConfirmedDestinationAccountName.String) != "":
-		destName = strings.TrimSpace(row.ConfirmedDestinationAccountName.String)
-	case row.ProposedDestinationAccountID.Valid:
-		destID = row.ProposedDestinationAccountID.Int64
-	default:
-		destName = strings.TrimSpace(row.ProposedDestinationAccountName.String)
-	}
+	srcID, srcName, destID, destName := row.sides()
 	// A confirmed id of 0 is the review form's explicit "none" — the human
 	// cleared a wrong suggestion. pickInt64 returns it as 0 (confirmed wins),
 	// so nothing is sent and the proposal does NOT leak back in.
@@ -415,36 +389,27 @@ func (p *Pusher) buildCreateRequest(ctx context.Context, row pushableRow) firefl
 		_ = json.Unmarshal([]byte(row.ConfirmedTagsJSON.String), &tags)
 	}
 
-	// Type resolution: explicit override (confirmed > proposed) wins.
-	// Fall back to fold-direction mapping for legacy rows. This is what
-	// lets the classifier emit "transfer" — fold itself only knows
-	// INCOMING/OUTGOING, but Tier 3 reasons that both endpoints are
-	// the user's own asset accounts and writes "transfer" into
-	// proposed_txn_type. The Pusher honours that.
-	txnType := pickString(row.ConfirmedTxnType, row.ProposedTxnType)
-	if txnType == "" {
-		txnType = foldTypeToFireflyType(row.Type)
-	}
-	// asset → asset ⇒ transfer. firefly rejects an asset account as a
-	// withdrawal/deposit endpoint, so a credit-card repayment (HDFC Bank →
-	// Scapia CC, both the user's own assets) pushed as a "withdrawal" 422s
-	// with "could not find a valid destination account for id 954". Both
-	// endpoints being assets is the deterministic signal for a transfer —
-	// override whatever type was proposed. The classifier's LLM transfer
-	// detection is best-effort and a manual edit can change the endpoints,
-	// so this push-time check is the authoritative guard.
-	// asset ↔ asset ⇒ transfer. Resolve each endpoint to an asset id (itself
-	// when it's already an asset, or a same-named asset twin of a duplicate
-	// expense payee). Only when BOTH resolve to assets do we flip to a
-	// transfer and use those asset ids — so a normal purchase (asset →
-	// expense merchant, which has no asset twin) stays a withdrawal, while a
-	// credit-card repayment / inter-account move (asset → asset, even when
-	// the destination resolved to the card's duplicate EXPENSE twin) is
-	// corrected. firefly rejects an asset as a withdrawal/deposit endpoint,
-	// so this override is what lets such rows push at all.
-	if sa, da := p.assetTwin(ctx, srcID), p.assetTwin(ctx, destID); sa != 0 && da != 0 {
-		txnType = "transfer"
-		srcID, destID = sa, da
+	// The type, and each side's account, exactly as the review card shows
+	// them (txntype.go): a person's type is sent as chosen; an undecided row
+	// with the user's own accounts on both sides goes as a transfer. The own
+	// side always goes by its asset id — a payee account that only shares a
+	// card's name is not the card — and so does a transfer's other side.
+	tc := p.checkType(ctx, row)
+	txnType := tc.Type
+	if isIncoming(row.Type) {
+		if tc.OwnAsset != 0 {
+			destID, destName = tc.OwnAsset, ""
+		}
+		if txnType == TypeTransfer && tc.OtherAsset != 0 {
+			srcID, srcName = tc.OtherAsset, ""
+		}
+	} else {
+		if tc.OwnAsset != 0 {
+			srcID, srcName = tc.OwnAsset, ""
+		}
+		if txnType == TypeTransfer && tc.OtherAsset != 0 {
+			destID, destName = tc.OtherAsset, ""
+		}
 	}
 
 	// Money/time: the human's statement-reconciled values win over what the
@@ -511,6 +476,89 @@ func (p *Pusher) buildCreateRequest(ctx context.Context, row pushableRow) firefl
 	return firefly.CreateTransactionRequest{
 		Transactions: []firefly.CreateTransactionLine{line},
 	}
+}
+
+// sides resolves the row's source and destination the way push sends them,
+// each as a UNIT: a person's choice (confirmed) fully overrides the
+// classifier's proposal — including a name-only NEW account, which must not
+// fall back to a stale proposed id (that fallback was the bug where
+// correcting a merchant to a new account was silently ignored). Only when
+// nothing was confirmed does the proposal apply. A name-only source is a
+// deposit's payer, which firefly finds or creates as a revenue account by
+// name, just as it does an expense account for a withdrawal's destination.
+func (r pushableRow) sides() (srcID int64, srcName string, destID int64, destName string) {
+	switch {
+	case r.ConfirmedSourceAccountID.Valid:
+		srcID = r.ConfirmedSourceAccountID.Int64
+	case strings.TrimSpace(r.ConfirmedSourceAccountName.String) != "":
+		srcName = strings.TrimSpace(r.ConfirmedSourceAccountName.String)
+	case r.ProposedSourceAccountID.Valid:
+		srcID = r.ProposedSourceAccountID.Int64
+	default:
+		srcName = strings.TrimSpace(r.ProposedSourceAccountName.String)
+	}
+	switch {
+	case r.ConfirmedDestinationAccountID.Valid:
+		destID = r.ConfirmedDestinationAccountID.Int64
+	case strings.TrimSpace(r.ConfirmedDestinationAccountName.String) != "":
+		destName = strings.TrimSpace(r.ConfirmedDestinationAccountName.String)
+	case r.ProposedDestinationAccountID.Valid:
+		destID = r.ProposedDestinationAccountID.Int64
+	default:
+		destName = strings.TrimSpace(r.ProposedDestinationAccountName.String)
+	}
+	return
+}
+
+// checkType is CheckType for a row as push reads it.
+func (p *Pusher) checkType(ctx context.Context, row pushableRow) TypeCheck {
+	srcID, srcName, destID, destName := row.sides()
+	var q queryRower
+	if p.db != nil {
+		q = p.db
+	}
+	return CheckType(ctx, q, row.Type, row.ConfirmedTxnType.String, row.ProposedTxnType.String,
+		Side{ID: srcID, Name: srcName}, Side{ID: destID, Name: destName})
+}
+
+// typeFits refuses, before anything reaches firefly, a row whose type
+// doesn't fit its accounts.
+func (p *Pusher) typeFits(ctx context.Context, row pushableRow) error {
+	if tc := p.checkType(ctx, row); tc.Problem != ProblemNone {
+		return fmt.Errorf("%w: %s", PushTypeError, TypeProblemText(tc.Problem, row.Type, tc.Type))
+	}
+	return nil
+}
+
+// TypeProblemText says what is wrong in a sentence of plain words, for a
+// push error and for any page that has no names to hand.
+func TypeProblemText(problem, direction, txnType string) string {
+	switch problem {
+	case ProblemDirection:
+		if isIncoming(direction) {
+			return "the money came in, so it can't be a withdrawal"
+		}
+		return "the money went out, so it can't be a deposit"
+	case ProblemOtherIsMine:
+		return "the other side is one of your own accounts, which makes it a transfer"
+	case ProblemOtherNotMine:
+		return "a transfer goes between two of your own accounts, and the other side isn't one"
+	case ProblemSameAccount:
+		return "a transfer needs two different accounts"
+	case ProblemOtherKind:
+		if txnType == TypeDeposit {
+			return "a deposit comes from someone who pays you, not from a payee"
+		}
+		return "a withdrawal goes to a payee, not to someone who pays you"
+	case ProblemOwnNotMine:
+		if isIncoming(direction) {
+			return "the account it came into isn't one of yours"
+		}
+		return "the account that paid isn't one of yours"
+	case ProblemSwapped:
+		return "the two sides were saved the wrong way round"
+	}
+	return ""
 }
 
 // markPushed updates staged_fold_txns to terminal pushed state.
@@ -582,6 +630,9 @@ func (p *Pusher) Update(ctx context.Context, foldUUID string) (PushReport, error
 		return PushReport{}, fmt.Errorf("update: row has no firefly group id")
 	}
 	groupID := row.FireflyGroupID.Int64
+	if err := p.typeFits(ctx, row); err != nil {
+		return PushReport{}, err
+	}
 
 	body := p.buildCreateRequest(ctx, row)
 	if len(body.Transactions) == 0 {
@@ -635,47 +686,6 @@ func (p *Pusher) Update(ctx context.Context, foldUUID string) (PushReport, error
 func nullableInt64Value(n sql.NullInt64) int64 {
 	if n.Valid {
 		return n.Int64
-	}
-	return 0
-}
-
-// isAsset reports whether a firefly account id is one of the user's own
-// asset accounts, per the firefly_accounts mirror. Used to detect
-// asset→asset transfers at push time. Returns false when the id is 0, the
-// mirror lacks the row, or there's no db — all of which safely keep the
-// default (non-transfer) behaviour.
-func (p *Pusher) isAsset(ctx context.Context, id int64) bool {
-	if p.db == nil || id == 0 {
-		return false
-	}
-	var n int
-	err := p.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM firefly_accounts WHERE firefly_id = ? AND type = 'asset' AND active = 1`, id).Scan(&n)
-	return err == nil && n > 0
-}
-
-// assetTwin returns an asset-account id for a transfer endpoint: the id
-// itself when it's already an asset, otherwise a same-named asset account
-// (the "asset twin" of a duplicate expense/payee account), else 0 (leave
-// the endpoint as-is). Case-insensitive name match.
-func (p *Pusher) assetTwin(ctx context.Context, id int64) int64 {
-	if id == 0 || p.db == nil {
-		return 0
-	}
-	if p.isAsset(ctx, id) {
-		return id
-	}
-	var name string
-	if err := p.db.QueryRowContext(ctx,
-		`SELECT name FROM firefly_accounts WHERE firefly_id = ?`, id).Scan(&name); err != nil || name == "" {
-		return 0
-	}
-	var twin sql.NullInt64
-	_ = p.db.QueryRowContext(ctx,
-		`SELECT firefly_id FROM firefly_accounts WHERE LOWER(name) = LOWER(?) AND type = 'asset' AND active = 1 LIMIT 1`,
-		name).Scan(&twin)
-	if twin.Valid {
-		return twin.Int64
 	}
 	return 0
 }

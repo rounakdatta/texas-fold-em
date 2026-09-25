@@ -74,7 +74,7 @@ html:has(body.deck-body), body.deck-body { overscroll-behavior-x: none; overscro
 }
 .stamp-send { left: 20px; color: var(--accent); transform: rotate(-10deg); }
 /* a card that can't go yet names its next step, in the step's colour */
-.stamp-title, .stamp-payee, .stamp-editor, .stamp-account { color: var(--ink); }
+.stamp-title, .stamp-payee, .stamp-editor, .stamp-account, .stamp-retype, .stamp-transfer, .stamp-swap { color: var(--ink); }
 .stamp-skip { color: var(--danger-fill); }
 .stamp-later { right: 20px; color: var(--later); transform: rotate(10deg); }
 
@@ -90,6 +90,17 @@ button.acct { background: none; border: 0; padding: 0; font: inherit; cursor: po
 /* the money sits in the middle of the card, like a receipt; what you might
    edit sits low, near the thumb */
 .hero { flex: 1 0 auto; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 10px; padding: 10px 0 12px; min-height: 150px; }
+/* the kind of move, on every card: the one push will send, pressed. It
+   describes the card rather than warning about it, so it is quiet — an
+   inset well, smaller than the pile switch above the deck — and one tap
+   changes it */
+.type-seg { display: inline-flex; padding: 2px; gap: 2px; border-radius: 10px; background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--line); margin-bottom: 6px; }
+.type-opt { display: inline-flex; align-items: center; gap: 5px; height: 28px; padding: 0 11px 0 9px; border: 0; border-radius: 8px;
+  background: transparent; color: var(--fg-3); font-size: 13px; font-weight: 600; cursor: pointer; white-space: nowrap; }
+.type-opt svg { width: 15px; height: 15px; flex: none; }
+.type-opt:hover { color: var(--fg); }
+.type-opt[aria-pressed="true"] { background: var(--surface); color: var(--fg); box-shadow: 0 0 0 1px var(--line), var(--shadow-sm); cursor: default; }
+.type-deposit .type-opt[aria-pressed="true"] svg { color: var(--in); }
 /* a payee's initials on a tint of its own, the same tint every time — pale,
    as fold's colour is: in its marks, never in its chrome */
 .avatar {
@@ -107,7 +118,7 @@ button.acct { background: none; border: 0; padding: 0; font: inherit; cursor: po
 .amount { font-size: clamp(40px, 11.5vw, 52px); line-height: 1; font-weight: 600; letter-spacing: -0.025em; font-variant-numeric: tabular-nums; }
 .amount .cur { margin-right: 0.08em; }
 .amount .sign { margin-right: 0.05em; }
-.dir-in .amount { color: var(--in); }
+.type-deposit .amount { color: var(--in); }
 .amount-note { font-size: 13.5px; color: var(--fg-3); }
 .who { display: flex; flex-wrap: wrap; justify-content: center; align-items: baseline; gap: 2px 8px; font-size: 20px; line-height: 1.3; max-width: 100%; }
 .who-pre { color: var(--fg-3); font-size: 15px; }
@@ -122,7 +133,6 @@ button.acct { background: none; border: 0; padding: 0; font: inherit; cursor: po
 .who-break { flex-basis: 100%; height: 0; }
 .who-guess span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .who-guess:hover { background: color-mix(in srgb, var(--accent) 22%, transparent); }
-.transfer-arrow { color: var(--fg-3); }
 
 .what { display: flex; flex-direction: column; gap: 12px; padding-top: 16px; border-top: 1px solid var(--line); }
 .title-btn {
@@ -240,6 +250,8 @@ button.acct { background: none; border: 0; padding: 0; font: inherit; cursor: po
   .card-top { margin: 0 -16px; padding: 11px 16px 10px; }
   .hero { flex: 1 0 auto; min-height: 0; padding: 2px 0 6px; gap: 6px; }
   .avatar { width: 40px; height: 40px; border-radius: 12px; font-size: 17px; }
+  .type-seg { margin-bottom: 2px; }
+  .type-opt { height: 26px; }
   .amount { font-size: 34px; }
   .who { font-size: 17px; }
   .what { padding-top: 10px; gap: 8px; }

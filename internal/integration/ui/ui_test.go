@@ -407,9 +407,15 @@ func TestUI_Detail_Renders(t *testing.T) {
 	if !strings.Contains(s, "Snack at cake palace") {
 		t.Errorf("expected proposed description in textarea")
 	}
-	// Datalists for the autocomplete should be present.
-	if !strings.Contains(s, `<datalist id="dest-options">`) {
-		t.Errorf("expected dest-options datalist")
+	// Datalists for the autocomplete should be present: payees for a
+	// withdrawal's other side, the user's own accounts for theirs.
+	if !strings.Contains(s, `<datalist id="payee-options">`) || !strings.Contains(s, `<datalist id="own-options">`) {
+		t.Errorf("expected payee-options and own-options datalists")
+	}
+	// The type is a field of its own, with the kinds money out can be.
+	if !strings.Contains(s, `name="txn_type" value="withdrawal" checked`) || !strings.Contains(s, `name="txn_type" value="transfer"`) ||
+		strings.Contains(s, `value="deposit"`) {
+		t.Errorf("expected a Type field offering withdrawal (picked) and transfer, and no deposit for money out")
 	}
 	if !strings.Contains(s, `<datalist id="tag-options">`) {
 		t.Errorf("expected tag-options datalist")

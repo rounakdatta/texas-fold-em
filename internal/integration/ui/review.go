@@ -4,8 +4,10 @@ package ui
 //
 // One card per transaction waiting for a human. Swipe it right (or press →)
 // and it goes to firefly; swipe it left (←) and it waits in the Later pile.
-// The card shows the money, who it went to, when, from which account, and
-// the title and category push will send — and then only what is
+// The card shows the money, what kind of move it was (a withdrawal, a
+// deposit or a transfer, exactly as push will book it), who it went to, when,
+// from which account, and the title and category push will send — and then
+// only what is
 // exceptional: a blank in the title, a missing payee, a refund whose
 // purchase isn't picked, a possible duplicate, a hold. Everything a row
 // arrives with (it was classified, it is unconfirmed) is normal and is not
@@ -32,6 +34,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/rounakdatta/texas-fold-em/internal/integration"
 	"github.com/rounakdatta/texas-fold-em/internal/integration/firefly"
 	"github.com/rounakdatta/texas-fold-em/internal/integration/refundref"
 )
@@ -67,10 +70,23 @@ type refundPick struct {
 type reviewCard struct {
 	UUID   string `json:"uuid"`
 	Status string `json:"status"`
-	// Direction: "out" (a spend), "in" (money into one of the user's
-	// accounts: a refund, salary, interest) or "transfer" (between two of
-	// the user's own accounts — a card bill payment).
-	Direction   string   `json:"direction"`
+	// Direction is what the bank saw: "out" (money left one of the user's
+	// accounts) or "in" (money arrived in one).
+	Direction string `json:"direction"`
+	// Type is Firefly's kind for it — "withdrawal", "deposit" or "transfer" —
+	// resolved exactly as push resolves it (integration.CheckType), so the
+	// card never shows one thing while push sends another.
+	Type string `json:"type"`
+	// Types are the kinds the direction allows, the everyday one first:
+	// money out is a withdrawal or a transfer, money in a deposit or a
+	// transfer.
+	Types []string `json:"types"`
+	// TypeChosen: a person picked the type; push sends it as it is.
+	TypeChosen bool `json:"typeChosen,omitempty"`
+	// Problem is what doesn't fit between the type and the accounts (an
+	// integration.Problem* code), and ProblemText says so in words.
+	Problem     string   `json:"problem,omitempty"`
+	ProblemText string   `json:"problemText,omitempty"`
 	AmountPaise int64    `json:"amountPaise"`
 	Amount      string   `json:"amount"`
 	FoldAmount  string   `json:"foldAmount,omitempty"` // the alert's amount, when the statement corrected it
@@ -107,6 +123,13 @@ const (
 	blockTitleBlank = "title-blank"
 	blockPayee      = "payee"
 	blockSource     = "source"
+	// the other side is one of the user's own accounts, on a withdrawal or a
+	// deposit: one tap makes it the transfer it is
+	blockMine = "mine"
+	// the type can't carry the direction (a deposit of money that left)
+	blockType = "type"
+	// the two sides were saved the wrong way round: one tap swaps them
+	blockSwap = "swap"
 )
 
 // titleBlank is how titles mark what the classifier (or a reconciliation)
@@ -138,7 +161,8 @@ var cardSelect = `
 	       s.classifier_tier = 5 OR COALESCE(NULLIF(s.confirmed_refund_of,''), s.proposed_refund_of, '') <> ''
 	         OR (s.type = 'INCOMING' AND COALESCE(s.confirmed_category_id, s.proposed_category_id) IN
 	             (SELECT category_id FROM firefly_txns WHERE LOWER(category_name) = 'refund')),
-	       COALESCE(NULLIF(s.confirmed_refund_of,''), s.proposed_refund_of, '')
+	       COALESCE(NULLIF(s.confirmed_refund_of,''), s.proposed_refund_of, ''),
+	       COALESCE(s.confirmed_txn_type, ''), COALESCE(s.proposed_txn_type, '')
 	FROM staged_fold_txns s`
 
 // reviewable: rows a human still has to decide about. pending rows haven't
@@ -166,13 +190,14 @@ type cardRow struct {
 	later                              bool
 	isRefund                           sql.NullBool
 	refundRef                          string
+	confType, propType                 string
 }
 
 func scanCardRow(rows interface{ Scan(...any) error }) (cardRow, error) {
 	var r cardRow
 	err := rows.Scan(&r.uuid, &r.status, &r.typ, &r.mode, &r.narration, &r.tsStr, &r.amountPaise, &r.foldPaise,
 		&r.fxPaise, &r.fxCur, &r.title, &r.category, &r.tagsJSON, &r.srcID, &r.srcName, &r.dstID, &r.dstName,
-		&r.merchant, &r.notes, &r.dup, &r.hold, &r.later, &r.isRefund, &r.refundRef)
+		&r.merchant, &r.notes, &r.dup, &r.hold, &r.later, &r.isRefund, &r.refundRef, &r.confType, &r.propType)
 	return r, err
 }
 
@@ -205,23 +230,42 @@ func (h *Handler) buildCard(ctx context.Context, r cardRow) reviewCard {
 	// history yet); a name-only side is a merchant or payer push will create.
 	src := h.accountParty(ctx, r.srcID, r.srcName)
 	dst := h.accountParty(ctx, r.dstID, r.dstName)
-	switch {
-	case r.typ == "INCOMING":
+	incoming := r.typ == "INCOMING"
+	c.Direction = "out"
+	if incoming {
 		c.Direction = "in"
-	case dst.Mine:
-		c.Direction = "transfer"
-	default:
-		c.Direction = "out"
+	}
+	// The kind of move, as push will book it.
+	tc := integration.CheckType(ctx, h.db, r.typ, r.confType, r.propType, cardSide(r.srcID, r.srcName), cardSide(r.dstID, r.dstName))
+	c.Type, c.Types, c.TypeChosen, c.Problem = tc.Type, integration.TypesFor(r.typ), tc.Explicit, tc.Problem
+	if tc.Problem == integration.ProblemSwapped {
+		// saved the wrong way round: the card reads the right way — the
+		// banner says what is stored — and one tap stores it that way
+		src, dst = dst, src
+		tc.OwnAsset, tc.OtherAsset = tc.OtherAsset, 0
+	}
+	// An own account shows as the account, even where a same-named payee
+	// account stands in for it; so does a transfer's other side.
+	own, other := &src, &dst
+	if incoming {
+		own, other = &dst, &src
+	}
+	if tc.OwnAsset != 0 {
+		*own = h.accountParty(ctx, sql.NullInt64{Int64: tc.OwnAsset, Valid: true}, "")
+	}
+	if tc.Type == integration.TypeTransfer && tc.OtherAsset != 0 {
+		*other = h.accountParty(ctx, sql.NullInt64{Int64: tc.OtherAsset, Valid: true}, "")
 	}
 	c.From, c.To = src, dst
 	// A side counts as filled only if it resolved to a real name (firefly's
 	// "(no name)" placeholder doesn't).
 	hasDest, hasSource := dst.Name != "", src.Name != ""
-	if c.To.Name == "" && c.Direction == "out" && r.merchant != "" && r.merchant != "(no name)" {
+	if c.To.Name == "" && !incoming && c.Type == integration.TypeWithdrawal && r.merchant != "" && r.merchant != "(no name)" {
 		// Nothing proposed yet: show what the alert called the merchant, so
 		// the card still reads "to …" — it stays a blocker until confirmed.
 		c.To = party{Name: titleCase(r.merchant)}
 	}
+	c.ProblemText = problemText(tc.Problem, c)
 
 	c.BankSaid = bankSaid(r.narration, r.mode)
 	c.Note = humanNote(r.notes)
@@ -241,6 +285,19 @@ func (h *Handler) buildCard(ctx context.Context, r cardRow) reviewCard {
 	}
 
 	c.Blockers = cardBlockers(c, r.typ, hasSource, hasDest)
+	// what doesn't fit between the type and the accounts
+	switch tc.Problem {
+	case integration.ProblemOtherIsMine:
+		c.Blockers = insertBlocker(c.Blockers, blockMine)
+	case integration.ProblemDirection:
+		c.Blockers = insertBlocker(c.Blockers, blockType)
+	case integration.ProblemSwapped:
+		c.Blockers = insertBlocker(c.Blockers, blockSwap)
+	case integration.ProblemOtherNotMine, integration.ProblemSameAccount, integration.ProblemOtherKind:
+		c.Blockers = insertBlocker(c.Blockers, blockPayee)
+	case integration.ProblemOwnNotMine:
+		c.Blockers = insertBlocker(c.Blockers, blockSource)
+	}
 	c.EditURL = "/admin/ui/staged/" + c.UUID + "?back=" + url.QueryEscape("/admin/ui/review")
 	return c
 }
@@ -276,6 +333,88 @@ func cardBlockers(c reviewCard, typ string, hasSource, hasDest bool) []string {
 		out = append(out, blockTitleBlank)
 	}
 	return out
+}
+
+// insertBlocker adds a blocker once, keeping the order a person settles them
+// in: a hold, the kind of move, who is on the other side, the account, the
+// title.
+func insertBlocker(list []string, b string) []string {
+	for _, x := range list {
+		if x == b {
+			return list
+		}
+	}
+	rank := map[string]int{blockHold: 0, blockType: 1, blockSwap: 1, blockMine: 2, blockPayee: 3, blockSource: 4, blockTitleEmpty: 5, blockTitleBlank: 5}
+	out := make([]string, 0, len(list)+1)
+	placed := false
+	for _, x := range list {
+		if !placed && rank[b] < rank[x] {
+			out = append(out, b)
+			placed = true
+		}
+		out = append(out, x)
+	}
+	if !placed {
+		out = append(out, b)
+	}
+	return out
+}
+
+// cardSide is a side as push reads it: an id when there is one, else the
+// name (an account push asks firefly to create).
+func cardSide(id sql.NullInt64, name string) integration.Side {
+	if id.Valid {
+		return integration.Side{ID: id.Int64}
+	}
+	return integration.Side{Name: name}
+}
+
+// problemText says what doesn't fit, with the accounts' names, in the words
+// the card and the editor show.
+func problemText(problem string, c reviewCard) string {
+	own, other := c.From, c.To
+	if c.Direction == "in" {
+		own, other = c.To, c.From
+	}
+	name := func(p party, fallback string) string {
+		if p.Name == "" {
+			return fallback
+		}
+		return p.Name
+	}
+	switch problem {
+	case integration.ProblemOtherIsMine:
+		return name(other, "The other side") + " is one of your accounts. Money between your own accounts is a transfer."
+	case integration.ProblemOtherNotMine:
+		return "A transfer goes between two of your accounts, and " + name(other, "the other side") + " isn't one of them."
+	case integration.ProblemSameAccount:
+		return "A transfer needs two different accounts — this one goes from " + name(own, "an account") + " to itself."
+	case integration.ProblemDirection:
+		if c.Direction == "in" {
+			return "The money came into " + name(own, "your account") + ", so it can't be a withdrawal."
+		}
+		return "The money went out of " + name(own, "your account") + ", so it can't be a deposit."
+	case integration.ProblemOtherKind:
+		if c.Type == integration.TypeDeposit {
+			return name(other, "The other side") + " is someone you pay, and a deposit comes from someone who pays you."
+		}
+		return name(other, "The other side") + " is someone who pays you, and a withdrawal goes to someone you pay."
+	case integration.ProblemOwnNotMine:
+		if c.Direction == "in" {
+			return name(own, "That account") + " isn't one of your accounts, so the money can't have come into it."
+		}
+		return name(own, "That account") + " isn't one of your accounts, so it can't have paid."
+	case integration.ProblemSwapped:
+		// the card shows the sides the right way round; this says how they
+		// are stored
+		if c.Direction == "in" {
+			return "It was saved the wrong way round, with " + name(own, "your account") + " as who paid and " +
+				name(other, "the payer") + " as the account it came into."
+		}
+		return "It was saved the wrong way round, with " + name(own, "your account") + " as who was paid and " +
+			name(other, "the payee") + " as the account that paid."
+	}
+	return ""
 }
 
 // accountParty resolves one side of a transaction for display.
@@ -694,6 +833,11 @@ func (h *Handler) loadCard(ctx context.Context, uuid string) (reviewCard, error)
 
 // cardEdit is the body of POST …/edit: only the fields present change.
 type cardEdit struct {
+	// Type is the kind of move: "withdrawal", "deposit" or "transfer" — one
+	// the bank's direction allows. Sent with the payee it needs (a transfer
+	// with the other account), so a change of type never leaves a card
+	// half-made. "" hands the choice back to fold.
+	Type     *string `json:"type"`
 	Title    *string `json:"title"`
 	Category *string `json:"category"`
 	// Payee is the other side: who was paid on a spend, who paid on money in.
@@ -736,6 +880,9 @@ func (h *Handler) handleCardEdit(w http.ResponseWriter, r *http.Request) {
 	if typ == "INCOMING" {
 		otherSide, mySide = "source_name", "destination_name"
 	}
+	if e.Type != nil {
+		form.Set("txn_type", strings.ToLower(strings.TrimSpace(*e.Type)))
+	}
 	if e.Title != nil {
 		form.Set("description", strings.TrimSpace(*e.Title))
 	}
@@ -754,6 +901,15 @@ func (h *Handler) handleCardEdit(w http.ResponseWriter, r *http.Request) {
 	if e.RefundOf != nil {
 		form.Set("refund_of", strings.TrimSpace(*e.RefundOf))
 	}
+	// A kind of move, and who is on the other side, must fit each other
+	// before anything is saved: nothing half-right reaches the card.
+	if e.Type != nil || e.Payee != nil || e.Account != nil {
+		if msg := h.editFits(r.Context(), uuid, typ, form); msg != "" {
+			c, _ := h.loadCard(r.Context(), uuid)
+			writeJSON(w, http.StatusUnprocessableEntity, actionResponse{Card: &c, Message: msg})
+			return
+		}
+	}
 	unresolved, err := h.saveEdits(r.Context(), uuid, form)
 	if err != nil {
 		h.apiError(w, http.StatusInternalServerError, "save failed: "+err.Error())
@@ -769,6 +925,49 @@ func (h *Handler) handleCardEdit(w http.ResponseWriter, r *http.Request) {
 		resp.Message = "Couldn't match " + strings.Join(unresolved, ", ")
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// editFits checks an edit before it is saved: the type is one the bank's
+// direction allows, and the two sides fit it. It returns what doesn't fit,
+// in the card's words, or "" when the edit can be saved.
+func (h *Handler) editFits(ctx context.Context, uuid, dir string, form url.Values) string {
+	t := strings.ToLower(strings.TrimSpace(form.Get("txn_type")))
+	cur, err := h.loadCard(ctx, uuid)
+	if err != nil {
+		return ""
+	}
+	if formHas(form, "txn_type") && t != "" && !integration.TypeAllowed(dir, t) {
+		cur.Type = t
+		return problemText(integration.ProblemDirection, cur)
+	}
+	confirmed := t
+	if !formHas(form, "txn_type") && cur.TypeChosen {
+		confirmed = cur.Type
+	}
+	effType := confirmed
+	if effType == "" {
+		effType = cur.Type
+	}
+	src, dst, bad := h.resolveSides(ctx, dir, effType, strings.TrimSpace(form.Get("source_name")), strings.TrimSpace(form.Get("destination_name")))
+	if effType == integration.TypeTransfer && len(bad) > 0 {
+		other := strings.TrimSpace(form.Get("destination_name"))
+		if dir == "INCOMING" {
+			other = strings.TrimSpace(form.Get("source_name"))
+		}
+		return "A transfer goes between two of your accounts, and " + other + " isn't one of them."
+	}
+	tc := integration.CheckType(ctx, h.db, dir, confirmed, "", src, dst)
+	if tc.Problem == integration.ProblemNone || tc.Problem == integration.ProblemOwnNotMine {
+		return ""
+	}
+	// say it with the names the card would show after the edit
+	next := cur
+	next.Type = tc.Type
+	sides := func(sd integration.Side) party {
+		return h.accountParty(ctx, sql.NullInt64{Int64: sd.ID, Valid: sd.ID != 0}, sd.Name)
+	}
+	next.From, next.To = sides(src), sides(dst)
+	return problemText(tc.Problem, next)
 }
 
 // currentForm is the row's effective values in the review form's shape, so
@@ -913,13 +1112,24 @@ func blockerMessage(c reviewCard) string {
 		switch b {
 		case blockHold:
 			return "On hold: " + c.Hold
+		case blockType, blockSwap, blockMine:
+			return c.ProblemText
 		case blockTitleEmpty:
 			return "Give it a title first"
 		case blockTitleBlank:
 			return "Fill in the blank first"
 		case blockPayee:
+			if c.ProblemText != "" {
+				return c.ProblemText
+			}
+			if c.Type == integration.TypeTransfer {
+				return "Say which of your accounts it moved to (or from) first"
+			}
 			return "Say who was paid (or who paid) first"
 		case blockSource:
+			if c.ProblemText != "" {
+				return c.ProblemText
+			}
 			return "Say which of your accounts it was first"
 		}
 	}
@@ -1023,6 +1233,9 @@ type suggestResponse struct {
 	// Payees the user picked before for the same name on the bank line
 	// ("Ramesh S" → Chai Corner).
 	Payees []suggestion `json:"payees"`
+	// Accounts this account usually moves money with — the likely other
+	// side of a transfer, most used first ("Kestrel card · 12×").
+	Accounts []suggestion `json:"accounts"`
 }
 
 // rawNarrationTitle: a firefly title that is really a pasted bank line
@@ -1044,8 +1257,9 @@ func (h *Handler) handleCardSuggest(w http.ResponseWriter, r *http.Request) {
 		h.apiError(w, http.StatusNotFound, "not found")
 		return
 	}
-	resp := suggestResponse{Titles: []suggestion{}, Categories: []suggestion{}, Payees: []suggestion{}}
+	resp := suggestResponse{Titles: []suggestion{}, Categories: []suggestion{}, Payees: []suggestion{}, Accounts: []suggestion{}}
 	resp.Payees = h.payeesForBankName(ctx, narration, mode)
+	resp.Accounts = h.transferPartners(ctx, uuid)
 	if !dstID.Valid && dstName != "" {
 		if id := h.resolveAccountID(ctx, "destination", dstName); id != 0 {
 			dstID = sql.NullInt64{Int64: id, Valid: true}
@@ -1085,6 +1299,70 @@ func (h *Handler) handleCardSuggest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// transferPartners lists the accounts the row's own account has moved money
+// with before, most often first: the likely other side if it is a transfer.
+// An own account the other side already names (a card's same-named payee)
+// comes first of all.
+func (h *Handler) transferPartners(ctx context.Context, uuid string) []suggestion {
+	out := []suggestion{}
+	c, err := h.loadCard(ctx, uuid)
+	if err != nil {
+		return out
+	}
+	own, other := c.From, c.To
+	if c.Direction == "in" {
+		own, other = c.To, c.From
+	}
+	ownID := integration.AssetByName(ctx, h.db, firstNonEmpty(own.Full, own.Name))
+	if ownID == 0 {
+		return out
+	}
+	seen := map[int64]bool{ownID: true}
+	if id := integration.AssetByName(ctx, h.db, firstNonEmpty(other.Full, other.Name)); id != 0 && !seen[id] {
+		seen[id] = true
+		out = append(out, suggestion{Value: h.lookupAccountName(ctx, id), Hint: "named on this one"})
+	}
+	rows, err := h.db.QueryContext(ctx, `
+		SELECT CASE WHEN source_account_id = ? THEN destination_account_id ELSE source_account_id END AS partner,
+		       COUNT(*), MAX(date)
+		FROM firefly_txns
+		WHERE txn_type = 'transfer' AND (source_account_id = ? OR destination_account_id = ?)
+		GROUP BY partner ORDER BY COUNT(*) DESC, MAX(date) DESC LIMIT 6`, ownID, ownID, ownID)
+	if err != nil {
+		return out
+	}
+	type hit struct {
+		id   int64
+		n    int
+		last string
+	}
+	var hits []hit
+	for rows.Next() {
+		var x hit
+		if rows.Scan(&x.id, &x.n, &x.last) == nil {
+			hits = append(hits, x)
+		}
+	}
+	rows.Close()
+	for _, x := range hits {
+		if seen[x.id] || integration.AssetByName(ctx, h.db, h.lookupAccountName(ctx, x.id)) != x.id {
+			continue // itself, already offered, or no longer one of the user's accounts
+		}
+		seen[x.id] = true
+		out = append(out, suggestion{Value: h.lookupAccountName(ctx, x.id), Hint: pastUseHint(x.n, x.last)})
+	}
+	return out
+}
+
+func firstNonEmpty(xs ...string) string {
+	for _, x := range xs {
+		if strings.TrimSpace(x) != "" {
+			return x
+		}
+	}
+	return ""
 }
 
 // payeesForBankName finds the payees earlier transactions with the same
@@ -1138,13 +1416,22 @@ func pastUseHint(n int, last string) string {
 // first) and payees (for autocomplete), fetched once per deck.
 func (h *Handler) handleOptions(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	type account struct {
+		ID    int64  `json:"id"`
+		Name  string `json:"name"`
+		Short string `json:"short"`
+	}
 	type opts struct {
 		Categories []string `json:"categories"`
-		Payees     []string `json:"payees"`
-		// Payers: who has paid you before (firefly's revenue accounts).
+		// Payees: who you have paid (firefly's expense accounts).
+		Payees []string `json:"payees"`
+		// Payers: who has paid you (firefly's revenue accounts).
 		Payers []string `json:"payers"`
+		// Accounts: your own accounts — the only thing a transfer can go
+		// to or come from. Never offered as a payee or a payer.
+		Accounts []account `json:"accounts"`
 	}
-	var o opts
+	o := opts{Categories: []string{}, Payees: []string{}, Payers: []string{}, Accounts: []account{}}
 	rows, err := h.db.QueryContext(ctx, `
 		SELECT category_name FROM firefly_txns WHERE category_name IS NOT NULL AND category_name <> ''
 		GROUP BY category_name ORDER BY COUNT(*) DESC, category_name`)
@@ -1157,9 +1444,24 @@ func (h *Handler) handleOptions(w http.ResponseWriter, r *http.Request) {
 		}
 		rows.Close()
 	}
+	mine := map[string]bool{}
+	rows, err = h.db.QueryContext(ctx, `SELECT firefly_id, name FROM firefly_accounts WHERE type = 'asset' AND active = 1 AND name <> '' ORDER BY name COLLATE NOCASE`)
+	if err == nil {
+		for rows.Next() {
+			var a account
+			if rows.Scan(&a.ID, &a.Name) == nil {
+				a.Short = shortAccountName(a.Name)
+				o.Accounts = append(o.Accounts, a)
+				mine[strings.ToLower(a.Name)] = true
+			}
+		}
+		rows.Close()
+	}
 	payees, _ := h.listAccountsByKind(ctx, "destination")
 	for _, p := range payees {
-		o.Payees = append(o.Payees, p.Name)
+		if !mine[strings.ToLower(p.Name)] {
+			o.Payees = append(o.Payees, p.Name)
+		}
 	}
 	rows, err = h.db.QueryContext(ctx, `
 		SELECT name FROM (
@@ -1171,20 +1473,11 @@ func (h *Handler) handleOptions(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		for rows.Next() {
 			var s string
-			if rows.Scan(&s) == nil {
+			if rows.Scan(&s) == nil && !mine[strings.ToLower(s)] {
 				o.Payers = append(o.Payers, s)
 			}
 		}
 		rows.Close()
-	}
-	if o.Categories == nil {
-		o.Categories = []string{}
-	}
-	if o.Payees == nil {
-		o.Payees = []string{}
-	}
-	if o.Payers == nil {
-		o.Payers = []string{}
 	}
 	w.Header().Set("Cache-Control", "private, max-age=300")
 	writeJSON(w, http.StatusOK, o)
