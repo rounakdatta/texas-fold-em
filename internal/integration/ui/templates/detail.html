@@ -196,14 +196,10 @@
       <p class="mono muted" style="margin:12px 0 0">{{.Row.FoldUUID}}</p>
     </section>
 
-    <section class="panel">
+    {{if .AccountsSync.Available}}<section class="panel sync-card">
       <h2>Accounts</h2>
-      <p class="hint" style="margin:0 0 10px">Just made an account in Firefly? Sync, and it shows up in the pickers.</p>
-      <form method="post" action="/admin/ui/sync-accounts">
-        <input type="hidden" name="back" value="/admin/ui/staged/{{.Row.FoldUUID}}">
-        <button type="submit" class="btn btn-quiet btn-sm">Sync accounts from Firefly</button>
-      </form>
-    </section>
+      {{template "accounts-sync" .}}
+    </section>{{end}}
   </aside>
 </div>
 {{end}}

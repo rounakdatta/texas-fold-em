@@ -52,6 +52,10 @@
       <dt><kbd>O</kbd></dt><dd>Open the full editor</dd>
       <dt><kbd>M</kbd></dt><dd>More actions</dd>
     </dl>
+    {{if .AccountsSync.Available}}<section class="side-sync" aria-labelledby="side-sync-title">
+      <h2 id="side-sync-title">Accounts</h2>
+      {{template "accounts-sync" .}}
+    </section>{{end}}
   </aside>
 
   <div class="toasts" id="toasts" role="status" aria-live="polite"></div>

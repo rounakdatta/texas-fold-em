@@ -111,7 +111,7 @@ func New(db *sql.DB, pusher *integration.Pusher, log *slog.Logger, adminKey stri
 	// though only the index references it today.
 	funcs := template.FuncMap{"filterURL": filterURL, "statusBadge": statusBadge, "confidenceBar": confidenceBar, "asset": assetURL,
 		"blanks": blanksHTML, "statusLabel": statusLabel, "rupees": rupeesHTML,
-		"count": func(n int) string { return groupIndian(int64(n)) }, "sentence": sentence}
+		"count": func(n int) string { return groupIndian(int64(n)) }, "sentence": sentence, "ago": agoText}
 	indexTmpl, err := template.New("layout.html").Funcs(funcs).ParseFS(tmplFS, "templates/layout.html", "templates/index.html")
 	if err != nil {
 		return nil, fmt.Errorf("parse index template: %w", err)
@@ -163,6 +163,7 @@ func (h *Handler) Mount(mux *http.ServeMux) {
 	mux.Handle("POST /admin/ui/staged/{fold_uuid}/link", h.withAuth(h.handleLink))
 	mux.Handle("POST /admin/ui/reclassify", h.withAuth(h.handleReclassify))
 	mux.Handle("POST /admin/ui/sync-accounts", h.withAuth(h.handleSyncAccounts))
+	mux.Handle("POST /admin/ui/api/sync-accounts", h.withAPI(h.handleAPISyncAccounts))
 
 	// The review deck and its JSON API (review.go).
 	mux.Handle("GET /admin/ui/review", h.withAuth(h.handleReview))
@@ -1262,33 +1263,6 @@ func (h *Handler) handleSkip(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, back, http.StatusSeeOther)
 }
 
-// handleSyncAccounts refreshes the firefly_accounts mirror on demand — the
-// "sync accounts from firefly" button — so an account the user JUST created
-// in firefly becomes selectable in the destination/source autocompletes
-// without waiting for the hourly cron refresh.
-func (h *Handler) handleSyncAccounts(w http.ResponseWriter, r *http.Request) {
-	_ = r.ParseForm()
-	back := r.FormValue("back")
-	if !strings.HasPrefix(back, "/admin/ui/") {
-		back = "/admin/ui/"
-	}
-	if h.fireflyAccounts == nil {
-		h.flashErr(w, "account sync is unavailable (no syncer configured)")
-		http.Redirect(w, r, back, http.StatusSeeOther)
-		return
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
-	defer cancel()
-	report, err := h.fireflyAccounts.Sync(ctx)
-	if err != nil {
-		h.flashErr(w, "account sync failed: "+err.Error())
-		http.Redirect(w, r, back, http.StatusSeeOther)
-		return
-	}
-	h.flashOk(w, fmt.Sprintf("synced %d firefly accounts (%d assets) — new ones are now selectable", report.Upserted, report.Assets))
-	http.Redirect(w, r, back, http.StatusSeeOther)
-}
-
 // handleReclassify re-runs the classifier on the selected fold_uuids —
 // the review list's "reclassify selected" action, for backfilling
 // already-processed transactions on demand. Skips pushed rows and
@@ -1730,6 +1704,9 @@ func (h *Handler) render(w http.ResponseWriter, tmpl *template.Template, data an
 			m["Nav"] = "list"
 		}
 		m["ReviewCount"] = h.reviewCount()
+		// every page can refresh fold's copy of Firefly's accounts, and says
+		// when it last was
+		m["AccountsSync"] = map[string]any{"Available": h.fireflyAccounts != nil, "At": rfc3339OrEmpty(h.accountsSyncedAt(context.Background()))}
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := tmpl.ExecuteTemplate(w, "layout", data); err != nil {
