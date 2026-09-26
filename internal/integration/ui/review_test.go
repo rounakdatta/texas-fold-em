@@ -128,7 +128,7 @@ func (rh *reviewHarness) stage(t *testing.T, uuid, status, title string, amountP
 
 func (rh *reviewHarness) deck(t *testing.T, query string) deckResponse {
 	t.Helper()
-	resp, err := http.Get(rh.srv.URL + "/admin/ui/api/deck?" + query)
+	resp, err := http.Get(rh.srv.URL + "/api/deck?" + query)
 	if err != nil {
 		t.Fatalf("deck: %v", err)
 	}
@@ -142,7 +142,7 @@ func (rh *reviewHarness) deck(t *testing.T, query string) deckResponse {
 
 func (rh *reviewHarness) post(t *testing.T, path, body string) (int, actionResponse) {
 	t.Helper()
-	req, _ := http.NewRequest(http.MethodPost, rh.srv.URL+"/admin/ui/api/"+path, strings.NewReader(body))
+	req, _ := http.NewRequest(http.MethodPost, rh.srv.URL+"/api/"+path, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Fold-UI", "1")
 	resp, err := http.DefaultClient.Do(req)
@@ -420,7 +420,7 @@ func TestReview_ASaveWithoutCategoryAndBudgetKeepsWhatWasStored(t *testing.T) {
 		rh.stage(t, r.uuid, "ready_to_push", "Masala chai", 20000, "2025-12-29T07:51:00Z",
 			`UPDATE staged_fold_txns SET proposed_budget_id = 5, `+r.set+` WHERE fold_uuid = ?`)
 		// the editor's fields minus category and budget, and a corrected amount
-		resp, err := http.PostForm(rh.srv.URL+"/admin/ui/staged/"+r.uuid+"/save", url.Values{
+		resp, err := http.PostForm(rh.srv.URL+"/transactions/"+r.uuid+"/save", url.Values{
 			"description": {"Masala chai"}, "destination_name": {"Chai Corner, Market Road"},
 			"source_name": {"Tata Neu HDFC Bank Credit Card"}, "amount": {"205.40"}})
 		if err != nil {
@@ -489,7 +489,7 @@ func TestReview_AFailedSendSaysWhyAndKeepsTheCard(t *testing.T) {
 func TestReview_WritesRequireTheUIHeader(t *testing.T) {
 	rh := newReviewHarness(t)
 	rh.stage(t, "x1", "ready_to_push", "Tea", 3500, "2025-12-29T07:51:00Z")
-	resp, err := http.Post(rh.srv.URL+"/admin/ui/api/rows/x1/send", "application/json", strings.NewReader(`{}`))
+	resp, err := http.Post(rh.srv.URL+"/api/rows/x1/send", "application/json", strings.NewReader(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -524,7 +524,7 @@ func TestReview_TheCursorPagesThroughEveryCardOnce(t *testing.T) {
 func TestReview_SuggestsTheUsersOwnPastTitlesAndPayees(t *testing.T) {
 	rh := newReviewHarness(t)
 	rh.stage(t, "sg", "needs_review", "___ for lunch", 20000, "2025-12-29T07:51:00Z")
-	resp, err := http.Get(rh.srv.URL + "/admin/ui/api/rows/sg/suggest")
+	resp, err := http.Get(rh.srv.URL + "/api/rows/sg/suggest")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -564,7 +564,7 @@ func TestReview_OnlyAFlaggedDuplicateSaysDuplicate(t *testing.T) {
 func TestReview_TheDeckPageRendersItsShell(t *testing.T) {
 	rh := newReviewHarness(t)
 	rh.stage(t, "pg", "needs_review", "Tea", 3500, "2025-12-29T07:51:00Z")
-	resp, err := http.Get(rh.srv.URL + "/admin/ui/review")
+	resp, err := http.Get(rh.srv.URL + "/")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -572,7 +572,7 @@ func TestReview_TheDeckPageRendersItsShell(t *testing.T) {
 	b, _ := io.ReadAll(resp.Body)
 	body := string(b)
 	// (the nav item carries an icon before its word)
-	for _, want := range []string{`id="deck-app"`, `/admin/ui/static/review.js?v=`, `aria-current="page"><svg`, `</svg>Review <span class="count num">1</span>`,
+	for _, want := range []string{`id="deck-app"`, `/static/review.js?v=`, `aria-current="page"><svg`, `</svg>Review <span class="count num">1</span>`,
 		`&#34;short&#34;:&#34;Tata Neu card&#34;`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("review page lacks %q", want)
@@ -744,7 +744,7 @@ func TestReview_MoneyInNeedsItsAccountAndTakesAPayer(t *testing.T) {
 // a browser will accept.
 func TestReview_EveryPageCarriesTheBrand(t *testing.T) {
 	rh := newReviewHarness(t)
-	resp, err := http.Get(rh.srv.URL + "/admin/ui/review")
+	resp, err := http.Get(rh.srv.URL + "/")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -753,11 +753,11 @@ func TestReview_EveryPageCarriesTheBrand(t *testing.T) {
 	body := string(b)
 	for _, want := range []string{
 		`<title>Review · texas fold ’em</title>`,
-		`class="brand-mark" src="/admin/ui/static/brand-mark.svg?v=`,
-		`rel="icon" href="/admin/ui/static/favicon.svg?v=`,
-		`rel="apple-touch-icon" href="/admin/ui/static/apple-touch-icon.png?v=`,
-		`rel="manifest" href="/admin/ui/static/manifest.webmanifest?v=`, `crossorigin="use-credentials"`,
-		`font-family: "Outfit"`, `/admin/ui/static/outfit-latin.woff2?v=`,
+		`class="brand-mark" src="/static/brand-mark.svg?v=`,
+		`rel="icon" href="/static/favicon.svg?v=`,
+		`rel="apple-touch-icon" href="/static/apple-touch-icon.png?v=`,
+		`rel="manifest" href="/static/manifest.webmanifest?v=`, `crossorigin="use-credentials"`,
+		`font-family: "Outfit"`, `/static/outfit-latin.woff2?v=`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("review page lacks %q", want)
@@ -792,7 +792,7 @@ func TestReview_EveryPageCarriesTheBrand(t *testing.T) {
 	}
 	mb, _ := io.ReadAll(r.Body)
 	r.Body.Close()
-	if err := json.Unmarshal(mb, &m); err != nil || m.Name != "texas fold ’em" || m.StartURL != "/admin/ui/review" || m.Display != "standalone" || len(m.Icons) < 3 {
+	if err := json.Unmarshal(mb, &m); err != nil || m.Name != "texas fold ’em" || m.StartURL != "/" || m.Display != "standalone" || len(m.Icons) < 3 {
 		t.Errorf("manifest = %s (%v)", mb, err)
 	}
 	for _, ic := range m.Icons {
@@ -823,7 +823,7 @@ func TestReview_TheListInvitesYouToWhatTheDeckHolds(t *testing.T) {
 	rh.stage(t, "w2", "ready_to_push", "Tea", 3500, "2025-12-29T08:51:00Z")
 	rh.stage(t, "w3", "needs_review", "Tea", 3500, "2025-12-29T09:51:00Z",
 		`UPDATE staged_fold_txns SET later_at = CURRENT_TIMESTAMP WHERE fold_uuid = ?`)
-	resp, err := http.Get(rh.srv.URL + "/admin/ui/?status=all")
+	resp, err := http.Get(rh.srv.URL + "/transactions?status=all")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -838,7 +838,7 @@ func TestReview_TheListInvitesYouToWhatTheDeckHolds(t *testing.T) {
 // suggestTitles asks for a row's suggestions and returns the past titles.
 func (rh *reviewHarness) suggestTitles(t *testing.T, uuid string) ([]string, []suggestion) {
 	t.Helper()
-	resp, err := http.Get(rh.srv.URL + "/admin/ui/api/rows/" + uuid + "/suggest")
+	resp, err := http.Get(rh.srv.URL + "/api/rows/" + uuid + "/suggest")
 	if err != nil {
 		t.Fatal(err)
 	}

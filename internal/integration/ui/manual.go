@@ -57,7 +57,7 @@ func (h *Handler) handleNewCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	fail := func(msg string) {
 		h.flashErr(w, msg)
-		http.Redirect(w, r, "/admin/ui/new", http.StatusSeeOther)
+		http.Redirect(w, r, "/new", http.StatusSeeOther)
 	}
 
 	txnType := strings.TrimSpace(r.FormValue("txn_type"))
@@ -124,5 +124,5 @@ func (h *Handler) handleNewCreate(w http.ResponseWriter, r *http.Request) {
 	} else {
 		h.flashOk(w, "added — review below, then push")
 	}
-	http.Redirect(w, r, "/admin/ui/staged/"+uuid, http.StatusSeeOther)
+	http.Redirect(w, r, "/transactions/"+uuid, http.StatusSeeOther)
 }

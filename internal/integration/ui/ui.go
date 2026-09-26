@@ -1,5 +1,5 @@
 // Package ui is the server-rendered admin UI for the integration.
-// HTML pages at /admin/ui/. The UI lets a human:
+// HTML pages at the root of the host (paths.go). The UI lets a human:
 //
 //   - list staged fold transactions filtered by status
 //   - inspect a row's classifier decision and evidence
@@ -16,7 +16,7 @@
 // Auth model: in production these routes are deployed behind tinyauth
 // (Google OAuth forward-auth) at the cluster ingress, so unauthenticated
 // requests never reach this code path. For local development /
-// testing, an admin-key cookie is accepted (set via /admin/ui/login).
+// testing, an admin-key cookie is accepted (set via /login).
 // Both layers are independently optional via SetAuthMode.
 package ui
 
@@ -46,7 +46,7 @@ var tmplFS embed.FS
 //go:embed static/*
 var staticFS embed.FS
 
-// AuthMode describes how /admin/ui/* routes authenticate human users.
+// AuthMode describes how the UI's routes authenticate human users.
 type AuthMode int
 
 const (
@@ -55,7 +55,7 @@ const (
 	// tinyauth ForwardAuth on the cluster ingress).
 	AuthModeBypass AuthMode = iota
 	// AuthModeCookie: routes require a cookie equal to the admin key.
-	// /admin/ui/login?key=<admin_key> sets the cookie. For local
+	// /login?key=<admin_key> sets the cookie. For local
 	// development.
 	AuthModeCookie
 )
@@ -141,46 +141,74 @@ func New(db *sql.DB, pusher *integration.Pusher, log *slog.Logger, adminKey stri
 	}, nil
 }
 
-// Mount registers all UI routes on the supplied mux. Routes:
+// Mount registers the UI's routes on the supplied mux (paths.go has the
+// why). The deck is the home screen; the rest is a list, one page per
+// transaction, the Add form, and the deck's JSON:
 //
-//	GET  /admin/ui/                          → index (filtered by ?status=)
-//	GET  /admin/ui/staged/{fold_uuid}        → detail
-//	POST /admin/ui/staged/{fold_uuid}/save   → save edits
-//	POST /admin/ui/staged/{fold_uuid}/push   → save edits + push
-//	POST /admin/ui/staged/{fold_uuid}/skip   → mark skipped
-//	GET  /admin/ui/new                       → form: add a transaction fold never saw
-//	POST /admin/ui/new                       → create it as a MANUAL staged row
-//	GET  /admin/ui/login?key=<admin_key>     → set auth cookie (cookie mode only)
+//	GET  /                                → the review deck
+//	GET  /transactions                    → every transaction (?status=, ?account=)
+//	GET  /transactions/{fold_uuid}        → one transaction
+//	POST /transactions/{fold_uuid}/save   → save edits (fold only)
+//	POST /transactions/{fold_uuid}/push   → save edits + send to firefly
+//	POST /transactions/{fold_uuid}/update → save edits + update firefly (a sent row)
+//	POST /transactions/{fold_uuid}/skip   → mark skipped
+//	POST /transactions/{fold_uuid}/link   → link a refund to its purchase
+//	POST /transactions/reclassify         → re-run the classifier on a selection
+//	GET  /new, POST /new                  → add a transaction fold never saw
+//	POST /sync-accounts                   → refresh fold's copy of firefly's accounts
+//	     /api/…                           → the deck's JSON (review.go)
+//	GET  /static/{file}                   → assets
+//	GET  /login?key=<admin_key>           → set the auth cookie (cookie mode only)
+//	     /admin/ui/…                      → 308 to the paths above (until 0.19.0)
 func (h *Handler) Mount(mux *http.ServeMux) {
-	mux.Handle("GET /admin/ui/", h.withAuth(h.handleIndex))
-	mux.Handle("GET /admin/ui/new", h.withAuth(h.handleNewForm))
-	mux.Handle("POST /admin/ui/new", h.withAuth(h.handleNewCreate))
-	mux.Handle("GET /admin/ui/staged/{fold_uuid}", h.withAuth(h.handleDetail))
-	mux.Handle("POST /admin/ui/staged/{fold_uuid}/save", h.withAuth(h.handleSave))
-	mux.Handle("POST /admin/ui/staged/{fold_uuid}/push", h.withAuth(h.handlePush))
-	mux.Handle("POST /admin/ui/staged/{fold_uuid}/update", h.withAuth(h.handleUpdate))
-	mux.Handle("POST /admin/ui/staged/{fold_uuid}/skip", h.withAuth(h.handleSkip))
-	mux.Handle("POST /admin/ui/staged/{fold_uuid}/link", h.withAuth(h.handleLink))
-	mux.Handle("POST /admin/ui/reclassify", h.withAuth(h.handleReclassify))
-	mux.Handle("POST /admin/ui/sync-accounts", h.withAuth(h.handleSyncAccounts))
-	mux.Handle("POST /admin/ui/api/sync-accounts", h.withAPI(h.handleAPISyncAccounts))
-	mux.Handle("POST /admin/ui/api/categories", h.withAPI(h.handleAPICreateCategory))
+	mux.Handle("GET /{$}", h.withAuth(h.handleReview))
+	mux.Handle("GET /transactions", h.withAuth(h.handleIndex))
+	mux.Handle("GET /transactions/{$}", http.RedirectHandler(pathList, http.StatusMovedPermanently))
+	mux.Handle("GET /transactions/{fold_uuid}", h.withAuth(h.handleDetail))
+	mux.Handle("POST /transactions/{fold_uuid}/save", h.withAuth(h.handleSave))
+	mux.Handle("POST /transactions/{fold_uuid}/push", h.withAuth(h.handlePush))
+	mux.Handle("POST /transactions/{fold_uuid}/update", h.withAuth(h.handleUpdate))
+	mux.Handle("POST /transactions/{fold_uuid}/skip", h.withAuth(h.handleSkip))
+	mux.Handle("POST /transactions/{fold_uuid}/link", h.withAuth(h.handleLink))
+	mux.Handle("POST /transactions/reclassify", h.withAuth(h.handleReclassify))
+	mux.Handle("GET /new", h.withAuth(h.handleNewForm))
+	mux.Handle("POST /new", h.withAuth(h.handleNewCreate))
+	mux.Handle("POST /sync-accounts", h.withAuth(h.handleSyncAccounts))
+	mux.Handle("GET /static/{file}", h.withAuth(handleStatic))
 
-	// The review deck and its JSON API (review.go).
-	mux.Handle("GET /admin/ui/review", h.withAuth(h.handleReview))
-	mux.Handle("GET /admin/ui/static/{file}", h.withAuth(handleStatic))
-	mux.Handle("GET /admin/ui/api/deck", h.withAPI(h.handleDeck))
-	mux.Handle("GET /admin/ui/api/options", h.withAPI(h.handleOptions))
-	mux.Handle("GET /admin/ui/api/rows/{fold_uuid}/suggest", h.withAPI(h.handleCardSuggest))
-	mux.Handle("POST /admin/ui/api/rows/{fold_uuid}/edit", h.withAPI(h.handleCardEdit))
-	mux.Handle("POST /admin/ui/api/rows/{fold_uuid}/send", h.withAPI(h.handleCardSend))
-	mux.Handle("POST /admin/ui/api/rows/{fold_uuid}/later", h.withAPI(h.handleCardLater))
-	mux.Handle("POST /admin/ui/api/rows/{fold_uuid}/hold", h.withAPI(h.handleCardHold))
-	mux.Handle("POST /admin/ui/api/rows/{fold_uuid}/skip", h.withAPI(h.handleCardSkip))
-	mux.Handle("POST /admin/ui/api/rows/{fold_uuid}/restore", h.withAPI(h.handleCardRestore))
+	// The deck's JSON API (review.go, accounts_sync.go, categories.go).
+	mux.Handle("GET /api/deck", h.withAPI(h.handleDeck))
+	mux.Handle("GET /api/options", h.withAPI(h.handleOptions))
+	mux.Handle("GET /api/rows/{fold_uuid}/suggest", h.withAPI(h.handleCardSuggest))
+	mux.Handle("POST /api/rows/{fold_uuid}/edit", h.withAPI(h.handleCardEdit))
+	mux.Handle("POST /api/rows/{fold_uuid}/send", h.withAPI(h.handleCardSend))
+	mux.Handle("POST /api/rows/{fold_uuid}/later", h.withAPI(h.handleCardLater))
+	mux.Handle("POST /api/rows/{fold_uuid}/hold", h.withAPI(h.handleCardHold))
+	mux.Handle("POST /api/rows/{fold_uuid}/skip", h.withAPI(h.handleCardSkip))
+	mux.Handle("POST /api/rows/{fold_uuid}/restore", h.withAPI(h.handleCardRestore))
+	mux.Handle("POST /api/sync-accounts", h.withAPI(h.handleAPISyncAccounts))
+	mux.Handle("POST /api/categories", h.withAPI(h.handleAPICreateCategory))
 	if h.auth == AuthModeCookie {
-		mux.HandleFunc("GET /admin/ui/login", h.handleLogin)
+		mux.HandleFunc("GET /login", h.handleLogin)
 	}
+
+	// Before 0.19.0 everything lived under /admin/ui/. Assets are served in
+	// place (an installed app re-reads its manifest there); the rest moves.
+	mux.Handle("GET "+legacyPrefix+"/static/{file}", h.withAuth(handleStatic))
+	mux.Handle(legacyPrefix+"/", http.HandlerFunc(handleLegacy))
+}
+
+// handleLegacy answers a pre-0.19.0 /admin/ui URL with a 308 to where it lives
+// now. 308, not 301: a POST from a deck left open across the upgrade (or a
+// script) is re-sent to the new URL with its method and body, instead of
+// turning into a GET that does nothing.
+func handleLegacy(w http.ResponseWriter, r *http.Request) {
+	to, ok := modernPath(r.URL.RequestURI())
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	http.Redirect(w, r, to, http.StatusPermanentRedirect)
 }
 
 // withAuth wraps a handler with the configured auth check.
@@ -192,7 +220,7 @@ func (h *Handler) withAuth(next http.HandlerFunc) http.Handler {
 		case AuthModeCookie:
 			c, err := r.Cookie("tfe-admin")
 			if err != nil || subtle.ConstantTimeCompare([]byte(c.Value), []byte(h.adminKey)) != 1 {
-				http.Error(w, "unauthorised — visit /admin/ui/login?key=<admin-key> first", http.StatusUnauthorized)
+				http.Error(w, "unauthorised — visit /login?key=<admin-key> first", http.StatusUnauthorized)
 				return
 			}
 		}
@@ -210,12 +238,12 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     "tfe-admin",
 		Value:    key,
-		Path:     "/admin/ui",
+		Path:     "/",
 		HttpOnly: true,
 		Secure:   true,
 		SameSite: http.SameSiteStrictMode,
 	})
-	http.Redirect(w, r, "/admin/ui/", http.StatusSeeOther)
+	http.Redirect(w, r, pathDeck, http.StatusSeeOther)
 }
 
 // indexRow is the shape rendered by index.html. Slim view of
@@ -350,7 +378,7 @@ func filterURL(f listFilters, perPage, page int) template.URL {
 	if page > 0 {
 		v.Set("page", strconv.Itoa(page))
 	}
-	return template.URL("/admin/ui/?" + v.Encode())
+	return template.URL("/transactions?" + v.Encode())
 }
 
 // statusBadge renders a compact, colour-coded status glyph for the index
@@ -876,9 +904,7 @@ func (h *Handler) handleDetail(w http.ResponseWriter, r *http.Request) {
 	// this row's status list when opened directly. Validated to our own UI
 	// paths so it can't be an open redirect.
 	back := r.URL.Query().Get("back")
-	if !strings.HasPrefix(back, "/admin/ui/") {
-		back = "/admin/ui/?status=" + row.Status
-	}
+	back = safeBack(back, listPath(row.Status))
 
 	// Correcting an already-pushed row: pull firefly's CURRENT transaction
 	// and pre-fill the form from it, so the correction builds on firefly's
@@ -950,7 +976,7 @@ func (h *Handler) handleDetail(w http.ResponseWriter, r *http.Request) {
 		"Refund":          refund,
 		"RefundedBy":      refundedBy,
 		"Status":          row.Status, // for the shared nav's active-state highlight
-		"Nav":             map[bool]string{true: "review", false: "list"}[strings.HasPrefix(back, "/admin/ui/review")],
+		"Nav":             map[bool]string{true: "review", false: "list"}[isDeckPath(back)],
 		"Row":             row,
 		"Back":            back,
 		"IsPushed":        isPushed,
@@ -1132,7 +1158,7 @@ func (h *Handler) handleSave(w http.ResponseWriter, r *http.Request) {
 	unresolved, err := h.saveEdits(r.Context(), uuid, r.Form)
 	if err != nil {
 		h.flashErr(w, "save failed: "+err.Error())
-		http.Redirect(w, r, "/admin/ui/staged/"+uuid, http.StatusSeeOther)
+		http.Redirect(w, r, "/transactions/"+uuid, http.StatusSeeOther)
 		return
 	}
 	h.clearLater(r.Context(), uuid)
@@ -1142,7 +1168,7 @@ func (h *Handler) handleSave(w http.ResponseWriter, r *http.Request) {
 	} else {
 		h.flashOk(w, "edits saved")
 	}
-	http.Redirect(w, r, "/admin/ui/staged/"+uuid, http.StatusSeeOther)
+	http.Redirect(w, r, "/transactions/"+uuid, http.StatusSeeOther)
 }
 
 // handlePush saves edits AND pushes the row to firefly. If any name
@@ -1157,30 +1183,30 @@ func (h *Handler) handlePush(w http.ResponseWriter, r *http.Request) {
 	// On success, return to the list the user came from (the hidden "back"
 	// field carries the origin list URL); on any failure we stay on the
 	// detail page so they can fix and retry.
-	back := backOr(r.FormValue("back"), "/admin/ui/?status=pushed")
+	back := backOr(r.FormValue("back"), "/transactions?status=pushed")
 	unresolved, err := h.saveEdits(r.Context(), uuid, r.Form)
 	if err != nil {
 		h.flashErr(w, "save failed before push: "+err.Error())
-		http.Redirect(w, r, "/admin/ui/staged/"+uuid, http.StatusSeeOther)
+		http.Redirect(w, r, "/transactions/"+uuid, http.StatusSeeOther)
 		return
 	}
 	if len(unresolved) > 0 {
 		h.flashErr(w, "push aborted — couldn't resolve: "+strings.Join(unresolved, "; ")+
 			". Edits were saved; fix the unresolved names and try again.")
-		http.Redirect(w, r, "/admin/ui/staged/"+uuid, http.StatusSeeOther)
+		http.Redirect(w, r, "/transactions/"+uuid, http.StatusSeeOther)
 		return
 	}
 	var hold string
 	_ = h.db.QueryRowContext(r.Context(), `SELECT COALESCE(hold_reason, '') FROM staged_fold_txns WHERE fold_uuid = ?`, uuid).Scan(&hold)
 	if strings.TrimSpace(hold) != "" {
 		h.flashErr(w, "not sent — it's on hold: "+hold+". Clear the hold to send it.")
-		http.Redirect(w, r, "/admin/ui/staged/"+uuid, http.StatusSeeOther)
+		http.Redirect(w, r, "/transactions/"+uuid, http.StatusSeeOther)
 		return
 	}
 	report, err := h.pusher.Push(r.Context(), uuid, true)
 	if err != nil {
 		h.flashErr(w, "push failed: "+err.Error())
-		http.Redirect(w, r, "/admin/ui/staged/"+uuid, http.StatusSeeOther)
+		http.Redirect(w, r, "/transactions/"+uuid, http.StatusSeeOther)
 		return
 	}
 	h.clearLater(r.Context(), uuid)
@@ -1194,14 +1220,9 @@ func (h *Handler) clearLater(ctx context.Context, uuid string) {
 	_, _ = h.db.ExecContext(ctx, `UPDATE staged_fold_txns SET later_at = NULL WHERE fold_uuid = ?`, uuid)
 }
 
-// backOr returns back when it's a safe in-app UI path, else the fallback.
-// Guards against open redirects (only our own /admin/ui/ paths).
-func backOr(back, fallback string) string {
-	if strings.HasPrefix(back, "/admin/ui/") {
-		return back
-	}
-	return fallback
-}
+// backOr returns back when it's one of the UI's own pages, else the
+// fallback — no open redirects (safeBack, paths.go).
+func backOr(back, fallback string) string { return safeBack(back, fallback) }
 
 // handleUpdate corrects an ALREADY-PUSHED row: it saves the edited fields
 // then UPDATES the existing firefly transaction in place (PUT) instead of
@@ -1215,28 +1236,28 @@ func (h *Handler) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad form", http.StatusBadRequest)
 		return
 	}
-	back := backOr(r.FormValue("back"), "/admin/ui/?status=pushed")
+	back := backOr(r.FormValue("back"), "/transactions?status=pushed")
 	if h.pusher == nil {
 		h.flashErr(w, "update is unavailable")
-		http.Redirect(w, r, "/admin/ui/staged/"+uuid, http.StatusSeeOther)
+		http.Redirect(w, r, "/transactions/"+uuid, http.StatusSeeOther)
 		return
 	}
 	unresolved, err := h.saveEdits(r.Context(), uuid, r.Form)
 	if err != nil {
 		h.flashErr(w, "save failed before update: "+err.Error())
-		http.Redirect(w, r, "/admin/ui/staged/"+uuid, http.StatusSeeOther)
+		http.Redirect(w, r, "/transactions/"+uuid, http.StatusSeeOther)
 		return
 	}
 	if len(unresolved) > 0 {
 		h.flashErr(w, "update aborted — couldn't resolve: "+strings.Join(unresolved, "; ")+
 			". Edits were saved; fix the unresolved names and try again.")
-		http.Redirect(w, r, "/admin/ui/staged/"+uuid, http.StatusSeeOther)
+		http.Redirect(w, r, "/transactions/"+uuid, http.StatusSeeOther)
 		return
 	}
 	report, err := h.pusher.Update(r.Context(), uuid)
 	if err != nil {
 		h.flashErr(w, "firefly update failed: "+err.Error())
-		http.Redirect(w, r, "/admin/ui/staged/"+uuid, http.StatusSeeOther)
+		http.Redirect(w, r, "/transactions/"+uuid, http.StatusSeeOther)
 		return
 	}
 	h.flashOk(w, fmt.Sprintf("updated firefly transaction in place (id %d)", report.FireflyTxnID))
@@ -1249,7 +1270,7 @@ func (h *Handler) handleUpdate(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleSkip(w http.ResponseWriter, r *http.Request) {
 	uuid := r.PathValue("fold_uuid")
 	_ = r.ParseForm()
-	back := backOr(r.FormValue("back"), "/admin/ui/?status=needs_review")
+	back := backOr(r.FormValue("back"), "/transactions?status=needs_review")
 	_, err := h.db.ExecContext(r.Context(), `
 		UPDATE staged_fold_txns
 		SET status='skipped', updated_at=CURRENT_TIMESTAMP
@@ -1257,7 +1278,7 @@ func (h *Handler) handleSkip(w http.ResponseWriter, r *http.Request) {
 	`, uuid)
 	if err != nil {
 		h.flashErr(w, "skip failed: "+err.Error())
-		http.Redirect(w, r, "/admin/ui/staged/"+uuid, http.StatusSeeOther)
+		http.Redirect(w, r, "/transactions/"+uuid, http.StatusSeeOther)
 		return
 	}
 	h.flashOk(w, "marked skipped")
@@ -1276,9 +1297,7 @@ func (h *Handler) handleReclassify(w http.ResponseWriter, r *http.Request) {
 	// "back" returns the user to the list+filters they came from. Only
 	// honour our own relative paths (no open redirect).
 	back := r.FormValue("back")
-	if !strings.HasPrefix(back, "/admin/ui/") {
-		back = "/admin/ui/"
-	}
+	back = safeBack(back, pathList)
 	if h.cls == nil {
 		h.flashErr(w, "reclassify is unavailable (no classifier configured)")
 		http.Redirect(w, r, back, http.StatusSeeOther)
@@ -1758,7 +1777,7 @@ func setFlash(w http.ResponseWriter, kind, msg string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     "tfe-flash",
 		Value:    url.QueryEscape(string(v)),
-		Path:     "/admin/ui",
+		Path:     "/",
 		HttpOnly: true,
 		MaxAge:   60,
 	})
@@ -1775,7 +1794,7 @@ func flashFromCookie(r *http.Request, w http.ResponseWriter) *flashCookie {
 		return nil
 	}
 	// Consume.
-	http.SetCookie(w, &http.Cookie{Name: "tfe-flash", Path: "/admin/ui", MaxAge: -1})
+	http.SetCookie(w, &http.Cookie{Name: "tfe-flash", Path: "/", MaxAge: -1})
 	return &f
 }
 

@@ -181,7 +181,7 @@ func run() error {
 		srv.SetPusher(pusher)
 
 		// Review UI. Auth mode chosen by config: UICookie for local dev
-		// (cookie set via /admin/ui/login?key=<admin>), UIBypass for
+		// (cookie set via /login?key=<admin>), UIBypass for
 		// production where the cluster ingress runs tinyauth ForwardAuth.
 		uiAuth := ui.AuthModeBypass
 		if cfg.UICookieAuth {
@@ -216,7 +216,7 @@ func run() error {
 				"POST /admin/fold/accounts/sync",
 				"POST /admin/classify",
 				"POST /admin/push/{fold_uuid}",
-				"GET  /admin/ui/",
+				"GET  / (the review UI; /admin/ui/… redirects)",
 			},
 		)
 

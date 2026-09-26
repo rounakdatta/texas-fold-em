@@ -10,7 +10,7 @@ import (
 )
 
 // Static assets (static/*) are embedded in the binary and served under
-// /admin/ui/static/. Templates reference them through the asset func, which
+// /static/. Templates reference them through the asset func, which
 // appends a content hash — so a browser may cache them forever, and a new
 // build is picked up the moment the page references the new hash.
 
@@ -47,7 +47,7 @@ var staticTypes = map[string]string{
 // assetURL is the template func: {{asset "app.css"}}.
 func assetURL(name string) string {
 	assetHashOnce.Do(loadAssetHashes)
-	return "/admin/ui/static/" + name + "?v=" + assetHashes[name]
+	return "/static/" + name + "?v=" + assetHashes[name]
 }
 
 func handleStatic(w http.ResponseWriter, r *http.Request) {

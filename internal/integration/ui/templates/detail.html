@@ -28,7 +28,7 @@
       <div class="banner-actions"><button type="button" class="btn btn-sm btn-quiet" data-swap-sides>Swap them</button></div>{{end}}</div></div>{{end}}
     {{if .IsPushed}}<div class="banner banner-info"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M10 9v5M10 6.3v.1" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg><div class="banner-body"><b>Already in Firefly.</b>{{if .FireflyPulled}} These are Firefly's current values.{{end}} Saving updates that transaction in place — no duplicate.</div></div>{{end}}
 
-    <form method="post" action="/admin/ui/staged/{{.Row.FoldUUID}}/save" class="panel" data-dir="{{.Row.Type}}">
+    <form method="post" action="/transactions/{{.Row.FoldUUID}}/save" class="panel" data-dir="{{.Row.Type}}">
       <input type="hidden" name="back" value="{{.Back}}">
       <h2>Details</h2>
       <div class="fields">
@@ -103,18 +103,18 @@
 
       <div class="actionbar">
         {{if .IsPushed}}
-        <button type="submit" formaction="/admin/ui/staged/{{.Row.FoldUUID}}/update" class="btn">Save &amp; update Firefly</button>
+        <button type="submit" formaction="/transactions/{{.Row.FoldUUID}}/update" class="btn">Save &amp; update Firefly</button>
         {{else}}
         <button type="submit" class="btn btn-quiet">Save</button>
-        <button type="submit" formaction="/admin/ui/staged/{{.Row.FoldUUID}}/push" class="btn btn-send">Save &amp; send to Firefly</button>
+        <button type="submit" formaction="/transactions/{{.Row.FoldUUID}}/push" class="btn btn-send">Save &amp; send to Firefly</button>
         <span class="spacer"></span>
-        <button type="submit" formaction="/admin/ui/staged/{{.Row.FoldUUID}}/skip" class="btn btn-danger-text" formnovalidate>Skip — never send</button>
+        <button type="submit" formaction="/transactions/{{.Row.FoldUUID}}/skip" class="btn btn-danger-text" formnovalidate>Skip — never send</button>
         {{end}}
       </div>
 
       {{if .Refund.CanLink}}
       <div class="banner banner-info" style="margin-top:6px"><div class="banner-body"><b>Not linked in Firefly yet.</b> This refund and its purchase are both in Firefly.
-        <div class="banner-actions"><button type="submit" formaction="/admin/ui/staged/{{.Row.FoldUUID}}/link" formnovalidate class="btn btn-sm">Link them as a refund</button></div>
+        <div class="banner-actions"><button type="submit" formaction="/transactions/{{.Row.FoldUUID}}/link" formnovalidate class="btn btn-sm">Link them as a refund</button></div>
         <small class="hint">Creates the Firefly “Refund” link only; nothing else is sent.</small></div></div>
       {{end}}
 
@@ -182,7 +182,7 @@
     <section class="panel">
       <h2>Refunded by</h2>
       {{range .RefundedBy}}
-      <p style="margin:0 0 8px"><a href="/admin/ui/staged/{{.FoldUUID}}">{{.When}} · +INR {{.Amount}} · {{.Description}}</a>
+      <p style="margin:0 0 8px"><a href="/transactions/{{.FoldUUID}}">{{.When}} · +INR {{.Amount}} · {{.Description}}</a>
         <span class="pill">{{statusLabel .Status}}</span>{{if .LinkID}} <span class="pill pill-in" title="firefly link {{.LinkID}}">linked in Firefly</span>{{end}}</p>
       {{end}}
     </section>

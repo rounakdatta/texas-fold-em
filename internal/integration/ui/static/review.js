@@ -56,7 +56,7 @@
     const init = body === undefined
       ? { headers: { Accept: 'application/json' } }
       : { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Fold-UI': '1' }, body: JSON.stringify(body), keepalive: !!opts.keepalive };
-    const r = await fetch('/admin/ui/api/' + path, init);
+    const r = await fetch('/api/' + path, init);
     let data = {};
     try { data = await r.json(); } catch (_) { /* empty body */ }
     if (!r.ok) {
@@ -506,7 +506,7 @@
       if (state.counts.later) actions.append(h('button', { type: 'button', class: 'btn', onclick: () => switchPile('later'),
         text: state.counts.later === 1 ? '1 card saved for later' : group(state.counts.later) + ' cards saved for later' }));
     }
-    actions.append(h('a', { href: '/admin/ui/?status=all', text: 'See every transaction' }));
+    actions.append(h('a', { href: '/transactions?status=all', text: 'See every transaction' }));
     const art = h('img', { class: 'empty-art', src: app.dataset.art || '', alt: '', width: '150', height: '135' });
     return h('div', { class: 'empty' }, art, h('h2', { text: title }), h('p', { text: line }), actions);
   }

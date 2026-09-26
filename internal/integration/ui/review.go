@@ -298,7 +298,7 @@ func (h *Handler) buildCard(ctx context.Context, r cardRow) reviewCard {
 	case integration.ProblemOwnNotMine:
 		c.Blockers = insertBlocker(c.Blockers, blockSource)
 	}
-	c.EditURL = "/admin/ui/staged/" + c.UUID + "?back=" + url.QueryEscape("/admin/ui/review")
+	c.EditURL = txnPath(c.UUID) + "?back=" + url.QueryEscape(pathDeck)
 	return c
 }
 
@@ -655,7 +655,7 @@ func spokenClock(t time.Time) string {
 
 // ---- deck ------------------------------------------------------------------
 
-// deckResponse is GET /admin/ui/api/deck.
+// deckResponse is GET /api/deck.
 type deckResponse struct {
 	Cards []reviewCard `json:"cards"`
 	// Counts are for the whole pile under the current account filter, not

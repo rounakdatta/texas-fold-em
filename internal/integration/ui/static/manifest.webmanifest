@@ -2,14 +2,15 @@
   "name": "texas fold ’em",
   "short_name": "fold ’em",
   "description": "Review fold.money transactions, one card at a time, before they go to Firefly.",
-  "start_url": "/admin/ui/review",
-  "scope": "/admin/ui/",
+  "id": "/admin/ui/review",
+  "start_url": "/",
+  "scope": "/",
   "display": "standalone",
   "background_color": "#f0f1f5",
   "theme_color": "#20294c",
   "icons": [
-    { "src": "/admin/ui/static/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
-    { "src": "/admin/ui/static/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
-    { "src": "/admin/ui/static/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+    { "src": "/static/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/static/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/static/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
   ]
 }

@@ -110,7 +110,7 @@ func newCatHarness(t *testing.T, readOnly bool) *catHarness {
 func (ch *catHarness) create(t *testing.T, name string) (int, categoryReply, string) {
 	t.Helper()
 	b, _ := json.Marshal(map[string]string{"name": name})
-	req, _ := http.NewRequest(http.MethodPost, ch.srv.URL+"/admin/ui/api/categories", strings.NewReader(string(b)))
+	req, _ := http.NewRequest(http.MethodPost, ch.srv.URL+"/api/categories", strings.NewReader(string(b)))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Fold-UI", "1")
 	resp, err := http.DefaultClient.Do(req)
@@ -171,7 +171,7 @@ func TestCategories_ANewOneIsMadeInFireflyAndLandsOnTheCard(t *testing.T) {
 		t.Errorf("fold's copy of the categories = %v; the new one must be pickable before the next sync", m)
 	}
 
-	resp, err := http.Get(ch.srv.URL + "/admin/ui/api/options")
+	resp, err := http.Get(ch.srv.URL + "/api/options")
 	if err != nil {
 		t.Fatalf("options: %v", err)
 	}
@@ -188,7 +188,7 @@ func TestCategories_ANewOneIsMadeInFireflyAndLandsOnTheCard(t *testing.T) {
 		t.Errorf("the picker's categories %v don't offer the one just made", o.Categories)
 	}
 
-	req, _ := http.NewRequest(http.MethodPost, ch.srv.URL+"/admin/ui/api/rows/p1/edit", strings.NewReader(`{"category":"pottery classes"}`))
+	req, _ := http.NewRequest(http.MethodPost, ch.srv.URL+"/api/rows/p1/edit", strings.NewReader(`{"category":"pottery classes"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Fold-UI", "1")
 	er, err := http.DefaultClient.Do(req)

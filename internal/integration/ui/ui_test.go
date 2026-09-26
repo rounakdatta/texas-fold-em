@@ -21,7 +21,7 @@ import (
 )
 
 // uiTestHarness wraps an httptest.Server hosting the UI mounted on a
-// fresh /admin/ui/* mux, plus the underlying SQLite DB so tests can
+// fresh mux, plus the underlying SQLite DB so tests can
 // poke and verify state.
 type uiTestHarness struct {
 	server *httptest.Server
@@ -138,7 +138,7 @@ func (u *uiTestHarness) do(t *testing.T, method, path string, form url.Values, c
 // TestUI_IndexBypassMode renders the index page when auth is bypass.
 func TestUI_IndexBypassMode(t *testing.T) {
 	u := newUITestHarness(t, AuthModeBypass)
-	resp := u.do(t, "GET", "/admin/ui/?status=needs_review", nil)
+	resp := u.do(t, "GET", "/transactions?status=needs_review", nil)
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatalf("status=%d", resp.StatusCode)
@@ -178,7 +178,7 @@ func TestUI_IndexPagination(t *testing.T) {
 	}
 
 	// Page 1
-	resp := u.do(t, "GET", "/admin/ui/?status=needs_review", nil)
+	resp := u.do(t, "GET", "/transactions?status=needs_review", nil)
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatalf("page 1 status=%d", resp.StatusCode)
@@ -214,7 +214,7 @@ func TestUI_IndexPagination(t *testing.T) {
 	}
 
 	// Page 2
-	resp2 := u.do(t, "GET", "/admin/ui/?status=needs_review&page=2", nil)
+	resp2 := u.do(t, "GET", "/transactions?status=needs_review&page=2", nil)
 	defer resp2.Body.Close()
 	body2, _ := io.ReadAll(resp2.Body)
 	s2 := string(body2)
@@ -232,7 +232,7 @@ func TestUI_IndexPagination(t *testing.T) {
 	}
 
 	// per_page override
-	resp3 := u.do(t, "GET", "/admin/ui/?status=needs_review&per_page=10", nil)
+	resp3 := u.do(t, "GET", "/transactions?status=needs_review&per_page=10", nil)
 	defer resp3.Body.Close()
 	body3, _ := io.ReadAll(resp3.Body)
 	if !strings.Contains(string(body3), "Page 1 of 7") { // ceil(61/10) = 7
@@ -272,7 +272,7 @@ func TestUI_IndexAccountFilter(t *testing.T) {
 
 	// Filter to HDFC (id 1): the zomato row only. (fold's merchant is shown
 	// title-cased, as the review deck shows it.)
-	resp := u.do(t, "GET", "/admin/ui/?status=ready_to_push&account=1", nil)
+	resp := u.do(t, "GET", "/transactions?status=ready_to_push&account=1", nil)
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatalf("status=%d", resp.StatusCode)
@@ -295,7 +295,7 @@ func TestUI_IndexAccountFilter(t *testing.T) {
 	}
 
 	// A bogus (non-numeric) account param degrades to "all accounts".
-	respBad := u.do(t, "GET", "/admin/ui/?status=ready_to_push&account=not-a-number", nil)
+	respBad := u.do(t, "GET", "/transactions?status=ready_to_push&account=not-a-number", nil)
 	defer respBad.Body.Close()
 	bodyBad, _ := io.ReadAll(respBad.Body)
 	if !strings.Contains(string(bodyBad), `>Ready <span class="n num">2</span>`) {
@@ -303,7 +303,7 @@ func TestUI_IndexAccountFilter(t *testing.T) {
 	}
 
 	// Unfiltered: both rows present, count 2.
-	resp2 := u.do(t, "GET", "/admin/ui/?status=ready_to_push", nil)
+	resp2 := u.do(t, "GET", "/transactions?status=ready_to_push", nil)
 	defer resp2.Body.Close()
 	s2, _ := io.ReadAll(resp2.Body)
 	body2 := string(s2)
@@ -322,12 +322,12 @@ func TestUI_IndexAccountFilter(t *testing.T) {
 func TestFilterURL(t *testing.T) {
 	// url.Values.Encode sorts keys, so the expected order is alphabetical.
 	if got, want := string(filterURL(listFilters{Status: "ready_to_push", SourceAccount: "7"}, 50, 3)),
-		"/admin/ui/?account=7&page=3&per_page=50&status=ready_to_push"; got != want {
+		"/transactions?account=7&page=3&per_page=50&status=ready_to_push"; got != want {
 		t.Errorf("filterURL with account = %q, want %q", got, want)
 	}
 	// No account → no account param; page <= 0 omits the page param.
 	if got, want := string(filterURL(listFilters{Status: "pending"}, 50, 0)),
-		"/admin/ui/?per_page=50&status=pending"; got != want {
+		"/transactions?per_page=50&status=pending"; got != want {
 		t.Errorf("filterURL without account = %q, want %q", got, want)
 	}
 }
@@ -352,18 +352,18 @@ func snippet(s, needle string) string {
 // TestUI_CookieAuth_Blocks blocks requests without the cookie.
 func TestUI_CookieAuth_Blocks(t *testing.T) {
 	u := newUITestHarness(t, AuthModeCookie)
-	resp := u.do(t, "GET", "/admin/ui/", nil)
+	resp := u.do(t, "GET", "/transactions", nil)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("expected 401, got %d", resp.StatusCode)
 	}
 }
 
-// TestUI_CookieAuth_AllowsAfterLogin: hitting /admin/ui/login sets the
+// TestUI_CookieAuth_AllowsAfterLogin: hitting /login sets the
 // cookie that subsequent requests can use.
 func TestUI_CookieAuth_AllowsAfterLogin(t *testing.T) {
 	u := newUITestHarness(t, AuthModeCookie)
-	resp := u.do(t, "GET", "/admin/ui/login?key=admin-key", nil)
+	resp := u.do(t, "GET", "/login?key=admin-key", nil)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusSeeOther {
 		t.Fatalf("expected 303, got %d", resp.StatusCode)
@@ -377,7 +377,7 @@ func TestUI_CookieAuth_AllowsAfterLogin(t *testing.T) {
 	if cookie == nil {
 		t.Fatal("expected tfe-admin cookie set")
 	}
-	resp2 := u.do(t, "GET", "/admin/ui/", nil, cookie)
+	resp2 := u.do(t, "GET", "/transactions", nil, cookie)
 	defer resp2.Body.Close()
 	if resp2.StatusCode != 200 {
 		t.Errorf("expected 200 with cookie, got %d", resp2.StatusCode)
@@ -389,7 +389,7 @@ func TestUI_CookieAuth_AllowsAfterLogin(t *testing.T) {
 // rewrite — fields are now name inputs with datalist autocomplete).
 func TestUI_Detail_Renders(t *testing.T) {
 	u := newUITestHarness(t, AuthModeBypass)
-	resp := u.do(t, "GET", "/admin/ui/staged/rev-1", nil)
+	resp := u.do(t, "GET", "/transactions/rev-1", nil)
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatalf("status=%d", resp.StatusCode)
@@ -459,7 +459,7 @@ func TestUI_Detail_SourceNameFromMirrorNoHistory(t *testing.T) {
 		t.Fatalf("seed staged: %v", err)
 	}
 
-	resp := u.do(t, "GET", "/admin/ui/staged/au-row", nil)
+	resp := u.do(t, "GET", "/transactions/au-row", nil)
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatalf("status=%d", resp.StatusCode)
@@ -506,7 +506,7 @@ func TestUI_Save_ResolvesSourceFromMirrorNoHistory(t *testing.T) {
 	form.Set("source_name", "Ixigo AU Bank Credit Card")
 	form.Set("category_name", "Snacks")
 	form.Set("description", "test")
-	resp := u.do(t, "POST", "/admin/ui/staged/rev-1/save", form)
+	resp := u.do(t, "POST", "/transactions/rev-1/save", form)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusSeeOther {
 		t.Fatalf("expected 303, got %d", resp.StatusCode)
@@ -533,7 +533,7 @@ func TestUI_Save_PersistsAndBumpsStatus(t *testing.T) {
 	form.Set("description", "edited description")
 	form.Set("tags", "food, evening")
 
-	resp := u.do(t, "POST", "/admin/ui/staged/rev-1/save", form)
+	resp := u.do(t, "POST", "/transactions/rev-1/save", form)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusSeeOther {
 		t.Fatalf("expected 303, got %d", resp.StatusCode)
@@ -595,7 +595,7 @@ func TestUI_Save_UnresolvedNamesFlag(t *testing.T) {
 	form.Set("source_name", "Nonexistent Bank XYZ") // unresolvable asset → NULL + flagged
 	form.Set("description", "x")
 
-	resp := u.do(t, "POST", "/admin/ui/staged/rev-1/save", form)
+	resp := u.do(t, "POST", "/transactions/rev-1/save", form)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusSeeOther {
 		t.Fatalf("expected 303, got %d", resp.StatusCode)
@@ -636,7 +636,7 @@ func TestUI_Save_NewDestinationName(t *testing.T) {
 	form.Set("source_name", "HDFC Card")            // resolvable → 1
 	form.Set("description", "Flight booking")
 
-	resp := u.do(t, "POST", "/admin/ui/staged/rev-1/save", form)
+	resp := u.do(t, "POST", "/transactions/rev-1/save", form)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusSeeOther {
 		t.Fatalf("expected 303, got %d", resp.StatusCode)
@@ -685,7 +685,7 @@ func TestUI_IndexAllStatus(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	resp := u.do(t, "GET", "/admin/ui/?status=all", nil)
+	resp := u.do(t, "GET", "/transactions?status=all", nil)
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatalf("status=%d", resp.StatusCode)
@@ -728,8 +728,8 @@ func TestUI_ReclassifySelected(t *testing.T) {
 
 	form := url.Values{}
 	form.Set("fold_uuids", "rev-1")
-	form.Set("back", "/admin/ui/?status=needs_review")
-	resp := u.do(t, "POST", "/admin/ui/reclassify", form)
+	form.Set("back", "/transactions?status=needs_review")
+	resp := u.do(t, "POST", "/transactions/reclassify", form)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusSeeOther {
 		t.Fatalf("expected 303, got %d", resp.StatusCode)
@@ -754,7 +754,7 @@ func TestUI_ReclassifySelected(t *testing.T) {
 	}
 
 	// Empty selection → graceful flash, no error.
-	resp2 := u.do(t, "POST", "/admin/ui/reclassify", url.Values{"back": {"/admin/ui/?status=all"}})
+	resp2 := u.do(t, "POST", "/transactions/reclassify", url.Values{"back": {"/transactions?status=all"}})
 	defer resp2.Body.Close()
 	if resp2.StatusCode != http.StatusSeeOther {
 		t.Fatalf("empty selection: expected 303, got %d", resp2.StatusCode)
@@ -764,7 +764,7 @@ func TestUI_ReclassifySelected(t *testing.T) {
 // TestUI_Skip_Persists transitions to skipped without touching firefly.
 func TestUI_Skip_Persists(t *testing.T) {
 	u := newUITestHarness(t, AuthModeBypass)
-	resp := u.do(t, "POST", "/admin/ui/staged/rev-1/skip", url.Values{})
+	resp := u.do(t, "POST", "/transactions/rev-1/skip", url.Values{})
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusSeeOther {
 		t.Fatalf("expected 303, got %d", resp.StatusCode)
@@ -791,7 +791,7 @@ func TestUI_Push_HappyPath(t *testing.T) {
 	form.Set("description", "snack")
 	form.Set("tags", "")
 
-	resp := u.do(t, "POST", "/admin/ui/staged/rev-1/push", form)
+	resp := u.do(t, "POST", "/transactions/rev-1/push", form)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusSeeOther {
 		body, _ := io.ReadAll(resp.Body)
@@ -816,7 +816,7 @@ func TestUI_Push_HappyPath(t *testing.T) {
 // (proposed_description) so rows are scannable by their human title.
 func TestUI_Index_ShowsDescription(t *testing.T) {
 	u := newUITestHarness(t, AuthModeBypass)
-	resp := u.do(t, "GET", "/admin/ui/?status=needs_review", nil)
+	resp := u.do(t, "GET", "/transactions?status=needs_review", nil)
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if !strings.Contains(string(body), "Snack at cake palace") {
@@ -833,13 +833,13 @@ func TestUI_Push_RedirectsToBack(t *testing.T) {
 	form.Set("source_name", "HDFC Card")         // resolves to id 1
 	form.Set("category_name", "Snacks")
 	form.Set("description", "test")
-	form.Set("back", "/admin/ui/?status=all&per_page=50")
-	resp := u.do(t, "POST", "/admin/ui/staged/rev-1/push", form)
+	form.Set("back", "/transactions?status=all&per_page=50")
+	resp := u.do(t, "POST", "/transactions/rev-1/push", form)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusSeeOther {
 		t.Fatalf("status=%d", resp.StatusCode)
 	}
-	if loc := resp.Header.Get("Location"); loc != "/admin/ui/?status=all&per_page=50" {
+	if loc := resp.Header.Get("Location"); loc != "/transactions?status=all&per_page=50" {
 		t.Errorf("Location=%q, want the origin list (back)", loc)
 	}
 }
@@ -847,13 +847,13 @@ func TestUI_Push_RedirectsToBack(t *testing.T) {
 // TestUI_Push_BackDefaultsWhenAbsent: no back → falls back to the pushed list
 // (and an off-site back is rejected as an open-redirect guard).
 func TestUI_Push_BackDefaultsWhenAbsent(t *testing.T) {
-	if got := backOr("", "/admin/ui/?status=pushed"); got != "/admin/ui/?status=pushed" {
+	if got := backOr("", "/transactions?status=pushed"); got != "/transactions?status=pushed" {
 		t.Errorf("empty back = %q, want fallback", got)
 	}
-	if got := backOr("https://evil.example/x", "/admin/ui/?status=pushed"); got != "/admin/ui/?status=pushed" {
+	if got := backOr("https://evil.example/x", "/transactions?status=pushed"); got != "/transactions?status=pushed" {
 		t.Errorf("off-site back = %q, want fallback (open-redirect guard)", got)
 	}
-	if got := backOr("/admin/ui/?status=all", "/admin/ui/?status=pushed"); got != "/admin/ui/?status=all" {
+	if got := backOr("/transactions?status=all", "/transactions?status=pushed"); got != "/transactions?status=all" {
 		t.Errorf("valid back = %q, want it preserved", got)
 	}
 }
@@ -868,7 +868,7 @@ func TestUI_AllView_DimsPushedAndScrolls(t *testing.T) {
 		VALUES ('pushed-1','{}',5000,'INR','2026-07-01T10:00:00Z','CARD','OUTGOING','x','zomato','pushed')`); err != nil {
 		t.Fatal(err)
 	}
-	all, _ := io.ReadAll(mustGet(t, u, "/admin/ui/?status=all"))
+	all, _ := io.ReadAll(mustGet(t, u, "/transactions?status=all"))
 	s := string(all)
 	if !strings.Contains(s, `class="txn is-pushed"`) {
 		t.Error("all view: expected pushed rows dimmed (is-pushed)")
@@ -880,7 +880,7 @@ func TestUI_AllView_DimsPushedAndScrolls(t *testing.T) {
 		t.Error("all view: expected the auto-scroll script")
 	}
 	// The pushed tab should not dim (row-pushed only applies in the all view).
-	pushed, _ := io.ReadAll(mustGet(t, u, "/admin/ui/?status=pushed"))
+	pushed, _ := io.ReadAll(mustGet(t, u, "/transactions?status=pushed"))
 	if strings.Contains(string(pushed), `is-pushed`) {
 		t.Error("pushed tab must not dim its rows")
 	}
@@ -929,7 +929,7 @@ func TestUI_List_PushedShowsFireflyActualNotStaleProposed(t *testing.T) {
 		        684,'Magic Savoury Restaurant, Union, Dubai')`); err != nil {
 		t.Fatalf("seed staged: %v", err)
 	}
-	body, _ := io.ReadAll(mustGet(t, u, "/admin/ui/?status=all&limit=100"))
+	body, _ := io.ReadAll(mustGet(t, u, "/transactions?status=all&limit=100"))
 	s := string(body)
 	if !strings.Contains(s, "Magic Savoury Restaurant, Union, Dubai") {
 		t.Error("list should show firefly's actual destination (Magic Savoury Restaurant)")
@@ -953,7 +953,7 @@ func TestUI_SaveEdits_DepositNewRevenueSource(t *testing.T) {
 	form := url.Values{}
 	form.Set("destination_name", "Cake Palace") // resolves to asset-ish id 12
 	form.Set("source_name", "Neha Ananthan")     // NEW revenue payer (not in firefly)
-	resp := u.do(t, "POST", "/admin/ui/staged/dep-1/save", form)
+	resp := u.do(t, "POST", "/transactions/dep-1/save", form)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusSeeOther {
 		t.Fatalf("status=%d", resp.StatusCode)
@@ -992,7 +992,7 @@ func flashOf(t *testing.T, resp *http.Response) (kind, msg string) {
 func TestUI_Save_MoneyOverrides(t *testing.T) {
 	u := newUITestHarness(t, AuthModeBypass)
 	form := url.Values{"amount": {"₹72.50"}, "date": {"2026-05-07"}, "time": {"10:15"}}
-	resp := u.do(t, "POST", "/admin/ui/staged/rev-1/save", form)
+	resp := u.do(t, "POST", "/transactions/rev-1/save", form)
 	resp.Body.Close()
 	if kind, msg := flashOf(t, resp); kind != "ok" {
 		t.Fatalf("save flash = %q %q, want ok", kind, msg)
@@ -1012,7 +1012,7 @@ func TestUI_Save_MoneyOverrides(t *testing.T) {
 	}
 
 	// The detail page shows the correction, flags it, and still shows what fold saw.
-	resp = u.do(t, "GET", "/admin/ui/staged/rev-1", nil)
+	resp = u.do(t, "GET", "/transactions/rev-1", nil)
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	for _, want := range []string{`name="amount" value="72.50"`, `name="date" value="2026-05-07"`, `name="time" value="10:15"`, "corrected", "the alert said INR 70.00"} {
@@ -1022,7 +1022,7 @@ func TestUI_Save_MoneyOverrides(t *testing.T) {
 	}
 
 	// fold's own values (₹70.00 at 12:59 UTC = 18:29 IST) → no override.
-	resp = u.do(t, "POST", "/admin/ui/staged/rev-1/save", url.Values{"amount": {"70.00"}, "date": {"2026-05-08"}, "time": {"18:29"}})
+	resp = u.do(t, "POST", "/transactions/rev-1/save", url.Values{"amount": {"70.00"}, "date": {"2026-05-08"}, "time": {"18:29"}})
 	resp.Body.Close()
 	if err := u.db.DB.QueryRow(`SELECT confirmed_amount_paise, confirmed_txn_timestamp FROM staged_fold_txns WHERE fold_uuid='rev-1'`).Scan(&amt, &ts); err != nil {
 		t.Fatal(err)
@@ -1036,7 +1036,7 @@ func TestUI_Save_MoneyOverrides(t *testing.T) {
 // stored nothing — and, like any unresolved field, blocks a push.
 func TestUI_Save_BadAmountIsUnresolved(t *testing.T) {
 	u := newUITestHarness(t, AuthModeBypass)
-	resp := u.do(t, "POST", "/admin/ui/staged/rev-1/push", url.Values{"amount": {"12,3a"}, "destination_name": {"Cake Palace"}, "source_name": {"HDFC Card"}})
+	resp := u.do(t, "POST", "/transactions/rev-1/push", url.Values{"amount": {"12,3a"}, "destination_name": {"Cake Palace"}, "source_name": {"HDFC Card"}})
 	resp.Body.Close()
 	if kind, msg := flashOf(t, resp); kind != "err" || !strings.Contains(msg, "amount") {
 		t.Errorf("flash = %q %q, want an error naming the amount", kind, msg)
@@ -1062,16 +1062,16 @@ func TestUI_NewManualTransaction(t *testing.T) {
 		"budget_name": {""}, "description": {"___ flight booking"}, "tags": {"trip"},
 		"narration": {"Cleartrip Private L Mumbai IN"},
 	}
-	resp := u.do(t, "POST", "/admin/ui/new", form)
+	resp := u.do(t, "POST", "/new", form)
 	resp.Body.Close()
 	loc := resp.Header.Get("Location")
-	if resp.StatusCode != http.StatusSeeOther || !strings.HasPrefix(loc, "/admin/ui/staged/manual-") {
+	if resp.StatusCode != http.StatusSeeOther || !strings.HasPrefix(loc, "/transactions/manual-") {
 		t.Fatalf("create → %d %q, want 303 to the new row", resp.StatusCode, loc)
 	}
 	if kind, msg := flashOf(t, resp); kind != "ok" {
 		t.Errorf("flash = %q %q, want ok", kind, msg)
 	}
-	uuid := strings.TrimPrefix(loc, "/admin/ui/staged/")
+	uuid := strings.TrimPrefix(loc, "/transactions/")
 	var (
 		mode, status, narration, desc string
 		amt                           int64
@@ -1097,7 +1097,7 @@ func TestUI_NewManualTransaction(t *testing.T) {
 	}
 
 	// The classifier never touches it, even when asked to.
-	resp = u.do(t, "POST", "/admin/ui/reclassify", url.Values{"fold_uuids": {uuid}, "back": {"/admin/ui/"}})
+	resp = u.do(t, "POST", "/transactions/reclassify", url.Values{"fold_uuids": {uuid}, "back": {"/transactions"}})
 	resp.Body.Close()
 	if err := u.db.DB.QueryRow(`SELECT status FROM staged_fold_txns WHERE fold_uuid = ?`, uuid).Scan(&status); err != nil {
 		t.Fatal(err)
@@ -1107,13 +1107,13 @@ func TestUI_NewManualTransaction(t *testing.T) {
 	}
 
 	// It is listed with its badge, and pushes like any row.
-	resp = u.do(t, "GET", "/admin/ui/?status=ready_to_push", nil)
+	resp = u.do(t, "GET", "/transactions?status=ready_to_push", nil)
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if !strings.Contains(string(body), ">manual</span>") || !strings.Contains(string(body), "14988.00") {
 		t.Errorf("list should show the manual row with its badge and amount")
 	}
-	resp = u.do(t, "POST", "/admin/ui/staged/"+uuid+"/push", form)
+	resp = u.do(t, "POST", "/transactions/"+uuid+"/push", form)
 	resp.Body.Close()
 	if err := u.db.DB.QueryRow(`SELECT status FROM staged_fold_txns WHERE fold_uuid = ?`, uuid).Scan(&status); err != nil {
 		t.Fatal(err)
@@ -1127,9 +1127,9 @@ func TestUI_NewManualTransaction(t *testing.T) {
 // a row.
 func TestUI_NewManualTransaction_Validates(t *testing.T) {
 	u := newUITestHarness(t, AuthModeBypass)
-	resp := u.do(t, "POST", "/admin/ui/new", url.Values{"txn_type": {"withdrawal"}, "amount": {"-5"}, "date": {"2026-06-01"}, "description": {"x"}})
+	resp := u.do(t, "POST", "/new", url.Values{"txn_type": {"withdrawal"}, "amount": {"-5"}, "date": {"2026-06-01"}, "description": {"x"}})
 	resp.Body.Close()
-	if resp.Header.Get("Location") != "/admin/ui/new" {
+	if resp.Header.Get("Location") != "/new" {
 		t.Errorf("should bounce back to the form, got %q", resp.Header.Get("Location"))
 	}
 	var n int
@@ -1151,7 +1151,7 @@ func TestUI_Index_CorrectedAmountAndDuplicateFlag(t *testing.T) {
 		        'CARD', 'OUTGOING', 'CARD/z/O''HARE', 'needs_review', 240000)`); err != nil {
 		t.Fatal(err)
 	}
-	resp := u.do(t, "GET", "/admin/ui/?status=needs_review", nil)
+	resp := u.do(t, "GET", "/transactions?status=needs_review", nil)
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	// The corrected amount reads the Indian way, with fold's raised rupee
@@ -1176,7 +1176,7 @@ func TestUI_Index_RendersDriverWrittenTimestamp(t *testing.T) {
 		mode, type, narration, status) VALUES ('drv-1', '{}', 100, 'INR', ?, 'CARD', 'OUTGOING', 'n', 'needs_review')`, ts); err != nil {
 		t.Fatal(err)
 	}
-	resp := u.do(t, "GET", "/admin/ui/?status=needs_review", nil)
+	resp := u.do(t, "GET", "/transactions?status=needs_review", nil)
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if !strings.Contains(string(body), `datetime="2026-07-26T00:35:13Z"`) {
@@ -1187,7 +1187,7 @@ func TestUI_Index_RendersDriverWrittenTimestamp(t *testing.T) {
 // rowHTML returns the <tr> of the list row for one fold_uuid ("" if absent).
 func rowHTML(body, uuid string) string {
 	for _, tr := range strings.Split(body, `<li class="txn`) {
-		if strings.Contains(tr, "/admin/ui/staged/"+uuid+"?") {
+		if strings.Contains(tr, "/transactions/"+uuid+"?") {
 			return tr
 		}
 	}
@@ -1215,7 +1215,7 @@ func TestUI_IndexAccountFilter_IncludesMoneyIn(t *testing.T) {
 		       ('other-card', '{}', 5000,     'INR', '2026-07-01T06:30:00Z', 'CARD',   'OUTGOING', 'CARD/y/ELSEWHERE', 'elsewhere', 'ready_to_push', 2, 12, NULL, NULL)`); err != nil {
 		t.Fatal(err)
 	}
-	resp := u.do(t, "GET", "/admin/ui/?status=ready_to_push&account=1314", nil)
+	resp := u.do(t, "GET", "/transactions?status=ready_to_push&account=1314", nil)
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	b := string(body)
@@ -1231,7 +1231,7 @@ func TestUI_IndexAccountFilter_IncludesMoneyIn(t *testing.T) {
 		}
 	}
 	// From the bank's side the same payment is money out.
-	resp = u.do(t, "GET", "/admin/ui/?status=ready_to_push&account=1", nil)
+	resp = u.do(t, "GET", "/transactions?status=ready_to_push&account=1", nil)
 	body, _ = io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if tr := rowHTML(string(body), "au-payment"); !strings.Contains(tr, "-INR") {
@@ -1263,7 +1263,7 @@ func TestUI_Index_CategoryColumnShowsEffectiveCategory(t *testing.T) {
 		       ('cat-proposed',  '{}', 7000,   'INR', '2026-05-09T12:00:00Z', 'CARD', 'OUTGOING', 'n', 'ready_to_push', 6, NULL)`); err != nil {
 		t.Fatal(err)
 	}
-	resp := u.do(t, "GET", "/admin/ui/?status=ready_to_push", nil)
+	resp := u.do(t, "GET", "/transactions?status=ready_to_push", nil)
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	b := string(body)

@@ -90,7 +90,7 @@ type syncReply struct {
 
 func (sh *syncHarness) sync(t *testing.T) (int, syncReply) {
 	t.Helper()
-	req, _ := http.NewRequest(http.MethodPost, sh.srv.URL+"/admin/ui/api/sync-accounts", nil)
+	req, _ := http.NewRequest(http.MethodPost, sh.srv.URL+"/api/sync-accounts", nil)
 	req.Header.Set("X-Fold-UI", "1")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -181,7 +181,7 @@ func TestSyncAccounts_FormPostComesBack(t *testing.T) {
 	sh := newSyncHarness(t, true)
 	noFollow := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	post := func(referer string) *http.Response {
-		req, _ := http.NewRequest(http.MethodPost, sh.srv.URL+"/admin/ui/sync-accounts", nil)
+		req, _ := http.NewRequest(http.MethodPost, sh.srv.URL+"/sync-accounts", nil)
 		req.Header.Set("Referer", referer)
 		resp, err := noFollow.Do(req)
 		if err != nil {
@@ -190,8 +190,8 @@ func TestSyncAccounts_FormPostComesBack(t *testing.T) {
 		resp.Body.Close()
 		return resp
 	}
-	resp := post(sh.srv.URL + "/admin/ui/staged/abc?back=%2Fadmin%2Fui%2Freview")
-	if resp.StatusCode != http.StatusSeeOther || resp.Header.Get("Location") != "/admin/ui/staged/abc?back=%2Fadmin%2Fui%2Freview" {
+	resp := post(sh.srv.URL + "/transactions/abc?back=%2F")
+	if resp.StatusCode != http.StatusSeeOther || resp.Header.Get("Location") != "/transactions/abc?back=%2F" {
 		t.Errorf("got %d → %q", resp.StatusCode, resp.Header.Get("Location"))
 	}
 	var flash string
@@ -203,7 +203,7 @@ func TestSyncAccounts_FormPostComesBack(t *testing.T) {
 	if !strings.Contains(flash, "Synced — nothing new in Firefly.") {
 		t.Errorf("flash = %q", flash)
 	}
-	if resp := post("https://elsewhere.example/phish"); resp.Header.Get("Location") != "/admin/ui/" {
+	if resp := post("https://elsewhere.example/phish"); resp.Header.Get("Location") != "/transactions" {
 		t.Errorf("a foreign referer sent it to %q", resp.Header.Get("Location"))
 	}
 }
@@ -216,27 +216,27 @@ func TestSyncAccounts_OnEveryPage(t *testing.T) {
 	mustExec(t, sh.db, `INSERT INTO staged_fold_txns (fold_uuid, raw_payload, amount_paise, currency, txn_timestamp, mode, type, narration, merchant_extracted, status)
 		VALUES ('row-1', '{}', 5000, 'INR', '2026-01-03T10:00:00Z', 'CARD', 'OUTGOING', 'CARD/x/Corner Bakery/Rs./50.00/OUTGOING', 'corner bakery', 'needs_review')`)
 	for path, want := range map[string]string{
-		"/admin/ui/review":       `class="side-sync"`,
-		"/admin/ui/staged/row-1": `class="panel sync-card"`,
-		"/admin/ui/new":          `class="sync-inline"`,
-		"/admin/ui/?status=all":  `id="sync-accounts-form"`,
+		"/":       `class="side-sync"`,
+		"/transactions/row-1": `class="panel sync-card"`,
+		"/new":          `class="sync-inline"`,
+		"/transactions?status=all":  `id="sync-accounts-form"`,
 	} {
 		body := getBody(t, sh.srv.URL+path)
 		if !strings.Contains(body, want) || !strings.Contains(body, `data-synced-at="2026-01-02T03:04:05Z"`) || !strings.Contains(body, `data-can-sync="1"`) {
 			t.Errorf("%s: missing %s or the sync state", path, want)
 		}
-		if path != "/admin/ui/?status=all" && !strings.Contains(body, "Last synced <time datetime=\"2026-01-02T03:04:05Z\" data-ago>") {
+		if path != "/transactions?status=all" && !strings.Contains(body, "Last synced <time datetime=\"2026-01-02T03:04:05Z\" data-ago>") {
 			t.Errorf("%s: doesn't say when it last synced", path)
 		}
 	}
 	off := newSyncHarness(t, false)
-	if body := getBody(t, off.srv.URL+"/admin/ui/review"); strings.Contains(body, "side-sync") || strings.Contains(body, "data-can-sync") {
+	if body := getBody(t, off.srv.URL+"/"); strings.Contains(body, "side-sync") || strings.Contains(body, "data-can-sync") {
 		t.Error("with no syncer the deck still offers a sync")
 	}
 	var o struct {
 		SyncedAt string `json:"syncedAt"`
 	}
-	_ = json.Unmarshal([]byte(getBody(t, sh.srv.URL+"/admin/ui/api/options")), &o)
+	_ = json.Unmarshal([]byte(getBody(t, sh.srv.URL+"/api/options")), &o)
 	if o.SyncedAt != "2026-01-02T03:04:05Z" {
 		t.Errorf("options syncedAt = %q", o.SyncedAt)
 	}

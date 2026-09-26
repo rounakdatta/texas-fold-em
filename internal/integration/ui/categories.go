@@ -28,7 +28,7 @@ type categoryReply struct {
 	Created bool `json:"created"`
 }
 
-// handleAPICreateCategory is POST /admin/ui/api/categories {"name": "…"}.
+// handleAPICreateCategory is POST /api/categories {"name": "…"}.
 func (h *Handler) handleAPICreateCategory(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Name string `json:"name"`

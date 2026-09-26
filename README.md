@@ -98,7 +98,7 @@ Three things that fall out of this design and are worth knowing:
 
 ## The review UI
 
-`/admin/ui/review` is where the transactions waiting for a human are decided,
+`/` — the home screen — is where the transactions waiting for a human are decided,
 one card at a time. It is built for a phone first, and works as well with a
 keyboard:
 
@@ -121,7 +121,7 @@ keyboard:
 - **Work one account at a time**, with a count of what waits on each, newest
   or oldest first (the order a statement runs in).
 
-`/admin/ui/` lists every transaction by status, with the editor behind each
+`/transactions` lists every transaction by status, with the editor behind each
 row: account, category, budget and tag fields are name autocompletes backed by
 your real firefly history, and per-merchant tags appear as one-tap chips.
 
@@ -247,7 +247,7 @@ curl -X POST -H "Authorization: Bearer $ADMIN" \
   http://localhost:8080/admin/classify             # classify the staged rows
 ```
 
-Open `/admin/ui/` to review and push. With `PERIODIC_SYNC_EVERY` set,
+Open `/` to review and push. With `PERIODIC_SYNC_EVERY` set,
 those four steps happen automatically on a tick.
 
 Reverse-engineering notes on the underlying fold API live in
@@ -278,7 +278,7 @@ make sandbox            # pulls a staging.db snapshot + LLM key, runs tfe
 REFRESH=1 make sandbox  # re-pull the live snapshot before running
 ```
 
-Then open `http://127.0.0.1:8099/admin/ui/` and, to iterate on one
+Then open `http://127.0.0.1:8099/` and, to iterate on one
 transaction end-to-end (reset → classify → inspect):
 
 ```bash

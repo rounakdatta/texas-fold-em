@@ -161,7 +161,7 @@ func rfc3339OrEmpty(t time.Time) string {
 	return t.UTC().Format(time.RFC3339)
 }
 
-// handleAPISyncAccounts is POST /admin/ui/api/sync-accounts: sync now, and
+// handleAPISyncAccounts is POST /api/sync-accounts: sync now, and
 // say what arrived.
 func (h *Handler) handleAPISyncAccounts(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
@@ -188,13 +188,13 @@ func (h *Handler) handleAPISyncAccounts(w http.ResponseWriter, r *http.Request) 
 // post that comes back to the page it was sent from, saying what arrived.
 func (h *Handler) handleSyncAccounts(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
-	back := r.FormValue("back")
-	if !strings.HasPrefix(back, "/admin/ui/") {
-		back = "/admin/ui/"
-		if ref, err := url.Parse(r.Referer()); err == nil && strings.HasPrefix(ref.Path, "/admin/ui/") {
-			back = ref.RequestURI()
-		}
+	// Back to the page the form was on: its own "back", else the page that
+	// posted it, else the list.
+	fallback := pathList
+	if ref, err := url.Parse(r.Referer()); err == nil {
+		fallback = safeBack(ref.RequestURI(), pathList)
 	}
+	back := safeBack(r.FormValue("back"), fallback)
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
 	added, err := h.syncAccounts(ctx)

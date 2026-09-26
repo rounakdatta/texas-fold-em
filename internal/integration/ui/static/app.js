@@ -113,7 +113,7 @@
     run() {
       if (this.running) return this.running;
       emit('start');
-      this.running = fetch('/admin/ui/api/sync-accounts', { method: 'POST', headers: { 'X-Fold-UI': '1', Accept: 'application/json' } })
+      this.running = fetch('/api/sync-accounts', { method: 'POST', headers: { 'X-Fold-UI': '1', Accept: 'application/json' } })
         .then(async r => {
           const d = await r.json().catch(() => ({}));
           if (!r.ok) throw new Error(d.message || 'Couldn’t reach Firefly — try again in a moment.');
@@ -158,7 +158,7 @@
     const lists = { 'own-options': 'accounts', 'payee-options': 'payees', 'payer-options': 'payers' };
     if (!Object.keys(lists).some(id => document.getElementById(id))) return;
     let o;
-    try { o = await (await fetch('/admin/ui/api/options?v=' + encodeURIComponent(accounts.at), { headers: { Accept: 'application/json' } })).json(); } catch (_) { return; }
+    try { o = await (await fetch('/api/options?v=' + encodeURIComponent(accounts.at), { headers: { Accept: 'application/json' } })).json(); } catch (_) { return; }
     for (const [id, key] of Object.entries(lists)) {
       const dl = document.getElementById(id);
       if (!dl || !Array.isArray(o[key])) continue;
