@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/rounakdatta/texas-fold-em/internal/integration/firefly"
@@ -13,11 +14,16 @@ import (
 
 // FireflyAccountsSyncReport is the structured outcome of a firefly-accounts mirror.
 type FireflyAccountsSyncReport struct {
-	Fetched  int           `json:"fetched"`
-	Upserted int           `json:"upserted"`
-	Pages    int           `json:"pages"`
-	Assets   int           `json:"assets"`
-	Duration time.Duration `json:"duration"`
+	Fetched  int `json:"fetched"`
+	Upserted int `json:"upserted"`
+	Pages    int `json:"pages"`
+	Assets   int `json:"assets"`
+	// Categories: how many of Firefly's categories the mirror now holds.
+	// CategoriesError says why they could not be read this time (the old
+	// copy stays); it never fails the accounts.
+	Categories      int           `json:"categories"`
+	CategoriesError string        `json:"categoriesError,omitempty"`
+	Duration        time.Duration `json:"duration"`
 }
 
 // FireflyAccountsSyncer pulls firefly-iii's OWN account list (GET
@@ -115,16 +121,79 @@ func (s *FireflyAccountsSyncer) Sync(ctx context.Context) (FireflyAccountsSyncRe
 		return report, fmt.Errorf("commit: %w", err)
 	}
 	committed = true
+
+	if n, err := s.syncCategories(ctx); err != nil {
+		report.CategoriesError = err.Error()
+		s.log.Warn("firefly categories sync failed; keeping the previous copy", "err", err)
+	} else {
+		report.Categories = n
+	}
 	report.Duration = time.Since(start)
 
 	s.log.Info("firefly accounts sync complete",
 		"fetched", report.Fetched,
 		"upserted", report.Upserted,
 		"assets", report.Assets,
+		"categories", report.Categories,
 		"pages", report.Pages,
 		"duration_ms", report.Duration.Milliseconds(),
 	)
 	return report, nil
+}
+
+// syncCategories mirrors Firefly's categories into firefly_categories: every
+// page of GET /api/v1/categories, then the rows Firefly no longer has are
+// dropped. It runs in its own transaction after the accounts', so a category
+// list that can't be read leaves the previous copy and never holds the
+// accounts back. A category created from the deck while this runs is stamped
+// later than the sync began, so the clean-up leaves it alone.
+func (s *FireflyAccountsSyncer) syncCategories(ctx context.Context) (int, error) {
+	// millisecond stamps (the same shape SQLite's strftime('%Y-%m-%d %H:%M:%f')
+	// writes), so two syncs in one second still tell their rows apart
+	began := time.Now().UTC().Format("2006-01-02 15:04:05.000")
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	n, page := 0, 1
+	var seen []any
+	for {
+		resp, err := s.fc.ListCategories(ctx, page, pageLimit)
+		if err != nil {
+			return 0, fmt.Errorf("list categories page %d: %w", page, err)
+		}
+		for _, c := range resp.Data {
+			id, err := strconv.ParseInt(c.ID, 10, 64)
+			if err != nil || c.Attributes.Name == "" {
+				continue
+			}
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO firefly_categories (firefly_id, name, last_synced_at) VALUES (?, ?, ?)
+				ON CONFLICT(firefly_id) DO UPDATE SET name = excluded.name, last_synced_at = excluded.last_synced_at`,
+				id, c.Attributes.Name, began); err != nil {
+				return 0, fmt.Errorf("upsert category %s: %w", c.ID, err)
+			}
+			seen = append(seen, id)
+			n++
+		}
+		if resp.Meta.Pagination.CurrentPage >= resp.Meta.Pagination.TotalPages || resp.Meta.Pagination.TotalPages == 0 {
+			break
+		}
+		page++
+	}
+	drop, args := `DELETE FROM firefly_categories WHERE last_synced_at < ?`, []any{began}
+	if len(seen) > 0 {
+		drop += ` AND firefly_id NOT IN (` + strings.TrimSuffix(strings.Repeat("?,", len(seen)), ",") + `)`
+		args = append(args, seen...)
+	}
+	if _, err := tx.ExecContext(ctx, drop, args...); err != nil {
+		return 0, fmt.Errorf("drop categories firefly no longer has: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit: %w", err)
+	}
+	return n, nil
 }
 
 // upsertFireflyAccountSQL writes a firefly_accounts row, refreshing every

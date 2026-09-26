@@ -164,6 +164,7 @@ func (h *Handler) Mount(mux *http.ServeMux) {
 	mux.Handle("POST /admin/ui/reclassify", h.withAuth(h.handleReclassify))
 	mux.Handle("POST /admin/ui/sync-accounts", h.withAuth(h.handleSyncAccounts))
 	mux.Handle("POST /admin/ui/api/sync-accounts", h.withAPI(h.handleAPISyncAccounts))
+	mux.Handle("POST /admin/ui/api/categories", h.withAPI(h.handleAPICreateCategory))
 
 	// The review deck and its JSON API (review.go).
 	mux.Handle("GET /admin/ui/review", h.withAuth(h.handleReview))
@@ -639,8 +640,8 @@ func (h *Handler) listRows(ctx context.Context, f listFilters, limit, offset int
 		         CASE WHEN s.status='pushed'
 		              THEN (SELECT f.category_name FROM firefly_txns f WHERE f.firefly_id = s.firefly_txn_id LIMIT 1) END,
 		         CASE WHEN s.confirmed_category_id IS NOT NULL
-		              THEN (SELECT category_name FROM firefly_txns WHERE category_id = s.confirmed_category_id LIMIT 1)
-		              ELSE (SELECT category_name FROM firefly_txns WHERE category_id = s.proposed_category_id LIMIT 1) END
+		              THEN COALESCE((SELECT name FROM firefly_categories WHERE firefly_id = s.confirmed_category_id), (SELECT category_name FROM firefly_txns WHERE category_id = s.confirmed_category_id LIMIT 1))
+		              ELSE COALESCE((SELECT name FROM firefly_categories WHERE firefly_id = s.proposed_category_id), (SELECT category_name FROM firefly_txns WHERE category_id = s.proposed_category_id LIMIT 1)) END
 		       ),
 		       -- Source name, resolved to match what's actually in firefly:
 		       --  1. pushed rows → the pushed journal's live source (via the
@@ -1885,7 +1886,7 @@ func (h *Handler) lookupAccountName(ctx context.Context, id int64) string {
 
 func (h *Handler) lookupCategoryName(ctx context.Context, id int64) string {
 	var name sql.NullString
-	_ = h.db.QueryRowContext(ctx, `SELECT category_name FROM firefly_txns WHERE category_id = ? LIMIT 1`, id).Scan(&name)
+	_ = h.db.QueryRowContext(ctx, `SELECT COALESCE((SELECT name FROM firefly_categories WHERE firefly_id = ?), (SELECT category_name FROM firefly_txns WHERE category_id = ? LIMIT 1))`, id, id).Scan(&name)
 	if name.Valid {
 		return name.String
 	}

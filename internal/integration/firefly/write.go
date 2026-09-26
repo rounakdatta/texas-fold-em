@@ -3,13 +3,13 @@ package firefly
 // THIS FILE IS THE WRITE SIDE OF THE FIREFLY CLIENT.
 //
 // Read-only contract recap (see client.go for the long version):
-// the firefly client surfaces only GET methods AND a single
-// CreateTransaction method. There is NO PATCH, NO PUT, NO DELETE
-// codepath in this package. The split between client.go (reads) and
-// write.go (this file, the single create method) is by file, not just
-// by method-naming convention — anyone reviewing a future change has
-// to physically open this file to introduce a write operation, which
-// makes such changes visible at code-review time.
+// client.go surfaces only GET methods; every write lives here —
+// creating and updating a transaction, enabling a currency, linking two
+// journals, and creating a category. There is NO DELETE codepath in this
+// package. The split between client.go (reads) and write.go (this file)
+// is by file, not just by method-naming convention — anyone reviewing a
+// future change has to physically open this file to introduce a write
+// operation, which makes such changes visible at code-review time.
 //
 // External ID + idempotency:
 // every transaction we create carries external_id = <fold_uuid>. The
@@ -305,6 +305,31 @@ func (c *Client) CreateTransactionLink(ctx context.Context, linkTypeID, inwardJo
 	fmt.Sscan(resp.Data.ID, &id)
 	if id == 0 {
 		return 0, fmt.Errorf("firefly: link created but no id in response")
+	}
+	return id, nil
+}
+
+// CreateCategory makes a category (POST /api/v1/categories) and returns its
+// id. It exists for the deck's category picker, which offers "Create" when
+// nothing matches what the person typed — so a new kind of spend can be
+// named where it is noticed, instead of in Firefly first.
+func (c *Client) CreateCategory(ctx context.Context, name string) (int64, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return 0, fmt.Errorf("firefly: a category needs a name")
+	}
+	var resp struct {
+		Data struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := c.post(ctx, "/api/v1/categories", map[string]any{"name": name}, &resp); err != nil {
+		return 0, err
+	}
+	var id int64
+	fmt.Sscan(resp.Data.ID, &id)
+	if id == 0 {
+		return 0, fmt.Errorf("firefly: category created but no id in response")
 	}
 	return id, nil
 }

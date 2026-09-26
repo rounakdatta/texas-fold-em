@@ -991,6 +991,28 @@
     const choose = async v => { closeSheet(); if (v !== c.category) await edit(c, { category: v }).catch(() => {}); };
     openSheet('Category', h('div', { class: 'fields' }, input, list));
     const [s, o] = await Promise.all([suggestions(c), options()]);
+    // A category nobody has made yet is made here: in Firefly, then on the
+    // card. It comes after the near matches, so Enter on "Grocer" still
+    // picks "Grocery" rather than making a second one.
+    const createRow = name => {
+      const label = 'Create “' + name + '”';
+      const b = pickButton(label, 'new category', async () => {
+        if (b.disabled) return;
+        b.disabled = true;
+        b.querySelector('.pick-main').textContent = 'Creating “' + name + '”…';
+        list.querySelector('.create-error')?.remove();
+        try {
+          const r = await api('categories', { name });
+          if (!o.categories.some(x => x.toLowerCase() === r.name.toLowerCase())) o.categories.push(r.name);
+          await choose(r.name);
+        } catch (e) {
+          b.disabled = false;
+          b.querySelector('.pick-main').textContent = label;
+          b.after(h('p', { class: 'hint create-error', role: 'alert', text: e.message }));
+        }
+      });
+      return b;
+    };
     const paint = () => {
       const q = input.value.trim().toLowerCase();
       list.replaceChildren();
@@ -1002,7 +1024,7 @@
       const suggested = new Set(q ? [] : s.categories.map(x => x.value));
       const all = o.categories.filter(x => (!q || x.toLowerCase().includes(q)) && !suggested.has(x)).slice(0, q ? 60 : 200);
       for (const x of all) list.append(pickButton(x, '', () => choose(x), x === c.category));
-      if (q && !all.length) list.append(h('p', { class: 'hint', text: 'No category called that. Categories come from Firefly.' }));
+      if (q && !o.categories.some(x => x.toLowerCase() === q)) list.append(createRow(input.value.trim().replace(/\s+/g, ' ')));
       if (c.category && !q) list.append(pickButton('No category', '', () => choose('')));
     };
     input.addEventListener('input', paint);
