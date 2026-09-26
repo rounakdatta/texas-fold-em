@@ -81,8 +81,8 @@ func (s *Server) SetClassifier(c *classifier.Classifier) { s.classifier = c }
 // POST /admin/push/{fold_uuid} endpoint is registered.
 func (s *Server) SetPusher(p *integration.Pusher) { s.pusher = p }
 
-// SetUI attaches the review UI handler. When set, /admin/ui/* routes
-// are registered.
+// SetUI attaches the review UI handler. When set, its routes (the deck at
+// /, /transactions, /api/… — ui/paths.go) are registered.
 func (s *Server) SetUI(h *ui.Handler) { s.uiHandler = h }
 
 // Handler returns the full HTTP mux. Routes:

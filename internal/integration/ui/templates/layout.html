@@ -29,14 +29,14 @@
 </head>
 <body class="{{block "bodyclass" .}}{{end}}" data-synced-at="{{.AccountsSync.At}}"{{if .AccountsSync.Available}} data-can-sync="1"{{end}}>
   <header class="appbar">
-    <a class="brand" href="/admin/ui/review" aria-label="texas fold ’em — review">
+    <a class="brand" href="/" aria-label="texas fold ’em — review">
       <img class="brand-mark" src="{{asset "brand-mark.svg"}}" alt="" width="36" height="36">
       <span class="brand-name">texas fold ’em</span>
     </a>
     <nav class="nav" aria-label="Main">
-      <a href="/admin/ui/review"{{if eq .Nav "review"}} aria-current="page"{{end}}><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="5" y="3" width="10" height="14" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M2.4 6.2v7.6M17.6 6.2v7.6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>Review{{if .ReviewCount}} <span class="count num">{{count .ReviewCount}}</span>{{end}}</a>
-      <a href="/admin/ui/?status=all"{{if eq .Nav "list"}} aria-current="page"{{end}}><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7.2 5.5h9.3M7.2 10h9.3M7.2 14.5h9.3" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><circle cx="3.8" cy="5.5" r="1.15" fill="currentColor"/><circle cx="3.8" cy="10" r="1.15" fill="currentColor"/><circle cx="3.8" cy="14.5" r="1.15" fill="currentColor"/></svg>Transactions</a>
-      <a href="/admin/ui/new"{{if eq .Nav "new"}} aria-current="page"{{end}}><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4.5v11M4.5 10h11" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>Add</a>
+      <a href="/"{{if eq .Nav "review"}} aria-current="page"{{end}}><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="5" y="3" width="10" height="14" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M2.4 6.2v7.6M17.6 6.2v7.6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>Review{{if .ReviewCount}} <span class="count num">{{count .ReviewCount}}</span>{{end}}</a>
+      <a href="/transactions?status=all"{{if eq .Nav "list"}} aria-current="page"{{end}}><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7.2 5.5h9.3M7.2 10h9.3M7.2 14.5h9.3" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><circle cx="3.8" cy="5.5" r="1.15" fill="currentColor"/><circle cx="3.8" cy="10" r="1.15" fill="currentColor"/><circle cx="3.8" cy="14.5" r="1.15" fill="currentColor"/></svg>Transactions</a>
+      <a href="/new"{{if eq .Nav "new"}} aria-current="page"{{end}}><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4.5v11M4.5 10h11" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>Add</a>
     </nav>
   </header>
   {{block "main" .}}
@@ -47,7 +47,7 @@
   {{end}}
   {{/* the one form every "sync accounts" button submits without JavaScript:
        standalone, so a button inside another form (the Add form) can use it */}}
-  {{if .AccountsSync.Available}}<form id="sync-accounts-form" method="post" action="/admin/ui/sync-accounts" hidden></form>{{end}}
+  {{if .AccountsSync.Available}}<form id="sync-accounts-form" method="post" action="/sync-accounts" hidden></form>{{end}}
   <script src="{{asset "app.js"}}" defer></script>
 </body>
 </html>

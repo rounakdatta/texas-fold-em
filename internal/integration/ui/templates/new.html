@@ -1,7 +1,7 @@
 {{define "content"}}
-<p style="margin:0 0 14px"><a href="/admin/ui/" class="btn btn-ghost btn-sm" style="margin-left:-10px">← Back</a></p>
+<p style="margin:0 0 14px"><a href="/transactions" class="btn btn-ghost btn-sm" style="margin-left:-10px">← Back</a></p>
 
-<form method="post" action="/admin/ui/new" style="max-width:760px">
+<form method="post" action="/new" style="max-width:760px">
   <div class="page-head" style="margin-bottom:6px"><h1>Add a transaction</h1></div>
   <p class="muted" style="margin:0 0 18px">For a statement line fold never saw: a charge from before the card was linked, a missed alert, a refund, a reversal, a fee. It lands ready to send, and goes to Firefly when you send it like any other.</p>
 
@@ -57,7 +57,7 @@
     </div>
     <div class="actionbar" style="margin-top:8px">
       <button type="submit" class="btn">Add transaction</button>
-      <a href="/admin/ui/" class="btn btn-ghost">Cancel</a>
+      <a href="/transactions" class="btn btn-ghost">Cancel</a>
     </div>
   </div>
 

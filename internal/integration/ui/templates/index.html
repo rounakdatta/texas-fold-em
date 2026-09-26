@@ -2,14 +2,14 @@
 <div class="page-head">
   <h1>Transactions</h1>
   <span class="spacer"></span>
-  <a class="btn btn-quiet btn-sm" href="/admin/ui/new">
+  <a class="btn btn-quiet btn-sm" href="/new">
     <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4.5v11M4.5 10h11" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
     Add one
   </a>
 </div>
 
 {{if .Waiting}}
-<a class="review-cta" href="/admin/ui/review{{if .SelectedAccount}}?account={{.SelectedAccount}}{{end}}">
+<a class="review-cta" href="/{{if .SelectedAccount}}?account={{.SelectedAccount}}{{end}}">
   <div class="cta-text">
     <strong><span class="num">{{count .Waiting}}</span> waiting for you{{if .SelectedAccountName}} on {{.SelectedAccountName}}{{end}}</strong>
     <span class="cta-line">Go through them one card at a time: swipe right to send, left for later.</span>
@@ -32,7 +32,7 @@
     <option value="{{.ID}}"{{if eq (printf "%d" .ID) $.SelectedAccount}} selected{{end}}>{{.Name}}</option>
     {{end}}
   </select>
-  {{if .SelectedAccount}}<a class="btn btn-ghost btn-sm" href="/admin/ui/?status={{.Status}}&amp;per_page={{.PerPage}}">Clear</a>{{end}}
+  {{if .SelectedAccount}}<a class="btn btn-ghost btn-sm" href="/transactions?status={{.Status}}&amp;per_page={{.PerPage}}">Clear</a>{{end}}
   <noscript><button class="btn btn-quiet btn-sm" type="submit">Apply</button></noscript>
   {{if gt .NumPages 1}}<span class="muted num" style="margin-left:auto;font-size:13px">Page {{.Page}} of {{.NumPages}}</span>{{end}}
 </form>
@@ -44,10 +44,10 @@
     {{else if eq .Status "ready_to_push"}}<h2>Nothing is ready to send</h2><p>New transactions land here once they're classified.</p>
     {{else if eq .Status "pushed"}}<h2>Nothing sent yet</h2><p>Transactions you send to Firefly show up here.</p>
     {{else}}<h2>Nothing here</h2><p>No transactions match{{if .SelectedAccountName}} on {{.SelectedAccountName}}{{end}}.</p>{{end}}
-    {{if .SelectedAccount}}<a class="btn btn-quiet" href="/admin/ui/?status={{.Status}}&amp;per_page={{.PerPage}}">Show all accounts</a>{{end}}
+    {{if .SelectedAccount}}<a class="btn btn-quiet" href="/transactions?status={{.Status}}&amp;per_page={{.PerPage}}">Show all accounts</a>{{end}}
   </div>
 {{else}}
-  <form method="post" action="/admin/ui/reclassify">
+  <form method="post" action="/transactions/reclassify">
     <input type="hidden" name="back" value="{{filterURL .Filters .PerPage .Page}}">
     <div class="bulkbar">
       <label class="muted" style="display:flex;gap:8px;align-items:center;font-size:13px"><input type="checkbox" id="select-all"> Select all</label>
@@ -59,7 +59,7 @@
       <li class="txn{{if and (eq .Status "pushed") (eq $.Status "all")}} is-pushed{{end}}"{{if ne .Status "pushed"}} data-unpushed="1"{{end}} data-uuid="{{.FoldUUID}}">
         <span class="sel">{{if ne .Status "pushed"}}<input type="checkbox" name="fold_uuids" value="{{.FoldUUID}}" aria-label="Select this transaction">{{end}}</span>
         <div class="txn-main">
-          <div class="txn-title"><a href="/admin/ui/staged/{{.FoldUUID}}?back={{filterURL $.Filters $.PerPage $.Page | urlquery}}">{{if .Description}}{{blanks .Description}}{{else if .DestinationName}}{{.DestinationName}}{{else}}Untitled{{end}}</a></div>
+          <div class="txn-title"><a href="/transactions/{{.FoldUUID}}?back={{filterURL $.Filters $.PerPage $.Page | urlquery}}">{{if .Description}}{{blanks .Description}}{{else if .DestinationName}}{{.DestinationName}}{{else}}Untitled{{end}}</a></div>
           <div class="txn-sub">{{if .Description}}{{.DestinationName}}{{end}}{{if and .Description .CategoryName}} · {{end}}{{.CategoryName}}</div>
         </div>
         <div class="txn-when txn-when-wide"><time datetime="{{.TxnTimestampUTC}}">{{.TxnTimestamp}}</time><div class="muted">{{.SourceShort}}</div></div>

@@ -70,7 +70,7 @@ func TestUI_Detail_RefundPickerAndRefundedBy(t *testing.T) {
 	u := newUITestHarness(t, AuthModeBypass)
 	seedRefundPair(t, u, "ready_to_push", "ready_to_push")
 
-	page := body(t, u.do(t, http.MethodGet, "/admin/ui/staged/ref-1", nil))
+	page := body(t, u.do(t, http.MethodGet, "/transactions/ref-1", nil))
 	for _, want := range []string{
 		`name="refund_of"`,
 		`<option value="fold:buy-1" selected>`,
@@ -83,8 +83,8 @@ func TestUI_Detail_RefundPickerAndRefundedBy(t *testing.T) {
 			t.Errorf("refund detail missing %q", want)
 		}
 	}
-	purchase := body(t, u.do(t, http.MethodGet, "/admin/ui/staged/buy-1", nil))
-	if !strings.Contains(purchase, "Refunded by") || !strings.Contains(purchase, `/admin/ui/staged/ref-1`) {
+	purchase := body(t, u.do(t, http.MethodGet, "/transactions/buy-1", nil))
+	if !strings.Contains(purchase, "Refunded by") || !strings.Contains(purchase, `/transactions/ref-1`) {
 		t.Errorf("purchase page should list the refund under 'refunded by'")
 	}
 	if strings.Contains(purchase, `name="refund_of"`) {
@@ -102,21 +102,21 @@ func TestUI_Save_RefundOfChoice(t *testing.T) {
 	}
 	form := url.Values{"destination_name": {"Scapia Federal Bank Credit Card"}, "source_name": {"Zomato"},
 		"description": {"Refund for lunch"}, "refund_of": {"none"}}
-	if kind, _ := flashOf(t, u.do(t, http.MethodPost, "/admin/ui/staged/ref-1/save", form)); kind != "ok" {
+	if kind, _ := flashOf(t, u.do(t, http.MethodPost, "/transactions/ref-1/save", form)); kind != "ok" {
 		t.Fatalf("save flash = %q", kind)
 	}
 	if v := confirmed(); v.String != "none" {
 		t.Errorf("confirmed_refund_of = %v, want none", v)
 	}
 	form.Set("refund_of", "garbage")
-	if kind, msg := flashOf(t, u.do(t, http.MethodPost, "/admin/ui/staged/ref-1/save", form)); kind != "err" || !strings.Contains(msg, "refund of") {
+	if kind, msg := flashOf(t, u.do(t, http.MethodPost, "/transactions/ref-1/save", form)); kind != "err" || !strings.Contains(msg, "refund of") {
 		t.Errorf("bad reference flash = %q %q, want an unresolved 'refund of'", kind, msg)
 	}
 	if v := confirmed(); v.String != "none" {
 		t.Errorf("a bad reference overwrote the stored one: %v", v)
 	}
 	form.Set("refund_of", "")
-	u.do(t, http.MethodPost, "/admin/ui/staged/ref-1/save", form)
+	u.do(t, http.MethodPost, "/transactions/ref-1/save", form)
 	if v := confirmed(); v.Valid {
 		t.Errorf("empty choice should clear to NULL, got %v", v)
 	}
@@ -125,7 +125,7 @@ func TestUI_Save_RefundOfChoice(t *testing.T) {
 		t.Fatal(err)
 	}
 	form.Del("refund_of")
-	u.do(t, http.MethodPost, "/admin/ui/staged/ref-1/save", form)
+	u.do(t, http.MethodPost, "/transactions/ref-1/save", form)
 	if v := confirmed(); v.String != "fold:buy-1" {
 		t.Errorf("save without the picker changed it to %v", v)
 	}
@@ -134,7 +134,7 @@ func TestUI_Save_RefundOfChoice(t *testing.T) {
 func TestUI_Index_RefundPills(t *testing.T) {
 	u := newUITestHarness(t, AuthModeBypass)
 	seedRefundPair(t, u, "ready_to_push", "ready_to_push")
-	page := body(t, u.do(t, http.MethodGet, "/admin/ui/?status=all&per_page=50", nil))
+	page := body(t, u.do(t, http.MethodGet, "/transactions?status=all&per_page=50", nil))
 	if r := rowHTML(page, "ref-1"); !strings.Contains(r, ">refund<") {
 		t.Errorf("refund row lacks the refund pill: %s", r)
 	}
@@ -176,17 +176,17 @@ func TestUI_LinkButton(t *testing.T) {
 	t.Cleanup(srv.Close)
 	lu := &uiTestHarness{server: srv, db: u.db}
 
-	detail := body(t, lu.do(t, http.MethodGet, "/admin/ui/staged/ref-1", nil))
+	detail := body(t, lu.do(t, http.MethodGet, "/transactions/ref-1", nil))
 	if !strings.Contains(detail, "Link them as a refund") {
 		t.Fatalf("pushed pair should offer the link button")
 	}
-	if kind, msg := flashOf(t, lu.do(t, http.MethodPost, "/admin/ui/staged/ref-1/link", url.Values{})); kind != "ok" || !strings.Contains(msg, "link 44") {
+	if kind, msg := flashOf(t, lu.do(t, http.MethodPost, "/transactions/ref-1/link", url.Values{})); kind != "ok" || !strings.Contains(msg, "link 44") {
 		t.Fatalf("link flash = %q %q", kind, msg)
 	}
 	if !strings.Contains(linkBody, `"inward_id":6001`) || !strings.Contains(linkBody, `"outward_id":5001`) {
 		t.Errorf("link body = %s, want inward 6001 (refund), outward 5001 (purchase)", linkBody)
 	}
-	after := body(t, lu.do(t, http.MethodGet, "/admin/ui/staged/ref-1", nil))
+	after := body(t, lu.do(t, http.MethodGet, "/transactions/ref-1", nil))
 	if !strings.Contains(after, "Linked in Firefly (link 44)") || strings.Contains(after, "Link them as a refund") {
 		t.Errorf("after linking, the page should show the link and drop the button")
 	}
@@ -207,7 +207,7 @@ func TestUI_RefundPicker_CapsLargerCandidates(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	page := body(t, u.do(t, http.MethodGet, "/admin/ui/staged/ref-1", nil))
+	page := body(t, u.do(t, http.MethodGet, "/transactions/ref-1", nil))
 	if n := strings.Count(page, "larger — a partial refund?"); n != 5 {
 		t.Errorf("larger candidates listed = %d, want 5", n)
 	}
@@ -221,21 +221,21 @@ func TestUI_RefundPicker_CapsLargerCandidates(t *testing.T) {
 func TestUI_Index_RefundNeedsPickBadge(t *testing.T) {
 	u := newUITestHarness(t, AuthModeBypass)
 	seedRefundPair(t, u, "ready_to_push", "ready_to_push")
-	page := body(t, u.do(t, http.MethodGet, "/admin/ui/?status=all&per_page=50", nil))
+	page := body(t, u.do(t, http.MethodGet, "/transactions?status=all&per_page=50", nil))
 	if r := rowHTML(page, "ref-1"); strings.Contains(r, "pick purchase") || !strings.Contains(r, ">refund<") {
 		t.Errorf("a refund with its purchase shouldn't need a pick: %s", r)
 	}
 	if _, err := u.db.DB.Exec(`UPDATE staged_fold_txns SET proposed_refund_of = NULL WHERE fold_uuid = 'ref-1'`); err != nil {
 		t.Fatal(err)
 	}
-	page = body(t, u.do(t, http.MethodGet, "/admin/ui/?status=all&per_page=50", nil))
+	page = body(t, u.do(t, http.MethodGet, "/transactions?status=all&per_page=50", nil))
 	if r := rowHTML(page, "ref-1"); !strings.Contains(r, "refund · pick purchase") {
 		t.Errorf("a refund with no purchase should be badged for picking: %s", r)
 	}
 	if _, err := u.db.DB.Exec(`UPDATE staged_fold_txns SET confirmed_refund_of = 'none' WHERE fold_uuid = 'ref-1'`); err != nil {
 		t.Fatal(err)
 	}
-	page = body(t, u.do(t, http.MethodGet, "/admin/ui/?status=all&per_page=50", nil))
+	page = body(t, u.do(t, http.MethodGet, "/transactions?status=all&per_page=50", nil))
 	if r := rowHTML(page, "ref-1"); strings.Contains(r, "pick purchase") {
 		t.Errorf("a refund marked none shouldn't need a pick: %s", r)
 	}

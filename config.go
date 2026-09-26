@@ -76,10 +76,10 @@ type Config struct {
 	// HTTP boundary without redeploying.
 	FireflyReadOnly bool // TEXAS_FOLDEM_FIREFLY_READONLY     default false
 
-	// UICookieAuth toggles cookie-based auth for /admin/ui/* routes.
+	// UICookieAuth toggles cookie-based auth for the review UI's routes.
 	// false (default): trust upstream proxy auth (tinyauth ForwardAuth
 	// at the cluster ingress). true: require a tfe-admin cookie set
-	// via GET /admin/ui/login?key=<admin>. Use cookie mode for local
+	// via GET /login?key=<admin>. Use cookie mode for local
 	// development against a port-forward.
 	UICookieAuth bool // TEXAS_FOLDEM_UI_COOKIE_AUTH       default false
 

@@ -19,7 +19,7 @@
 #   TFE_PORT=9001 make sandbox   # override the listen port (default 8099)
 #
 # Once running:
-#   open http://127.0.0.1:8099/admin/ui/
+#   open http://127.0.0.1:8099/
 #   ./scripts/reclassify-one.sh <fold_uuid>     # reset+classify one row
 #   curl -XPOST -H 'Authorization: Bearer localadmin' \
 #        'http://127.0.0.1:8099/admin/classify?scope=pending'
@@ -55,7 +55,7 @@ fi
 [[ -s "$DIR/.llmkey" ]] || { echo "no LLM key at $DIR/.llmkey — run 'REFRESH=1 make sandbox'" >&2; exit 1; }
 
 echo "→ firefly_txns: $(sqlite3 "$DIR/staging.db" 'SELECT count(*) FROM firefly_txns;')   staged: $(sqlite3 "$DIR/staging.db" 'SELECT count(*) FROM staged_fold_txns;')   fold_accounts: $(sqlite3 "$DIR/staging.db" 'SELECT count(*) FROM fold_accounts;')"
-echo "→ tfe on http://127.0.0.1:$PORT/admin/ui/   (admin key: localadmin · Ctrl-C to stop)"
+echo "→ tfe on http://127.0.0.1:$PORT/   (admin key: localadmin · Ctrl-C to stop)"
 
 # go run . so edits rebuild on restart. Broker is unseeded (fine — classify
 # never needs a fold token); firefly base/PAT are dummies (never called by

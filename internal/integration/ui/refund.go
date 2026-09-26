@@ -254,7 +254,7 @@ func (h *Handler) handleLink(w http.ResponseWriter, r *http.Request) {
 	uuid := r.PathValue("fold_uuid")
 	if h.pusher == nil {
 		h.flashErr(w, "linking is unavailable")
-		http.Redirect(w, r, "/admin/ui/staged/"+uuid, http.StatusSeeOther)
+		http.Redirect(w, r, "/transactions/"+uuid, http.StatusSeeOther)
 		return
 	}
 	id, err := h.pusher.LinkRefund(r.Context(), uuid)
@@ -263,7 +263,7 @@ func (h *Handler) handleLink(w http.ResponseWriter, r *http.Request) {
 	} else {
 		h.flashOk(w, fmt.Sprintf("linked in firefly as a refund (link %d)", id))
 	}
-	http.Redirect(w, r, "/admin/ui/staged/"+uuid, http.StatusSeeOther)
+	http.Redirect(w, r, "/transactions/"+uuid, http.StatusSeeOther)
 }
 
 // saveRefundOf stores the human's "refund of" choice when the form carried
