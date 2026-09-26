@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/rounakdatta/texas-fold-em/internal/integration"
 )
 
 // nameOption is one entry in a UI datalist. ID is included so the
@@ -159,9 +161,31 @@ func (h *Handler) listFilterAccounts(ctx context.Context) ([]nameOption, error) 
 }
 
 // listCategories / listBudgets are siblings of listAccountsByKind for
-// the smaller dimension tables.
+// the smaller dimension tables. Categories also come from fold's copy of
+// Firefly's categories, so one nobody has used yet can still be picked.
 func (h *Handler) listCategories(ctx context.Context) ([]nameOption, error) {
-	return h.listSimple(ctx, "category_id", "category_name")
+	out, err := h.listSimple(ctx, "category_id", "category_name")
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	for _, o := range out {
+		seen[strings.ToLower(o.Name)] = true
+	}
+	rows, err := h.db.QueryContext(ctx, `SELECT firefly_id, name FROM firefly_categories WHERE name <> ''`)
+	if err != nil {
+		return out, nil
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var n nameOption
+		if rows.Scan(&n.ID, &n.Name) == nil && !seen[strings.ToLower(n.Name)] {
+			seen[strings.ToLower(n.Name)] = true
+			out = append(out, n)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name) })
+	return out, nil
 }
 func (h *Handler) listBudgets(ctx context.Context) ([]nameOption, error) {
 	return h.listSimple(ctx, "budget_id", "budget_name")
@@ -347,9 +371,14 @@ func (h *Handler) resolveAccountID(ctx context.Context, kind, name string) int64
 	return 0
 }
 
-// resolveCategoryID / resolveBudgetID are siblings, smaller scope.
+// resolveCategoryID / resolveBudgetID are siblings, smaller scope. A
+// category is found in fold's copy of Firefly's categories first, then on the
+// mirrored transactions.
 func (h *Handler) resolveCategoryID(ctx context.Context, name string) int64 {
-	return h.resolveSimple(ctx, "category_id", "category_name", name)
+	if id, _, ok := integration.CategoryByName(ctx, h.db, name); ok {
+		return id
+	}
+	return 0
 }
 func (h *Handler) resolveBudgetID(ctx context.Context, name string) int64 {
 	return h.resolveSimple(ctx, "budget_id", "budget_name", name)

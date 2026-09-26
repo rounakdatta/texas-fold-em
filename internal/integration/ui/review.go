@@ -146,8 +146,8 @@ var cardSelect = `
 	       COALESCE(s.confirmed_foreign_amount_paise, s.foreign_amount_paise), s.foreign_currency,
 	       COALESCE(NULLIF(s.confirmed_description, ''), NULLIF(s.proposed_description, ''), ''),
 	       CASE WHEN s.confirmed_category_id IS NOT NULL
-	            THEN (SELECT category_name FROM firefly_txns WHERE category_id = s.confirmed_category_id LIMIT 1)
-	            ELSE (SELECT category_name FROM firefly_txns WHERE category_id = s.proposed_category_id LIMIT 1) END,
+	            THEN COALESCE((SELECT name FROM firefly_categories WHERE firefly_id = s.confirmed_category_id), (SELECT category_name FROM firefly_txns WHERE category_id = s.confirmed_category_id LIMIT 1))
+	            ELSE COALESCE((SELECT name FROM firefly_categories WHERE firefly_id = s.proposed_category_id), (SELECT category_name FROM firefly_txns WHERE category_id = s.proposed_category_id LIMIT 1)) END,
 	       COALESCE(s.confirmed_tags_json, s.proposed_tags_json, ''),
 	       ` + effectiveAccountIDSQL("source") + `,
 	       COALESCE(NULLIF(s.confirmed_source_account_name, ''), NULLIF(s.proposed_source_account_name, ''), ''),
@@ -1441,6 +1441,23 @@ func (h *Handler) handleOptions(w http.ResponseWriter, r *http.Request) {
 		for rows.Next() {
 			var s string
 			if rows.Scan(&s) == nil {
+				o.Categories = append(o.Categories, s)
+			}
+		}
+		rows.Close()
+	}
+	// then the categories nobody has used yet (made in Firefly, or from this
+	// picker a minute ago), alphabetically
+	seenCat := map[string]bool{}
+	for _, c := range o.Categories {
+		seenCat[strings.ToLower(c)] = true
+	}
+	rows, err = h.db.QueryContext(ctx, `SELECT name FROM firefly_categories WHERE name <> '' ORDER BY name COLLATE NOCASE`)
+	if err == nil {
+		for rows.Next() {
+			var s string
+			if rows.Scan(&s) == nil && !seenCat[strings.ToLower(s)] {
+				seenCat[strings.ToLower(s)] = true
 				o.Categories = append(o.Categories, s)
 			}
 		}

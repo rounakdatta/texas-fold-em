@@ -316,6 +316,8 @@ button.acct { background: none; border: 0; padding: 0; font: inherit; cursor: po
 .sync-note { margin: 0; font-size: 13px; line-height: 1.4; color: var(--fg-3); min-width: 0; }
 .sync-note.is-done { color: var(--fg-2); }
 .sync-note.is-err { color: var(--danger); }
+/* the category picker's "Create" row, when Firefly couldn't take it */
+.pick-list .create-error { margin: 4px 14px 8px; color: var(--danger); }
 .sync-now { display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 12px; border-radius: var(--radius-sm);
   border: 1px solid var(--line-2); background: var(--surface); color: var(--fg); font-size: 13.5px; font-weight: 600; cursor: pointer; white-space: nowrap; }
 .sync-now:hover { border-color: var(--fg-3); }
