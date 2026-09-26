@@ -1247,12 +1247,16 @@ var rawNarrationTitle = regexp.MustCompile(`^(CARD/|UPI[-/]|NEFT|IMPS|ACH |RTGS|
 func (h *Handler) handleCardSuggest(w http.ResponseWriter, r *http.Request) {
 	uuid := r.PathValue("fold_uuid")
 	ctx := r.Context()
-	var dstID sql.NullInt64
-	var dstName, narration, mode string
+	var (
+		dstID, srcID                               sql.NullInt64
+		dstName, srcName, narration, mode, rowType string
+	)
 	err := h.db.QueryRowContext(ctx, `SELECT `+effectiveAccountIDSQL("destination")+`,
 		COALESCE(NULLIF(s.confirmed_destination_account_name, ''), NULLIF(s.proposed_destination_account_name, ''), ''),
-		s.narration, s.mode
-		FROM staged_fold_txns s WHERE s.fold_uuid = ?`, uuid).Scan(&dstID, &dstName, &narration, &mode)
+		`+effectiveAccountIDSQL("source")+`,
+		COALESCE(NULLIF(s.confirmed_source_account_name, ''), NULLIF(s.proposed_source_account_name, ''), ''),
+		s.narration, s.mode, s.type
+		FROM staged_fold_txns s WHERE s.fold_uuid = ?`, uuid).Scan(&dstID, &dstName, &srcID, &srcName, &narration, &mode, &rowType)
 	if err != nil {
 		h.apiError(w, http.StatusNotFound, "not found")
 		return
@@ -1260,16 +1264,33 @@ func (h *Handler) handleCardSuggest(w http.ResponseWriter, r *http.Request) {
 	resp := suggestResponse{Titles: []suggestion{}, Categories: []suggestion{}, Payees: []suggestion{}, Accounts: []suggestion{}}
 	resp.Payees = h.payeesForBankName(ctx, narration, mode)
 	resp.Accounts = h.transferPartners(ctx, uuid)
-	if !dstID.Valid && dstName != "" {
-		if id := h.resolveAccountID(ctx, "destination", dstName); id != 0 {
-			dstID = sql.NullInt64{Int64: id, Valid: true}
-		}
+
+	// The past worth learning from is the other side's: who was paid, on
+	// money out; who paid, on money in. The user's own account is on every
+	// row it ever made, so its history says nothing about this one — every
+	// deposit into the bank is no clue to what this deposit was.
+	other := suggestSide{col: "destination_account_id", kind: "destination", id: dstID, name: dstName}
+	own := suggestSide{col: "source_account_id", kind: "source", id: srcID, name: srcName}
+	if rowType == "INCOMING" {
+		other, own = own, other
 	}
-	if dstID.Valid {
+	h.resolveSide(ctx, &other)
+	if other.id.Valid {
+		where, args := other.col+" = ?", []any{other.id.Int64}
+		// A transfer's other side is one of the user's own accounts, which
+		// is just as general: narrow to the rows between these two.
+		var asset int
+		if h.db.QueryRowContext(ctx, `SELECT 1 FROM firefly_accounts WHERE firefly_id = ? AND type = 'asset'`, other.id.Int64).Scan(&asset) == nil {
+			h.resolveSide(ctx, &own)
+			if own.id.Valid {
+				where += " AND " + own.col + " = ?"
+				args = append(args, own.id.Int64)
+			}
+		}
 		rows, err := h.db.QueryContext(ctx, `
 			SELECT description, COUNT(*), MAX(date) FROM firefly_txns
-			WHERE destination_account_id = ? AND description <> '' AND description NOT LIKE '%\_\_\_%' ESCAPE '\'
-			GROUP BY description ORDER BY MAX(date) DESC LIMIT 8`, dstID.Int64)
+			WHERE `+where+` AND description <> '' AND description NOT LIKE '%\_\_\_%' ESCAPE '\'
+			GROUP BY description ORDER BY MAX(date) DESC LIMIT 8`, args...)
 		if err == nil {
 			for rows.Next() {
 				var s suggestion
@@ -1284,8 +1305,8 @@ func (h *Handler) handleCardSuggest(w http.ResponseWriter, r *http.Request) {
 		}
 		rows, err = h.db.QueryContext(ctx, `
 			SELECT category_name, COUNT(*) FROM firefly_txns
-			WHERE destination_account_id = ? AND category_name IS NOT NULL AND category_name <> ''
-			GROUP BY category_name ORDER BY COUNT(*) DESC LIMIT 4`, dstID.Int64)
+			WHERE `+where+` AND category_name IS NOT NULL AND category_name <> ''
+			GROUP BY category_name ORDER BY COUNT(*) DESC LIMIT 4`, args...)
 		if err == nil {
 			for rows.Next() {
 				var s suggestion
@@ -1299,6 +1320,25 @@ func (h *Handler) handleCardSuggest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// suggestSide is one side of a row as the suggestions read it: the
+// firefly_txns column it matches, and the account as the row names it.
+type suggestSide struct {
+	col, kind string
+	id        sql.NullInt64
+	name      string
+}
+
+// resolveSide fills in a side's account id from its name when the row
+// names the account without having resolved it yet.
+func (h *Handler) resolveSide(ctx context.Context, s *suggestSide) {
+	if s.id.Valid || s.name == "" {
+		return
+	}
+	if id := h.resolveAccountID(ctx, s.kind, s.name); id != 0 {
+		s.id = sql.NullInt64{Int64: id, Valid: true}
+	}
 }
 
 // transferPartners lists the accounts the row's own account has moved money

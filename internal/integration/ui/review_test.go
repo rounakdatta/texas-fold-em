@@ -751,3 +751,79 @@ func TestReview_TheListInvitesYouToWhatTheDeckHolds(t *testing.T) {
 		t.Errorf("the call to review and the badge should both say 2: %q / %q", snippet(body, "waiting for you"), snippet(body, "count num"))
 	}
 }
+
+// suggestTitles asks for a row's suggestions and returns the past titles.
+func (rh *reviewHarness) suggestTitles(t *testing.T, uuid string) ([]string, []suggestion) {
+	t.Helper()
+	resp, err := http.Get(rh.srv.URL + "/admin/ui/api/rows/" + uuid + "/suggest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var s suggestResponse
+	_ = json.NewDecoder(resp.Body).Decode(&s)
+	var titles []string
+	for _, x := range s.Titles {
+		titles = append(titles, x.Value)
+	}
+	return titles, s.Categories
+}
+
+// seedMoneyIn adds a payer, an employer, and history into and out of the bank.
+func (rh *reviewHarness) seedMoneyIn(t *testing.T) {
+	t.Helper()
+	mustExec(t, rh.db, `INSERT INTO firefly_accounts (firefly_id, name, type, active, raw_payload) VALUES
+		(3001, 'Bond Registry', 'revenue', 1, '{}'), (3002, 'Employer Payroll', 'revenue', 1, '{}'),
+		(3003, 'Daily Mart, Market Road', 'revenue', 1, '{}')`)
+	mustExec(t, rh.db, `
+		INSERT INTO firefly_txns (firefly_id, group_id, txn_type, amount_paise, currency, date,
+		    source_account_id, source_account_name, destination_account_id, destination_account_name,
+		    destination_account_name_normalized, category_id, category_name, description, tags_json, notes)
+		VALUES
+		  (8101, 8101, 'deposit', 148000, 'INR', '2025-09-19T09:00:00Z', 3001, 'Bond Registry', 12, 'HDFC Bank',
+		   'hdfc bank', 41, 'Bond Interest', 'Interest on 7.00% Bond 2040', '[]', ''),
+		  (8102, 8102, 'deposit', 9000000, 'INR', '2025-09-01T09:00:00Z', 3002, 'Employer Payroll', 12, 'HDFC Bank',
+		   'hdfc bank', 42, 'Salary', 'Salary for August', '[]', ''),
+		  (8103, 8103, 'transfer', 500000, 'INR', '2025-09-10T09:00:00Z', 12, 'HDFC Bank', 476, 'Tata Neu HDFC Bank Credit Card',
+		   'tata neu hdfc bank credit card', 43, 'Credit Repayment', 'Credit card repayment', '[]', ''),
+		  (8104, 8104, 'withdrawal', 30000, 'INR', '2025-09-11T09:00:00Z', 12, 'HDFC Bank', 421, 'Daily Mart, Market Road',
+		   'daily mart, market road', 9, 'Grocery', 'Vegetables', '[]', ''),
+		  (8105, 8105, 'deposit', 12000, 'INR', '2025-09-12T09:00:00Z', 3003, 'Daily Mart, Market Road', 476, 'Tata Neu HDFC Bank Credit Card',
+		   'tata neu hdfc bank credit card', 44, 'Refund', 'Refund for fruits', '[]', '')`)
+}
+
+func (rh *reviewHarness) stageIncoming(t *testing.T, uuid string, from, to int64) {
+	t.Helper()
+	mustExec(t, rh.db, `
+		INSERT INTO staged_fold_txns (fold_uuid, raw_payload, amount_paise, currency, txn_timestamp, mode, type, narration,
+		    merchant_extracted, status, classifier_tier, classifier_confidence,
+		    proposed_source_account_id, proposed_destination_account_id, proposed_category_id, proposed_description)
+		VALUES (?, '{}', 148000, 'INR', '2026-09-19T09:03:00Z', 'NEFT', 'INCOMING', 'NEFT CR-XXXX0000000-BOND REGISTRY',
+		        'bond registry', 'needs_review', 3, 0.5, ?, ?, NULL, '___')`, uuid, from, to)
+}
+
+func TestReview_MoneyInSuggestsWhatThatPayerPaidBefore(t *testing.T) {
+	rh := newReviewHarness(t)
+	rh.seedMoneyIn(t)
+	rh.stageIncoming(t, "in1", 3001, 12) // from Bond Registry, into HDFC Bank
+	titles, cats := rh.suggestTitles(t, "in1")
+	// what Bond Registry paid before — not every deposit into the bank
+	if strings.Join(titles, " | ") != "Interest on 7.00% Bond 2040" {
+		t.Errorf("titles = %v; want only the payer's past, not the salary or the card repayment that also touch HDFC Bank", titles)
+	}
+	if len(cats) != 1 || cats[0].Value != "Bond Interest" {
+		t.Errorf("categories = %+v; want what this payer's money was filed under", cats)
+	}
+}
+
+func TestReview_ATransferSuggestsWhatMovedBetweenTheSameTwoAccounts(t *testing.T) {
+	rh := newReviewHarness(t)
+	rh.seedMoneyIn(t)
+	rh.stageIncoming(t, "tr1", 12, 476) // from HDFC Bank, into the card: a repayment
+	titles, _ := rh.suggestTitles(t, "tr1")
+	// HDFC Bank is the user's own account, on every row it made: only the
+	// rows between it and this card are a clue
+	if strings.Join(titles, " | ") != "Credit card repayment" {
+		t.Errorf("titles = %v; want only what moved between HDFC Bank and the card — not the card's refund, nor HDFC Bank's other spends", titles)
+	}
+}

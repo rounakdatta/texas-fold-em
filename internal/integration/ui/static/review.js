@@ -980,7 +980,10 @@
     }, 40);
     suggestions(c).then(s => {
       if (!s.titles.length) return;
-      past.append(h('div', { class: 'pick-group', text: 'Before at ' + (c.to.name || 'this payee') }));
+      // the other side's past: who was paid on money out, who paid on money in
+      const o = otherOf(c), incoming = c.direction === 'in';
+      const lead = c.type === 'transfer' ? (incoming ? 'Before from ' : 'Before to ') : (incoming ? 'Before from ' : 'Before at ');
+      past.append(h('div', { class: 'pick-group', text: lead + (o.name || (incoming ? 'this payer' : 'this payee')) }));
       for (const t of s.titles.slice(0, 6)) past.append(pickButton(t.value, t.hint, () => save(t.value), false, true));
     });
   }
