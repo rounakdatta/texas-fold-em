@@ -1316,8 +1316,10 @@ func (h *Handler) handleReclassify(w http.ResponseWriter, r *http.Request) {
 // returned to the caller for surfacing as a flash warning.
 //
 // Empty fields are written as NULL so the eventual push falls through
-// to proposed_* (or fails firefly validation cleanly). Status is
-// bumped to ready_to_push if it was needs_review.
+// to proposed_* (or fails firefly validation cleanly) — except category
+// and budget, where an empty field is an explicit "none", and a form that
+// doesn't carry the field at all keeps what is stored. Status is bumped
+// to ready_to_push if it was needs_review.
 func (h *Handler) saveEdits(ctx context.Context, uuid string, form url.Values) (unresolved []string, err error) {
 	destName := strings.TrimSpace(form.Get("destination_name"))
 	srcName := strings.TrimSpace(form.Get("source_name"))
@@ -1330,7 +1332,9 @@ func (h *Handler) saveEdits(ctx context.Context, uuid string, form url.Values) (
 	// form's own pick when it carries one (the editor's Type field, a card's
 	// type choice), else what the row is now.
 	var dir, confType string
-	_ = h.db.QueryRowContext(ctx, `SELECT type, COALESCE(confirmed_txn_type, '') FROM staged_fold_txns WHERE fold_uuid = ?`, uuid).Scan(&dir, &confType)
+	var storedCat, storedBud sql.NullInt64
+	_ = h.db.QueryRowContext(ctx, `SELECT type, COALESCE(confirmed_txn_type, ''), confirmed_category_id, confirmed_budget_id
+		FROM staged_fold_txns WHERE fold_uuid = ?`, uuid).Scan(&dir, &confType, &storedCat, &storedBud)
 	effType, typeVal := h.formType(ctx, uuid, dir, form)
 	if typeVal == nil {
 		typeVal = nullableStr(confType)
@@ -1393,6 +1397,22 @@ func (h *Handler) saveEdits(ctx context.Context, uuid string, form url.Values) (
 	}
 	if budName == "" && formHas(form, "budget_name") {
 		budID = int64(0)
+	}
+	// Absent is not empty. Category and budget have three states — chosen, a
+	// person's "none" (0) and not decided yet (NULL, so push uses the
+	// suggestion) — and a form that doesn't carry the field keeps whichever
+	// is stored, as the money overrides, the hold and the refund pick below
+	// already do. Until 0.18.2 an absent field was written as NULL, so any
+	// save that sent only some fields turned a person's "none" back into the
+	// suggestion: the deck's title edit leaves an empty category or budget
+	// out (to keep "not decided yet" from becoming "none"), and a cleared
+	// budget came back on the next edit — unseen, because the card doesn't
+	// show budgets, and it would have gone to firefly on send.
+	if !formHas(form, "category_name") && storedCat.Valid {
+		catID = storedCat.Int64
+	}
+	if !formHas(form, "budget_name") && storedBud.Valid {
+		budID = storedBud.Int64
 	}
 
 	// Money and time corrections (statement reconciliation).

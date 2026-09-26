@@ -983,7 +983,9 @@ func (h *Handler) currentForm(ctx context.Context, uuid string) (url.Values, err
 	f.Set("source_name", edit.SourceAccountName)
 	// An empty category or budget is sent only when the edit clears it: in
 	// the review form an empty field means "explicitly none", and a card
-	// edit to the title must not turn "not suggested yet" into that.
+	// edit to the title must not turn "not suggested yet" into that. Left
+	// out, the field keeps what is stored (saveEdits) — so a "none" the
+	// person chose earlier survives the edit too.
 	if edit.CategoryName != "" {
 		f.Set("category_name", edit.CategoryName)
 	}

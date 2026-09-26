@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -364,6 +366,87 @@ func TestReview_AnEmptyCategoryIsNotConfirmedByAnUnrelatedEdit(t *testing.T) {
 	_ = rh.db.DB.QueryRow(`SELECT confirmed_category_id FROM staged_fold_txns WHERE fold_uuid='nc'`).Scan(&cat)
 	if cat != nil {
 		t.Errorf("confirmed_category_id = %v; a title edit turned 'no suggestion yet' into an explicit 'none'", *cat)
+	}
+}
+
+// The other kind of nothing. A category or budget the person cleared is
+// stored as 0 ("none"), and must stay cleared when they later edit something
+// else on the card. Until 0.18.2 a title edit brought the suggestion back:
+// the edit leaves an empty field out, and the save wrote a missing field as
+// NULL ("not decided yet"), which push fills from the suggestion. The card
+// never shows a budget, so nobody would have seen it before firefly did —
+// which is why this asserts what send books, not only what is stored.
+func TestReview_ACategoryAndBudgetYouClearedStayClearedAfterATitleEdit(t *testing.T) {
+	rh := newReviewHarness(t)
+	rh.stage(t, "cl", "ready_to_push", "Masala chai", 20000, "2025-12-29T07:51:00Z",
+		`UPDATE staged_fold_txns SET proposed_budget_id = 5,
+		   confirmed_category_id = 0, confirmed_budget_id = 0,
+		   confirmed_destination_account_id = 979, confirmed_source_account_id = 476,
+		   confirmed_description = 'Masala chai'
+		 WHERE fold_uuid = ?`)
+	if code, a := rh.post(t, "rows/cl/edit", `{"title":"Masala chai for the team"}`); code != 200 || !a.OK {
+		t.Fatalf("edit = %d %+v", code, a)
+	}
+	var cat, bud sql.NullInt64
+	if err := rh.db.DB.QueryRow(`SELECT confirmed_category_id, confirmed_budget_id FROM staged_fold_txns WHERE fold_uuid='cl'`).Scan(&cat, &bud); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if !cat.Valid || cat.Int64 != 0 || !bud.Valid || bud.Int64 != 0 {
+		t.Errorf("after a title edit: category=%v budget=%v, want both still the person's none (0)", cat, bud)
+	}
+	if code, a := rh.post(t, "rows/cl/send", `{}`); code != 200 || rh.createCount() != 1 {
+		t.Fatalf("send = %d %+v (creates %d)", code, a, rh.createCount())
+	}
+	line := rh.creates[0]["transactions"].([]any)[0].(map[string]any)
+	if line["category_id"] != nil || line["budget_id"] != nil {
+		t.Errorf("send booked category_id=%v budget_id=%v — a suggestion the person had cleared", line["category_id"], line["budget_id"])
+	}
+	if line["description"] != "Masala chai for the team" {
+		t.Errorf("send booked description=%v, want the edited title", line["description"])
+	}
+}
+
+// A save that doesn't carry category or budget — the deck's edits, a
+// statement-amount correction posted by a script — keeps each of the three
+// states exactly as stored: a choice, a "none", and "not decided yet" (which
+// push still fills from the suggestion).
+func TestReview_ASaveWithoutCategoryAndBudgetKeepsWhatWasStored(t *testing.T) {
+	rh := newReviewHarness(t)
+	for _, r := range []struct{ uuid, set string }{
+		{"chosen", `confirmed_category_id = 9, confirmed_budget_id = 7`},
+		{"cleared", `confirmed_category_id = 0, confirmed_budget_id = 0`},
+		{"undecided", `confirmed_category_id = NULL, confirmed_budget_id = NULL`},
+	} {
+		rh.stage(t, r.uuid, "ready_to_push", "Masala chai", 20000, "2025-12-29T07:51:00Z",
+			`UPDATE staged_fold_txns SET proposed_budget_id = 5, `+r.set+` WHERE fold_uuid = ?`)
+		// the editor's fields minus category and budget, and a corrected amount
+		resp, err := http.PostForm(rh.srv.URL+"/admin/ui/staged/"+r.uuid+"/save", url.Values{
+			"description": {"Masala chai"}, "destination_name": {"Chai Corner, Market Road"},
+			"source_name": {"Tata Neu HDFC Bank Credit Card"}, "amount": {"205.40"}})
+		if err != nil {
+			t.Fatalf("save %s: %v", r.uuid, err)
+		}
+		resp.Body.Close()
+	}
+	want := map[string][2]string{"chosen": {"9", "7"}, "cleared": {"0", "0"}, "undecided": {"NULL", "NULL"}}
+	for uuid, w := range want {
+		var cat, bud sql.NullInt64
+		var amt int64
+		if err := rh.db.DB.QueryRow(`SELECT confirmed_category_id, confirmed_budget_id, confirmed_amount_paise FROM staged_fold_txns WHERE fold_uuid = ?`, uuid).Scan(&cat, &bud, &amt); err != nil {
+			t.Fatalf("read back %s: %v", uuid, err)
+		}
+		show := func(v sql.NullInt64) string {
+			if !v.Valid {
+				return "NULL"
+			}
+			return strconv.FormatInt(v.Int64, 10)
+		}
+		if got := [2]string{show(cat), show(bud)}; got != w {
+			t.Errorf("%s: category/budget = %v after a save that didn't carry them, want %v", uuid, got, w)
+		}
+		if amt != 20540 {
+			t.Errorf("%s: the amount correction itself wasn't saved (%d)", uuid, amt)
+		}
 	}
 }
 
