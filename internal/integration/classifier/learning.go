@@ -85,6 +85,7 @@ type neighbour struct {
 	title    string
 	payee    string
 	category string
+	budget   string
 	tags     []string
 	state    string // "sent", "waiting", "held"
 	owner    bool
@@ -404,7 +405,7 @@ func (c *Classifier) neighbours(ctx context.Context, staged StagedRow, ex exclus
 		}
 		n := neighbour{at: p.at, dir: snap.Direction, amount: snap.AmountPaise, foreign: snap.ForeignLabel}
 		if v, mine := c.ownerValues(ctx, p.uuid, p.status, snap); mine {
-			n.owner, n.title, n.payee, n.category, n.tags = true, v.Title, v.Payee, v.Category, v.Tags
+			n.owner, n.title, n.payee, n.category, n.budget, n.tags = true, v.Title, v.Payee, v.Category, v.Budget, v.Tags
 		} else {
 			n.bank = shortNarration(snap.Narration)
 		}
@@ -476,7 +477,8 @@ func (c *Classifier) tripContext(ctx context.Context, staged StagedRow, ex exclu
 	}
 	// Tags and categories as the owner decided them — an older engine's
 	// guesses on unreviewed cards would otherwise read as the trip's tag.
-	tags, cats := map[string]int{}, map[string]int{}
+	tags, cats, buds := map[string]int{}, map[string]int{}, map[string]int{}
+	decided := 0
 	for _, u := range uuids {
 		snap, err := feedback.SnapshotReview(ctx, c.db, u)
 		if err != nil {
@@ -489,9 +491,15 @@ func (c *Classifier) tripContext(ctx context.Context, staged StagedRow, ex exclu
 		for _, t := range v.Tags {
 			tags[t]++
 		}
+		decided++
 		if v.Category != "" && v.Category != feedback.NoneValue {
 			cats[v.Category]++
 		}
+		bud := v.Budget
+		if bud == "" || bud == feedback.NoneValue {
+			bud = "none"
+		}
+		buds[bud]++
 	}
 	ist := time.FixedZone("IST", 5*3600+1800)
 	s := fmt.Sprintf("%d other %s charges between %s and %s — a trip.", len(uuids), cur,
@@ -503,6 +511,9 @@ func (c *Classifier) tripContext(ctx context.Context, staged StagedRow, ex exclu
 	}
 	if len(cats) > 0 {
 		s += " Categories: " + topCounts(cats, 4) + "."
+	}
+	if decided > 0 {
+		s += " Budgets: " + topCounts(buds, 3) + " — a new place on the trip follows the budget its other spends in that category went to."
 	}
 	return s
 }
@@ -689,6 +700,9 @@ func (lc learningContext) render(b *strings.Builder) {
 			if n.category != "" {
 				line += " · " + n.category
 			}
+			if n.budget != "" && n.budget != feedback.NoneValue {
+				line += " · budget " + n.budget
+			}
 			if len(n.tags) > 0 {
 				line += " · tags " + strings.Join(n.tags, ", ")
 			}
@@ -790,7 +804,7 @@ func (lc learningContext) summary() *LearnedCounts {
 // was unreachable) is one the re-suggest loop may revisit. Bump it when the
 // prompt or context change enough that every waiting suggestion deserves
 // another look.
-const EngineVersion = 5
+const EngineVersion = 6
 
 // engineVersionFor is the version to record for a decision: the current one
 // when the model made it — or looked and declined, or it is a deterministic

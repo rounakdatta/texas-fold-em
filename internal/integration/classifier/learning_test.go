@@ -283,6 +283,9 @@ func TestAForeignChargeSeesItsTrip(t *testing.T) {
 	if !strings.Contains(trip, "4 other SGD charges") || !strings.Contains(trip, "far-trip-2026 ×3") || strings.Contains(trip, "guessed-tag") {
 		t.Errorf("trip context = %q; want the four SGD charges and the owner's tag — not the guessed one", trip)
 	}
+	if !strings.Contains(trip, "Budgets: none ×3") {
+		t.Errorf("trip context = %q; want the budgets the owner's trip spends went to", trip)
+	}
 	if home := c.tripContext(context.Background(), StagedRow{FoldUUID: "home", TxnTimestamp: at.Format(time.RFC3339), RawPayload: `{}`}, exclusion{}); home != "" {
 		t.Errorf("a rupee charge got trip context %q", home)
 	}
