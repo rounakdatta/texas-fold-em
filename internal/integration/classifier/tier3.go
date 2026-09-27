@@ -33,6 +33,7 @@ const tier3SystemPrompt = `You are the review assistant in a personal-finance ap
 
 You will be given (in the user message):
   - the raw fold transaction: narration, merchant, mode, type, amount, currency, source_amount/source_currency for a foreign charge, fold's summary, and the owner's own note in "notes"
+  - THE NOTE ON THE PAYMENT: for a UPI payment, what the payer typed in the UPI app — for money out, the owner's own words
   - TIME CONTEXT: when it happened (IST, and the likely local time for a foreign charge)
   - the paying account
   - HOW YOU CORRECTED FOLD BEFORE: past suggestions for this merchant or handle the owner changed, and what they changed them to
@@ -49,6 +50,7 @@ How to weigh the evidence, strongest first:
   3. Their STYLE SAMPLES and titles for this payee.
   4. Similar historical transactions and the deterministic hints.
   5. The transaction's own text, the time, the neighbours, general knowledge.
+  The owner's own words about THIS transaction — fold's "notes" and THE NOTE ON THE PAYMENT — outrank everything on its purpose and specifics: "CAB" on a payment to a friend is travel, whatever that friend is usually paid for.
   When signals still conflict, prefer the more specific and the more recent; if they still disagree, choose the safer answer and lower your confidence.
 
 PAYEE (the destination for money out, the source for money in):
@@ -59,13 +61,13 @@ PAYEE (the destination for money out, the source for money in):
 TITLE (description_suggestion) — the most visible thing you write:
   - Mirror the owner first. Their corrections and past titles for this merchant or handle set the format — length, vocabulary, structure. A structure they use repeatedly ("<items> from <shop>", "Ride from <A> to <B>", "<meal> at <place>") is followed with this transaction's specifics.
   - Write "___" (three underscores) for any specific the evidence does not give you: items bought, dishes, people, the two ends of a ride, an occasion. Never guess a specific — a wrong specific is worse than a blank the owner fills in one tap. "___ for dinner" beats "Pasta for dinner" when nothing says pasta.
-  - The owner's own note (the payload's "notes") is the best source of specifics: keep its people, dishes and details.
+  - The owner's own words are the best source of specifics: the payload's "notes", and THE NOTE ON THE PAYMENT, cut at about eighteen characters — read it whole ("ROLL DINNER" → "Roll for dinner", "BELATED HAPPY BIRT" → a belated birthday gift) and keep its people, dishes and details. "RAPIDO" means a Rapido ride paid to its driver.
   - Name the meal from the time (the LOCAL time for a foreign charge; see TIME CONTEXT) only when the owner's titles for similar places name meals. Never attach a meal to an online service or a subscription.
   - Neighbours may give context (the ride to the place, the meal before), never another transaction's specifics.
   - When the owner's history offers nothing better: a card bill payment is "Credit card repayment"; a refund is "Refund for <the purchase's title>"; a card fee says what it is ("Forex charges", "GST", "Annual fee"); interest and cashback say what they are.
   - Never put the raw narration, a reference number or the amount in the title.
 
-TAGS: mirror the tags the owner uses for this merchant or pattern. When TRIP CONTEXT shows the owner tagging a trip's charges, add that trip tag. Use the existing vocabulary; invent a tag only when the owner's own corrections did.
+TAGS group transactions the owner wants to find together: a trip, a reimbursable expense, an event. Add one only when this transaction is in that situation — within the trip's dates and currency (TRIP CONTEXT), a work meal on a working day for a reimbursement tag — or when the owner's RECENT transactions of exactly this kind all carry it. Never tag a meal, a category or a merchant's name. Use the existing vocabulary. When unsure, no tag: a missing tag costs one tap, a wrong one misleads.
 
 BUDGET: follow the owner's habit for the category you chose (YOUR BUDGETS BY CATEGORY): when that category nearly always goes to one budget, use it; when it mostly has none, null.
 
@@ -249,7 +251,12 @@ func (c *Classifier) tierThreeLLM(ctx context.Context, staged StagedRow, tier1Hi
 				}
 			}
 		}
-		return Decision{}, false, nil
+		// With no deterministic hint to fall back to, the card goes to a
+		// person — carrying what the model could say (its title, category,
+		// budget and tags, and why it couldn't settle the rest) rather than
+		// nothing. Never its payee: an unsure card makes the person pick
+		// who was paid.
+		return c.declinedDecision(staged, llm, inputs, txnType), false, nil
 	}
 
 	// Resolve human-readable names for the UI's display. An id-backed
@@ -317,6 +324,37 @@ func (c *Classifier) tierThreeLLM(ctx context.Context, staged StagedRow, tier1Hi
 			Learned:            inputs.learn.summary(),
 		},
 	}, true, nil
+}
+
+// declinedDecision is a card for a person, from a model answer too unsure to
+// stand: what it could say, and why it stopped.
+func (c *Classifier) declinedDecision(staged StagedRow, r llmResponse, in tier3Inputs, txnType string) Decision {
+	d := Decision{
+		Tier:       TierHumanReview,
+		Confidence: r.Confidence,
+		TxnType:    txnType,
+		Tags:       r.Tags,
+		Engine:     c.llm.Model(),
+		Evidence: Evidence{
+			Tier:               TierHumanReview,
+			MerchantNormalized: staged.MerchantExtracted,
+			Note:               "fold's model couldn't settle this one: " + strings.TrimSpace(r.Reasoning),
+			Signals:            capStrings(r.EvidenceNotes, 4),
+			Unknowns:           capStrings(r.Unknowns, 6),
+			HoldSuggestion:     strings.TrimSpace(derefString(r.HoldSuggestion)),
+			Learned:            in.learn.summary(),
+		},
+	}
+	if r.DescriptionSuggestion != nil {
+		d.Description = strings.TrimSpace(*r.DescriptionSuggestion)
+	}
+	if r.CategoryID != nil {
+		d.CategoryID, d.CategoryName = r.CategoryID, lookupName(in, "category", *r.CategoryID)
+	}
+	if r.BudgetID != nil {
+		d.BudgetID, d.BudgetName = r.BudgetID, lookupName(in, "budget", *r.BudgetID)
+	}
+	return d
 }
 
 // tier3Hit is the flat candidate row we feed both the prompt and the
@@ -401,7 +439,7 @@ func (c *Classifier) gatherTier3Inputs(ctx context.Context, staged StagedRow, ti
 		learn:           c.gatherLearning(ctx, staged, payeeHint, ex),
 		expenseUsage:    accountUsage(ctx, c.db, "destination", time.Now().AddDate(-1, 0, 0)),
 		revenueUsage:    accountUsage(ctx, c.db, "source", time.Now().AddDate(-1, 0, 0)),
-		budgetHabits:    budgetHabits(ctx, c.db, fireflyTxnTypeFor(staged.Type), time.Now().AddDate(-1, 0, 0)),
+		budgetHabits:    budgetHabits(ctx, c.db, fireflyTxnTypeFor(staged.Type), time.Now()),
 	}, nil
 }
 
@@ -496,59 +534,79 @@ func (c *Classifier) retrieveTier3Candidates(ctx context.Context, staged StagedR
 	return out, rows.Err()
 }
 
-// budgetHabits says, per category the owner used at least five times in the
-// last year on this kind of move, which budget it went to most: "Food →
-// "Eating outside" (212 of 230)", or "Grocery → no budget (40 of 45)". Most
-// used first, at most 30.
-func budgetHabits(ctx context.Context, db *sql.DB, txnType string, since time.Time) []string {
-	rows, err := db.QueryContext(ctx, `
-		SELECT category_name, COALESCE(budget_name, ''), COUNT(*) FROM firefly_txns
-		WHERE txn_type = ? AND category_name IS NOT NULL AND TRIM(category_name) <> '' AND substr(date, 1, 10) >= ?
-		GROUP BY 1, 2`, txnType, since.Format("2006-01-02"))
-	if err != nil {
-		return nil
-	}
-	defer rows.Close()
+// budgetHabits says, per category, which budget the owner's spends in it go
+// to: "Food → "Eating outside" (44 of 51, last 4 months)", or "Grocery → no
+// budget (40 of 45, last year)". The owner's recent practice wins — the
+// habit of the last four months when a category has three rows there, else
+// the year's — because a budget adopted in spring is the habit now, however
+// many older rows went without one. Categories used at least three times
+// recently or five in the year; most used first, at most 30.
+func budgetHabits(ctx context.Context, db *sql.DB, txnType string, now time.Time) []string {
 	type habit struct {
-		cat, top string
+		top      string
 		topN, n  int
+		inWindow string
 	}
-	byCat := map[string]*habit{}
-	for rows.Next() {
-		var cat, bud string
-		var n int
-		if rows.Scan(&cat, &bud, &n) != nil {
-			continue
+	read := func(since time.Time) map[string]*habit {
+		out := map[string]*habit{}
+		rows, err := db.QueryContext(ctx, `
+			SELECT category_name, COALESCE(budget_name, ''), COUNT(*) FROM firefly_txns
+			WHERE txn_type = ? AND category_name IS NOT NULL AND TRIM(category_name) <> '' AND substr(date, 1, 10) >= ?
+			GROUP BY 1, 2`, txnType, since.Format("2006-01-02"))
+		if err != nil {
+			return out
 		}
-		h := byCat[cat]
-		if h == nil {
-			h = &habit{cat: cat}
-			byCat[cat] = h
+		defer rows.Close()
+		for rows.Next() {
+			var cat, bud string
+			var n int
+			if rows.Scan(&cat, &bud, &n) != nil {
+				continue
+			}
+			h := out[cat]
+			if h == nil {
+				h = &habit{}
+				out[cat] = h
+			}
+			h.n += n
+			if n > h.topN || (n == h.topN && bud < h.top) {
+				h.top, h.topN = bud, n
+			}
 		}
-		h.n += n
-		if n > h.topN || (n == h.topN && bud < h.top) {
-			h.top, h.topN = bud, n
+		return out
+	}
+	recent, year := read(now.AddDate(0, -4, 0)), read(now.AddDate(-1, 0, 0))
+	chosen := map[string]*habit{}
+	for cat, h := range year {
+		if r := recent[cat]; r != nil && r.n >= 3 {
+			r.inWindow = "last 4 months"
+			chosen[cat] = r
+		} else if h.n >= 5 {
+			h.inWindow = "last year"
+			chosen[cat] = h
 		}
 	}
-	var list []*habit
-	for _, h := range byCat {
-		if h.n >= 5 {
-			list = append(list, h)
-		}
+	type kv struct {
+		cat string
+		h   *habit
+	}
+	var list []kv
+	for cat, h := range chosen {
+		list = append(list, kv{cat, h})
 	}
 	sort.Slice(list, func(i, j int) bool {
-		return list[i].n > list[j].n || (list[i].n == list[j].n && list[i].cat < list[j].cat)
+		return list[i].h.n > list[j].h.n || (list[i].h.n == list[j].h.n && list[i].cat < list[j].cat)
 	})
 	var out []string
-	for i, h := range list {
+	for i, e := range list {
 		if i >= 30 {
 			break
 		}
 		to := "no budget"
-		if h.top != "" {
-			to = fmt.Sprintf("%q", h.top)
+		if e.h.top != "" {
+			to = fmt.Sprintf("%q", e.h.top)
 		}
-		out = append(out, fmt.Sprintf("%s → %s (%d of %d)", h.cat, to, h.topN, h.n))
+		out = append(out, fmt.Sprintf("%s → %s (%d of %d, %s)", e.cat, to, e.h.topN, e.h.n, e.h.inWindow))
 	}
 	return out
 }
@@ -617,6 +675,14 @@ func buildTier3Prompt(staged StagedRow, in tier3Inputs) string {
 	b.WriteString("\n\n")
 	b.WriteString(fmt.Sprintf("== FOLD TYPE: %s   MODE: %s ==\n", staged.Type, staged.Mode))
 	b.WriteString(fmt.Sprintf("(Firefly side will be: %s)\n\n", fireflyTxnTypeFor(staged.Type)))
+	if note := upiNote(staged.Narration); note != "" {
+		who := "what the payer typed in the UPI app"
+		if staged.Type == "OUTGOING" {
+			who = "what you typed in the UPI app — your own words"
+		}
+		b.WriteString("== THE NOTE ON THE PAYMENT (" + who + ", cut at ~18 characters) ==\n")
+		b.WriteString(fmt.Sprintf("  %q\n\n", note))
+	}
 
 	// Block 1c: TIME CONTEXT — when this happened in IST, and which
 	// meal/occasion bucket it falls in. Used by the LLM to infer
@@ -731,7 +797,7 @@ func buildTier3Prompt(staged StagedRow, in tier3Inputs) string {
 		writeAccountList(&b, in.budgets)
 	}
 	if len(in.budgetHabits) > 0 {
-		b.WriteString("\nYOUR BUDGETS BY CATEGORY (last 12 months: the budget you used most, of how many):\n")
+		b.WriteString("\nYOUR BUDGETS BY CATEGORY (the budget you use most for each, of how many — your recent practice first):\n")
 		for _, h := range in.budgetHabits {
 			b.WriteString("  " + h + "\n")
 		}

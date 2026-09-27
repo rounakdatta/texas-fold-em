@@ -269,6 +269,7 @@ func (c *Classifier) classifyOne(ctx context.Context, staged StagedRow, ex exclu
 		tier2Hint = &dCopy
 	}
 
+	var declined *Decision // the model's word on a card it couldn't settle
 	if c.llm != nil {
 		if d, ok, err := c.tierThreeLLM(ctx, staged, tier1Hint, tier2Hint, ex); err != nil {
 			// Tier-3 transport / parse / hallucination failure. If a
@@ -288,6 +289,8 @@ func (c *Classifier) classifyOne(ctx context.Context, staged StagedRow, ex exclu
 				"fold_uuid", staged.FoldUUID, "err", err)
 		} else if ok {
 			return d, nil
+		} else if d.Tier == TierHumanReview {
+			declined = &d
 		}
 	}
 
@@ -297,6 +300,9 @@ func (c *Classifier) classifyOne(ctx context.Context, staged StagedRow, ex exclu
 	}
 	if tier2Hint != nil {
 		return *tier2Hint, nil
+	}
+	if declined != nil {
+		return *declined, nil
 	}
 	return Decision{
 		Tier:       TierHumanReview,
