@@ -293,3 +293,38 @@ func TestDisplayName(t *testing.T) {
 		}
 	}
 }
+
+// Claude Opus 5.5 refuses any temperature ("`temperature` is deprecated for
+// this model", a 400). The client sends the same request without one, and
+// never sends one again — while a host that takes a temperature keeps it.
+func TestAHostThatRefusesATemperatureGetsNone(t *testing.T) {
+	var withTemp, without atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if _, has := body["temperature"]; has {
+			withTemp.Add(1)
+			http.Error(w, `{"error":{"message":"`+"`temperature`"+` is deprecated for this model.","type":"invalid_request_error"}}`, http.StatusBadRequest)
+			return
+		}
+		without.Add(1)
+		okReply(w, `{"ok":true}`, 1)
+	}))
+	t.Cleanup(srv.Close)
+	c := NewClient("k", "claude-opus-5-5", srv.URL, srv.Client())
+	for i := range 3 {
+		if out, err := c.GenerateJSON(context.Background(), "s", "u"); err != nil || !strings.Contains(out, "ok") {
+			t.Fatalf("call %d: %q, %v", i, out, err)
+		}
+	}
+	if withTemp.Load() != 1 || without.Load() != 3 {
+		t.Errorf("requests with a temperature: %d (want the first only), without: %d (want 3)", withTemp.Load(), without.Load())
+	}
+	if h := c.Health(); !h.Available || h.FailStreak != 0 {
+		t.Errorf("health after adapting = %+v; the refusal is not a failure of the engine", h)
+	}
+	// an evaluation's copy of the same model knows it already
+	if _, err := c.WithOverrides("", "").GenerateJSON(context.Background(), "s", "u"); err != nil || withTemp.Load() != 1 {
+		t.Errorf("the copy sent a temperature again (%d refusals), %v", withTemp.Load(), err)
+	}
+}
