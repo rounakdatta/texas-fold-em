@@ -337,3 +337,19 @@ button.acct { background: none; border: 0; padding: 0; font: inherit; cursor: po
   .side-sync { margin-top: 28px; }
   .side-sync .sync-lede { font-size: 13.5px; }
 }
+
+/* ---- suggested places: fold's guesses at a new payee, kept apart ------------- */
+.pick-places { display: flex; flex-direction: column; margin: 6px 0 2px; padding: 2px 0 6px; border-radius: 12px;
+  background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.pick-places.is-fresh { animation: places-in .18s ease-out; }
+.pick-places .pick-group { display: flex; align-items: center; gap: 6px; color: var(--accent-2); }
+.pick-places .pick-group svg { width: 13px; height: 13px; }
+.pick-place { align-items: center; }
+.pick-place > svg { flex: none; width: 18px; height: 18px; color: var(--accent-2); }
+.pick-place .place-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.pick-place .pick-main { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pick.pick-place .pick-hint { flex: none; text-align: left; overflow: hidden; text-overflow: ellipsis; }
+.pick-place:hover, .pick-place:focus-visible { background: color-mix(in srgb, var(--accent) 13%, transparent); }
+.places-looking { margin: 2px 12px 6px; font-size: 13.5px; color: var(--fg-3); }
+@keyframes places-in { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .pick-places { animation: none; } }

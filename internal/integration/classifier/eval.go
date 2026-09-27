@@ -333,7 +333,7 @@ func otherSide(fireflyType, foldType, src, dst string) string {
 }
 
 func (c *Classifier) runEval(ctx context.Context, rep *EvalReport, client *llm.Client, targets []evalTarget, opt EvalOptions) {
-	cc := &Classifier{db: c.db, log: c.log, threshold: c.threshold, ftsTopK: c.ftsTopK, llm: client}
+	cc := &Classifier{db: c.db, log: c.log, threshold: c.threshold, ftsTopK: c.ftsTopK, llm: client, placesSlots: make(chan struct{}, 1)}
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(min(max(opt.Concurrency, 2), 4))
 	for _, t := range targets {

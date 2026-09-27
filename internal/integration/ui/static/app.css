@@ -251,6 +251,21 @@ dialog.sheet::backdrop { background: var(--scrim); }
 @media (min-width: 720px) and (min-height: 600px) {
   dialog.sheet { margin: auto; border-radius: var(--radius-xl); }
 }
+/* A sheet you type into keeps still while its results change — rows arriving
+   (suggested places, a second or two after the typing pauses) never move
+   what is already under the finger. On a phone it takes its full height at
+   once; on a larger screen it hangs from a fixed top and grows downward. */
+dialog.sheet.sheet-search { height: min(86dvh, 720px); }
+dialog.sheet.sheet-search .sheet-body { flex: 1 1 auto; min-height: 0; }
+/* the sheet is tall on a phone: the sync line sits at its foot, by the thumb */
+dialog.sheet.sheet-search .sheet-body > .fields { flex: 1 0 auto; display: flex; flex-direction: column; }
+dialog.sheet.sheet-search .sheet-body > .fields > .sync-foot { margin-top: auto; }
+@media (min-width: 720px) and (min-height: 600px) {
+  /* a modal dialog is fixed to the whole viewport (top and bottom 0), where
+     height: auto stretches to fill it: unpin the bottom so it fits what it holds */
+  dialog.sheet.sheet-search { height: auto; max-height: min(78dvh, 720px); inset-block: 11vh auto; margin: 0 auto; }
+  dialog.sheet.sheet-search .sheet-body > .fields { flex: none; }
+}
 .sheet-head { display: flex; align-items: center; gap: 10px; padding: 14px 16px 6px 20px; }
 .sheet-head h2 { flex: 1; margin: 0; font-size: 19px; font-weight: 700; }
 .sheet-grab { width: 38px; height: 5px; border-radius: 3px; background: var(--line-2); margin: 8px auto 0; }

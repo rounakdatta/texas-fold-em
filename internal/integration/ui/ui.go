@@ -193,6 +193,7 @@ func (h *Handler) Mount(mux *http.ServeMux) {
 	mux.Handle("POST /api/sync-accounts", h.withAPI(h.handleAPISyncAccounts))
 	mux.Handle("POST /api/categories", h.withAPI(h.handleAPICreateCategory))
 	mux.Handle("GET /api/engine", h.withAPI(h.handleEngine))
+	mux.Handle("GET /api/rows/{fold_uuid}/places", h.withAPI(h.handlePlaces))
 	mux.Handle("GET /api/engine/eval", h.withAPI(h.handleEvalStatus))
 	mux.Handle("POST /api/engine/eval", h.withAPI(h.handleEvalStart))
 	if h.auth == AuthModeCookie {

@@ -94,6 +94,7 @@
     out: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17 17 7M9 7h8v8" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>',
     in: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 7 7 17M15 17H7V9" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>',
     close: '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>',
+    pin: '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 17.5s5.5-5.1 5.5-9.3A5.5 5.5 0 0 0 4.5 8.2c0 4.2 5.5 9.3 5.5 9.3z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><circle cx="10" cy="8.2" r="1.9" fill="currentColor"/></svg>',
     sync: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.4 13.5a7.5 7.5 0 0 1-13.1 3.6M4.6 10.5a7.5 7.5 0 0 1 13.1-3.6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M18.4 3.2v4.2h-4.2M5.6 20.8v-4.2h4.2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   };
   const icon = name => { const t = document.createElement('template'); t.innerHTML = SVG[name]; return t.content.firstChild; };
@@ -901,8 +902,11 @@
   // ---- sheets -------------------------------------------------------------------
   let sheetDone = null;
   let sheetRepaint = null; // the open picker's redraw, for when Firefly's accounts arrive
-  function openSheet(title, body, foot) {
+  // opts.search: a sheet you type into to search keeps still while its
+  // results change (see .sheet-search).
+  function openSheet(title, body, foot, opts = {}) {
     sheetRepaint = null;
+    sheet.classList.toggle('sheet-search', !!opts.search);
     // (replaceChildren would print a null as the text "null")
     sheet.replaceChildren(...[
       h('div', { class: 'sheet-grab', 'aria-hidden': 'true' }),
@@ -1149,7 +1153,7 @@
     const hint = switching
       ? (incoming ? 'Pick who paid you, or type a new name, and it becomes a deposit.' : 'Pick who was paid, or type a new name, and it becomes a withdrawal.')
       : (incoming ? 'Pick someone who has paid you before, or type a new name. Firefly creates it when this is sent.' : 'Pick one of your payees, or type a new name. Firefly creates it when this is sent.');
-    openSheet(incoming ? 'Paid by' : 'Paid to', h('div', { class: 'fields' }, input, h('p', { class: 'hint', text: hint }), list, syncFoot()));
+    openSheet(incoming ? 'Paid by' : 'Paid to', h('div', { class: 'fields' }, input, h('p', { class: 'hint', text: hint }), list, syncFoot()), null, { search: true });
     setTimeout(() => input.select(), 40); // typing replaces the current name
     let repaint = null;
     sheetRepaint = () => repaint && repaint();
@@ -1165,6 +1169,65 @@
     };
     const isAcct = (a, q) => a.name.toLowerCase() === q || a.short.toLowerCase() === q;
     const isOwn = v => accts.some(a => isAcct(a, (v || '').trim().toLowerCase()));
+
+    // Suggested places. As a new name is typed, a fast model offers what the
+    // place probably is — the name made proper, in your style, placed where
+    // you were that day — with a word on what it is. They sit below the real
+    // payees (nothing on screen moves when they arrive), are marked apart,
+    // and are only ever picked, never assumed. Asked for once typing pauses;
+    // a question overtaken by more typing is cancelled.
+    const places = { items: [], forQ: '', loading: false, since: 0, timer: 0, slow: 0, ctrl: null, seen: new Map() };
+    const wantPlaces = q => !incoming && q.length >= 3 && q !== current;
+    const words = s => (s || '').toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+    // an answer for fewer letters still fits while every typed word starts one of its words
+    const stillFits = (name, q) => { const w = words(name); return words(q).every(t => w.some(x => x.startsWith(t))); };
+    const askPlaces = q => {
+      if (places.ctrl) places.ctrl.abort();
+      const ctrl = new AbortController();
+      Object.assign(places, { ctrl, loading: true, since: Date.now() });
+      clearTimeout(places.slow);
+      places.slow = setTimeout(() => { if (places.ctrl === ctrl && places.loading) paint(); }, 500); // "looking" only when it is slow
+      fetch('/api/rows/' + c.uuid + '/places?q=' + encodeURIComponent(q), { headers: { Accept: 'application/json' }, signal: ctrl.signal })
+        .then(r => (r.ok ? r.json() : { suggestions: [] }))
+        .then(d => { places.seen.set(q, d.suggestions || []); if (places.ctrl !== ctrl) return; Object.assign(places, { items: d.suggestions || [], forQ: q, loading: false }); paint(); })
+        .catch(() => { if (places.ctrl === ctrl) { places.loading = false; paint(); } });
+    };
+    const schedulePlaces = () => {
+      clearTimeout(places.timer);
+      const q = input.value.trim();
+      if (!wantPlaces(q)) { if (places.ctrl) places.ctrl.abort(); places.ctrl = null; places.loading = false; return; }
+      if (q === places.forQ && !places.loading) return;
+      // answered before in this picker (typed on, then back): at once
+      if (places.seen.has(q)) {
+        if (places.ctrl) places.ctrl.abort();
+        Object.assign(places, { ctrl: null, items: places.seen.get(q), forQ: q, loading: false });
+        return paint();
+      }
+      // each question is a model call: ask once the typing pauses
+      places.timer = setTimeout(() => askPlaces(q), 420);
+    };
+    const placeButton = s => {
+      const hint = [s.existing ? 'your payee' : 'new payee', s.what].filter(Boolean).join(' · ');
+      return h('button', { type: 'button', class: 'pick pick-place', role: 'option', onclick: () => choose(s.name),
+        'aria-label': 'Suggested place: ' + s.name + (s.what ? ', ' + s.what : '') + (s.existing ? '. One of your payees.' : '. A new payee.') },
+        icon('pin'), h('span', { class: 'place-text' }, h('span', { class: 'pick-main', text: s.name }), h('span', { class: 'pick-hint', text: hint, title: hint })));
+    };
+    const paintPlaces = (q, onScreen) => {
+      if (!wantPlaces(q)) return;
+      const shown = new Set(onScreen.map(n => words(n).join(' ')));
+      const items = places.items.filter(s => !shown.has(words(s.name).join(' ')) && (places.forQ === q || stillFits(s.name, q)));
+      const looking = places.loading && Date.now() - places.since >= 450;
+      if (!items.length && !looking) return;
+      // fade in once per answer, not on every keystroke that redraws the list
+      const answer = places.forQ + '|' + items.map(s => s.name).join('|');
+      const fresh = answer !== places.drawn;
+      places.drawn = answer;
+      const box = h('div', { class: 'pick-places' + (fresh ? ' is-fresh' : ''), role: 'group', 'aria-label': 'Suggested places' },
+        h('div', { class: 'pick-group' }, icon('pin'), h('span', { text: 'Suggested places' })));
+      for (const s of items) box.append(placeButton(s));
+      if (!items.length) box.append(h('p', { class: 'places-looking', role: 'status', text: 'Looking up places…' }));
+      list.append(box);
+    };
     const paint = () => {
       const q = input.value.trim();
       const ql = q.toLowerCase();
@@ -1207,8 +1270,9 @@
       if (hits.length && exactOwn && ownHits.length) list.append(h('div', { class: 'pick-group', text: incoming ? 'Payers' : 'Payees' }));
       for (const p of hits) list.append(pickButton(p, newHint(p, ''), () => choose(p)));
       if (!exactOwn) transfers();
+      paintPlaces(q, hits.concat([q]));
     };
-    input.addEventListener('input', paint);
+    input.addEventListener('input', () => { paint(); schedulePlaces(); });
     input.addEventListener('keydown', e => { if (e.key === 'Enter') { const b = list.querySelector('.pick'); if (b) { e.preventDefault(); b.click(); } } });
     paint();
   }

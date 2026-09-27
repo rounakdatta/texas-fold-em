@@ -227,3 +227,24 @@ func TestEditor_SaysHowItWasSuggested(t *testing.T) {
 		}
 	}
 }
+
+// The picker asks as a name is typed, and always gets a list back — empty
+// when there is nothing to offer — never an error to show for a hint.
+func TestPlaces_ThePickerGetsSuggestionsOrNothing(t *testing.T) {
+	rh := newReviewHarness(t)
+	rh.withEngine(t, `{"suggestions":[{"name":"Chai Corner, Market Road","what":"tea stall","confidence":0.9},{"name":"Chai Point, Market Road","what":"tea chain","confidence":0.7}]}`)
+	rh.stage(t, "p", "needs_review", "Masala chai", 20000, "2026-09-20T09:00:00Z")
+	var res classifier.PlacesResult
+	if code := rh.getJSON(t, "/api/rows/p/places?q=chai", &res); code != http.StatusOK || len(res.Suggestions) != 2 {
+		t.Fatalf("places = %d %+v", code, res)
+	}
+	if s := res.Suggestions[0]; !s.Existing || s.Name != "Chai Corner, Market Road" || res.Suggestions[1].Existing {
+		t.Errorf("suggestions = %+v; want the known payee marked as one, the other as new", res.Suggestions)
+	}
+	for _, q := range []string{"ch", ""} {
+		var empty classifier.PlacesResult
+		if code := rh.getJSON(t, "/api/rows/p/places?q="+q, &empty); code != http.StatusOK || empty.Suggestions == nil || len(empty.Suggestions) != 0 {
+			t.Errorf("q=%q: %d %+v; want 200 and an empty list", q, code, empty)
+		}
+	}
+}

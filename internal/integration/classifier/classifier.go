@@ -178,6 +178,11 @@ type Classifier struct {
 	lastResuggest *ResuggestReport
 	// eval is the shadow evaluation, one at a time (eval.go).
 	eval evalState
+	// fast answers while someone types a payee (places.go); places caches
+	// its answers and placesSlots bounds how many run at once.
+	fast        *llm.Client
+	places      placesCache
+	placesSlots chan struct{}
 	// concurrency bounds how many rows classifyMatching processes in
 	// parallel. <=1 (the default) is strictly sequential. The Tier-3 LLM
 	// call dominates per-row latency and holds no DB connection, so a
@@ -199,10 +204,11 @@ func New(db *sql.DB, log *slog.Logger, threshold float64, ftsTopK int) *Classifi
 		ftsTopK = 10
 	}
 	return &Classifier{
-		db:        db,
-		log:       log.With("component", "classifier"),
-		threshold: threshold,
-		ftsTopK:   ftsTopK,
+		db:          db,
+		log:         log.With("component", "classifier"),
+		threshold:   threshold,
+		ftsTopK:     ftsTopK,
+		placesSlots: make(chan struct{}, 3),
 	}
 }
 
