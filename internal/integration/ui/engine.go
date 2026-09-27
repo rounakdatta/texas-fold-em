@@ -50,6 +50,30 @@ func (h *Handler) handlePlaces(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
+// handleComparePlaces: POST {"cases":[{"uuid","q"}], "models":[…]} — each
+// model's suggested places for each case, with how long it took. Writes
+// nothing; for choosing TEXAS_FOLDEM_LLM_FAST_MODEL on evidence.
+func (h *Handler) handleComparePlaces(w http.ResponseWriter, r *http.Request) {
+	if h.cls == nil {
+		h.apiError(w, http.StatusServiceUnavailable, "no classifier configured")
+		return
+	}
+	var body struct {
+		Cases  []classifier.PlacesCase `json:"cases"`
+		Models []string                `json:"models"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&body); err != nil {
+		h.apiError(w, http.StatusBadRequest, "bad request body")
+		return
+	}
+	runs, err := h.cls.ComparePlaces(r.Context(), body.Cases, body.Models)
+	if err != nil {
+		h.apiError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, runs)
+}
+
 func (h *Handler) handleEvalStatus(w http.ResponseWriter, r *http.Request) {
 	if h.cls == nil {
 		h.apiError(w, http.StatusServiceUnavailable, "no classifier configured")

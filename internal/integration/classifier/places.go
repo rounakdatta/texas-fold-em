@@ -70,7 +70,10 @@ func (c *Classifier) placesModel() *llm.Client {
 // card and text for a quarter of an hour; a request abandoned mid-way (the
 // person typed on) is cancelled with its context.
 func (c *Classifier) SuggestPlaces(ctx context.Context, uuid, typed string) (PlacesResult, error) {
-	model := c.placesModel()
+	return c.suggestPlacesWith(ctx, c.placesModel(), uuid, typed, true)
+}
+
+func (c *Classifier) suggestPlacesWith(ctx context.Context, model *llm.Client, uuid, typed string, cached bool) (PlacesResult, error) {
 	typed = strings.Join(strings.Fields(typed), " ")
 	if model == nil || len([]rune(typed)) < placesMinTyped {
 		return PlacesResult{}, ErrNoPlaces
@@ -79,7 +82,7 @@ func (c *Classifier) SuggestPlaces(ctx context.Context, uuid, typed string) (Pla
 		typed = string(r[:placesMaxTyped])
 	}
 	key := uuid + "|" + strings.ToLower(typed)
-	if res, ok := c.places.get(key); ok {
+	if res, ok := c.places.get(key); ok && cached {
 		return res, nil
 	}
 	if !model.Health().Available {
@@ -97,12 +100,14 @@ func (c *Classifier) SuggestPlaces(ctx context.Context, uuid, typed string) (Pla
 	prompt := c.placesPrompt(ctx, staged, typed, expense)
 
 	// At most a few at once: someone typing fast fires several, and the
-	// browser cancels the stale ones.
-	select {
-	case c.placesSlots <- struct{}{}:
-		defer func() { <-c.placesSlots }()
-	case <-ctx.Done():
-		return PlacesResult{}, ctx.Err()
+	// browser cancels the stale ones. (A comparison runs outside the limit.)
+	if cached {
+		select {
+		case c.placesSlots <- struct{}{}:
+			defer func() { <-c.placesSlots }()
+		case <-ctx.Done():
+			return PlacesResult{}, ctx.Err()
+		}
 	}
 	callCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
@@ -113,19 +118,78 @@ func (c *Classifier) SuggestPlaces(ctx context.Context, uuid, typed string) (Pla
 		}
 		return PlacesResult{}, err
 	}
-	res := PlacesResult{Suggestions: parsePlaces(out, expense)}
-	c.places.put(key, res)
+	res := PlacesResult{Suggestions: fitting(parsePlaces(out, expense), typed)}
+	if cached {
+		c.places.put(key, res)
+	}
 	return res, nil
 }
 
-const placesSystemPrompt = `You help someone name who they paid, in their personal-finance ledger, while they type the name. From what they have typed and what is known about the payment, suggest up to 3 names for the place or business they mean.
+// PlacesCase is one typed name on one card, for comparing models.
+type PlacesCase struct {
+	UUID  string `json:"uuid"`
+	Typed string `json:"q"`
+}
 
-- Complete and correct what they typed: the business's usual name, spelled and capitalised properly, in their style — "<Place>, <Area>" in their home city (the one YOUR AREAS are in), "<Place>, <Area>, <City>" anywhere else (see YOUR STYLE). No legal suffixes (Pvt Ltd, LLP), store codes, or payment-processor prefixes (TST*, SQ *, UEP*, PAYU*, …).
-- Add an area or a city only when something supports it: the typed text, the payment itself, where they were that day (YOUR OTHER PAYMENTS AROUND IT), a trip in progress, or a business you know has one location. Never invent a branch.
-- A payee they already have that is this place (YOUR PAYEES THAT SHARE A WORD) is the best suggestion: repeat its exact name.
-- Only real places: a business you know, or the typed name made proper. Fewer is better than wrong — when the typed text is all there is to go on, one suggestion, it made proper, is right.
-- "what" is 2–6 words on what the place is, from what you know or plainly from its name ("South Indian tiffin café", "chocolate shop, airport"); "" when you can't tell.
-- "confidence" is 0..1 that this is the place they mean.
+// PlacesRun is one model's answer to one case.
+type PlacesRun struct {
+	Model       string            `json:"model"`
+	UUID        string            `json:"uuid"`
+	Typed       string            `json:"q"`
+	DurationMS  int64             `json:"durationMs"`
+	Suggestions []PlaceSuggestion `json:"suggestions"`
+	Error       string            `json:"error,omitempty"`
+}
+
+// ComparePlaces asks each model the picker's question for each case — fresh,
+// bypassing the cache — and says how long each took and what it offered:
+// how the fast model is chosen on evidence. At most 12 calls, all at once.
+func (c *Classifier) ComparePlaces(ctx context.Context, cases []PlacesCase, models []string) ([]PlacesRun, error) {
+	if c.llm == nil {
+		return nil, errors.New("no model configured")
+	}
+	if len(cases) == 0 || len(models) == 0 || len(cases)*len(models) > 12 {
+		return nil, errors.New("1 to 12 runs: cases × models")
+	}
+	runs := make([]PlacesRun, 0, len(cases)*len(models))
+	for _, m := range models {
+		for _, cs := range cases {
+			runs = append(runs, PlacesRun{Model: m, UUID: cs.UUID, Typed: cs.Typed})
+		}
+	}
+	clients := map[string]*llm.Client{}
+	for _, m := range models {
+		cl := c.llm.WithOverrides(m, "none")
+		cl.SetMaxTokens(600)
+		clients[m] = cl
+	}
+	var wg sync.WaitGroup
+	for i := range runs {
+		wg.Add(1)
+		go func(r *PlacesRun) {
+			defer wg.Done()
+			start := time.Now()
+			res, err := c.suggestPlacesWith(ctx, clients[r.Model], r.UUID, r.Typed, false)
+			r.DurationMS = time.Since(start).Milliseconds()
+			r.Suggestions = res.Suggestions
+			if err != nil {
+				r.Error = err.Error()
+			}
+		}(&runs[i])
+	}
+	wg.Wait()
+	return runs, nil
+}
+
+const placesSystemPrompt = `You help someone name who they paid, in their personal-finance ledger, while they type the name. From what they have typed and what is known about the payment, suggest up to 3 names for the place or business they mean. The typed text itself is already offered to them as it is; offer only what improves on it.
+
+- Every suggestion is what they typed, completed or corrected — its words start the way the typed words do ("sn ref" can become "SN Refreshments", never "Shankar's"; "starbuks" can become "Starbucks"). Nothing else.
+- Complete a half-typed word only into a real place you know. When you don't know one, don't guess the rest of the word: tidy what they typed (capitals, spacing, an area it names) or suggest nothing.
+- Their style: "<Place>, <Area>" in their home city (the one YOUR AREAS are in), "<Place>, <Area>, <City>" anywhere else (see YOUR STYLE). The business's usual name — no legal suffixes (Pvt Ltd, LLP), store codes or payment-processor prefixes (TST*, SQ *, UEP*, PAYU*…).
+- The area: a place you know has one location takes its real area, wherever they were that day. A chain or an unknown place takes the area where they were (YOUR OTHER PAYMENTS AROUND IT, a trip in progress) only when that is where this payment was plainly made; otherwise leave the area out. Never invent a branch.
+- A payee they already have that is this place (YOUR PAYEES THAT SHARE A WORD) comes first, in its exact name.
+- "what" is 2–6 words on what the place is, only from what you know for certain or what its name plainly says ("egg tart bakery", "kaya toast café"); "" when unsure. A wrong "what" misleads more than none.
+- "confidence" is 0..1 that this is the place they mean. Fewer and right beats more and wrong.
 
 Reply with the JSON object only: {"suggestions":[{"name":"…","what":"…","confidence":0.8}]}`
 
@@ -318,6 +382,78 @@ func parsePlaces(out string, expense []AccountRef) []PlaceSuggestion {
 		}
 	}
 	return res
+}
+
+// fitting keeps the suggestions that are what was typed, completed or
+// corrected: every typed word starts one of the name's words, allowing a
+// slip or two in a longer word ("starbuks" for "Starbucks"). A model that
+// answers "sn ref" with "Shankar's" has stopped completing and started
+// inventing — that answer never reaches the picker.
+func fitting(list []PlaceSuggestion, typed string) []PlaceSuggestion {
+	out := []PlaceSuggestion{}
+	tw := nameWords(typed)
+	for _, s := range list {
+		nw := nameWords(s.Name)
+		ok := len(tw) > 0
+		for _, t := range tw {
+			if !startsSome(t, nw) {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// startsSome: t begins one of the words, give or take a slip — one in a word
+// of four letters or more, two from seven.
+func startsSome(t string, words []string) bool {
+	slips := 0
+	switch {
+	case len(t) >= 7:
+		slips = 2
+	case len(t) >= 4:
+		slips = 1
+	}
+	for _, w := range words {
+		if strings.HasPrefix(w, t) {
+			return true
+		}
+		if slips == 0 {
+			continue
+		}
+		// against the word's start, a letter shorter to two longer
+		for n := len(t) - 1; n <= len(t)+2; n++ {
+			if n > 0 && n <= len(w) && editDistance(t, w[:n]) <= slips {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func editDistance(a, b string) int {
+	ra, rb := []rune(a), []rune(b)
+	prev := make([]int, len(rb)+1)
+	cur := make([]int, len(rb)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(ra); i++ {
+		cur[0] = i
+		for j := 1; j <= len(rb); j++ {
+			cost := 1
+			if ra[i-1] == rb[j-1] {
+				cost = 0
+			}
+			cur[j] = min(prev[j]+1, cur[j-1]+1, prev[j-1]+cost)
+		}
+		prev, cur = cur, prev
+	}
+	return prev[len(rb)]
 }
 
 // placeKey compares names the way a person would: case, spacing and
