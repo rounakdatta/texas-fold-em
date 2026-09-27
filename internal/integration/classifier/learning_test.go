@@ -89,6 +89,9 @@ func TestHandleTokensFindWhoWasPaid(t *testing.T) {
 		"UPI/Q12345678@ybl/UPI/YES BANK":                                    {"q12345678@ybl"},
 		"CARD/3a4b5c6d7e8f9a0b/TEA TRAIL CAFE/Rs./450.00/OUTGOING/20-09-26": {"/TEA TRAIL CAFE/"},
 		"NEFT/ACME PAYROLL/SALARY SEP":                                      nil,
+		// the note names a kind of payment made again and again
+		"UPI-RIDE DRIVER-9000000002@YBL-HDFC0000123-612345678903-RAPIDO":    {"9000000002@ybl", "-RAPIDO"},
+		"UPI-ASHA MENON-ASHA.M-1@OKICICI-ICIC0001234-612345678901-CAB":      {"asha.m-1@okicici"},
 		"UPI/aa@okx/UPI/bb@okx/UPI/cc@okx/UPI/dd@okx":                       {"aa@okx", "bb@okx", "cc@okx"},
 		"CARD/5d2c4b3a29181706/shop.123@okbank/Rs./64.00/OUTGOING/14-09-26": {"shop.123@okbank"},
 		"CARD/7c1e0a5b9d3f2e11//USD/42.50/INCOMING/is credited back to you": nil,
@@ -171,7 +174,7 @@ func TestHandleHistoryNamesWhoTheLedgerSaysItIs(t *testing.T) {
 	}
 	h := hits[0]
 	// the payee's budget habit rides along — here, none, stated as a fact
-	if h.count != 2 || len(h.payees) != 1 || !strings.HasPrefix(h.payees[0], "Ravi Kumar · Household help · no budget (×2)") {
+	if h.count != 2 || len(h.payees) != 1 || h.payees[0] != "Ravi Kumar · Household help · no budget (×2, ₹3,000)" {
 		t.Errorf("handle history = %+v; want Ravi Kumar ×2 (the excluded row not counted)", h)
 	}
 	for _, title := range h.titles {
@@ -445,5 +448,41 @@ func TestCorrectionsElsewhereAreOnlyStyle(t *testing.T) {
 	}
 	if !strings.Contains(elsewhere, "Gas cylinder refill") || !strings.Contains(elsewhere, "never take a payee") {
 		t.Errorf("the elsewhere block:\n%s", elsewhere)
+	}
+}
+
+// Every ride paid to a Rapido driver ends with the note "RAPIDO", whoever
+// the driver is: the note finds the owner's past rides, and the amounts say
+// which kind of ride this one was.
+func TestTheNoteFindsPastPaymentsOfTheSameKind(t *testing.T) {
+	db := learnDB(t)
+	mustExec(t, db, `INSERT INTO firefly_accounts (firefly_id, name, type, active, raw_payload) VALUES
+		(50, 'Rapido bike driver', 'expense', 1, '{}'), (51, 'Rapido auto driver', 'expense', 1, '{}')`)
+	d := time.Date(2026, 8, 1, 4, 0, 0, 0, time.UTC)
+	for i, amt := range []int64{3800, 4500, 5200} {
+		fireflyRow(t, db, int64(700+i), d.AddDate(0, 0, i), 50, "Rapido bike driver", "Subscriptions", "Rapido ride", "UPI-SOME DRIVER-900000000"+string(rune('1'+i))+"@YBL-HDFC0000123-61234567890"+string(rune('1'+i))+"-RAPIDO", "", amt)
+	}
+	for i, amt := range []int64{14000, 16500} {
+		fireflyRow(t, db, int64(710+i), d.AddDate(0, 0, i), 51, "Rapido auto driver", "Subscriptions", "Rapido ride", "UPI-OTHER DRIVER-80000000"+string(rune('1'+i))+"@SLC-SBIN0000123-61234567899"+string(rune('1'+i))+"-RAPIDO", "", amt)
+	}
+	c := New(db, slog.Default(), DefaultConfidenceThreshold, 10)
+	hits := c.handleHistory(context.Background(), StagedRow{Narration: "UPI-NEW DRIVER-7000000001@AXL-UTIB0000123-612345678999-RAPIDO"}, exclusion{})
+	var note *handleHit
+	for i := range hits {
+		if hits[i].token == "-RAPIDO" {
+			note = &hits[i]
+		}
+	}
+	if note == nil || note.count != 5 {
+		t.Fatalf("hits = %+v; want the five past rides found by the note", hits)
+	}
+	want := []string{"Rapido bike driver · Subscriptions · no budget (×3, ₹38–₹52)", "Rapido auto driver · Subscriptions · no budget (×2, ₹140–₹165)"}
+	if strings.Join(note.payees, " | ") != strings.Join(want, " | ") {
+		t.Errorf("payees = %q, want %q", note.payees, want)
+	}
+	var b strings.Builder
+	learningContext{handles: hits}.render(&b)
+	if !strings.Contains(b.String(), `the payment note "RAPIDO" — 5 firefly rows`) {
+		t.Errorf("render:\n%s", b.String())
 	}
 }
