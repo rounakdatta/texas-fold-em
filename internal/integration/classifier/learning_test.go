@@ -170,7 +170,8 @@ func TestHandleHistoryNamesWhoTheLedgerSaysItIs(t *testing.T) {
 		t.Fatalf("hits = %+v; want one handle", hits)
 	}
 	h := hits[0]
-	if h.count != 2 || len(h.payees) != 1 || !strings.HasPrefix(h.payees[0], "Ravi Kumar · Household help (×2)") {
+	// the payee's budget habit rides along — here, none, stated as a fact
+	if h.count != 2 || len(h.payees) != 1 || !strings.HasPrefix(h.payees[0], "Ravi Kumar · Household help · no budget (×2)") {
 		t.Errorf("handle history = %+v; want Ravi Kumar ×2 (the excluded row not counted)", h)
 	}
 	for _, title := range h.titles {

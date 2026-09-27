@@ -266,7 +266,7 @@ func (c *Classifier) handleHistory(ctx context.Context, staged StagedRow, ex exc
 		tagCount := map[string]int{}
 		rows, err := c.db.QueryContext(ctx, `
 			SELECT txn_type, COALESCE(destination_account_name, ''), COALESCE(source_account_name, ''),
-			       COALESCE(category_name, ''), COALESCE(description, ''), COALESCE(tags_json, ''), date
+			       COALESCE(category_name, ''), COALESCE(budget_name, ''), COALESCE(description, ''), COALESCE(tags_json, ''), date
 			FROM firefly_txns
 			WHERE notes LIKE ? AND firefly_id <> ?
 			ORDER BY date DESC LIMIT 40`, "%"+tok+"%", ex.fireflyID)
@@ -274,8 +274,8 @@ func (c *Classifier) handleHistory(ctx context.Context, staged StagedRow, ex exc
 			continue
 		}
 		for rows.Next() {
-			var typ, dst, src, cat, desc, tagsJS, date string
-			if rows.Scan(&typ, &dst, &src, &cat, &desc, &tagsJS, &date) != nil {
+			var typ, dst, src, cat, bud, desc, tagsJS, date string
+			if rows.Scan(&typ, &dst, &src, &cat, &bud, &desc, &tagsJS, &date) != nil {
 				continue
 			}
 			h.inLedger++
@@ -290,6 +290,11 @@ func (c *Classifier) handleHistory(ctx context.Context, staged StagedRow, ex exc
 			key := payee
 			if cat != "" {
 				key += " · " + cat
+			}
+			if bud != "" {
+				key += " · budget " + bud
+			} else {
+				key += " · no budget"
 			}
 			if payees[key] == nil {
 				payees[key] = &agg{}
@@ -785,7 +790,7 @@ func (lc learningContext) summary() *LearnedCounts {
 // was unreachable) is one the re-suggest loop may revisit. Bump it when the
 // prompt or context change enough that every waiting suggestion deserves
 // another look.
-const EngineVersion = 4
+const EngineVersion = 5
 
 // engineVersionFor is the version to record for a decision: the current one
 // when the model made it — or looked and declined, or it is a deterministic
