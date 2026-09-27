@@ -110,6 +110,13 @@ type Client struct {
 	failStreak  int
 	lastOK      time.Time
 	lastFailure string
+
+	// noTemperature: the host refused a temperature for this model (Claude
+	// Opus 5.5 does: "`temperature` is deprecated for this model"), so none
+	// is sent from then on. Learned from the first refusal, not configured:
+	// the same client works against a host that wants one and one that
+	// rejects it.
+	noTemperature bool
 }
 
 // ErrUnavailable is returned, without a request, while the client rests.
@@ -257,6 +264,9 @@ func (c *Client) WithOverrides(model, reasoningEffort string) *Client {
 	}
 	n.log, n.backoffFunc = c.log, c.backoffFunc
 	n.timeout, n.maxTokens, n.reasoningEffort = c.timeout, c.maxTokens, c.reasoningEffort
+	c.mu.Lock()
+	n.noTemperature = c.noTemperature && n.model == c.model // what this model refuses, if it's the same model
+	c.mu.Unlock()
 	if e := strings.TrimSpace(reasoningEffort); e != "" {
 		n.reasoningEffort = e
 	}
@@ -327,9 +337,12 @@ func (c *Client) GenerateJSON(ctx context.Context, systemPrompt, userPrompt stri
 		MaxTokens:      maxTokens,
 		ResponseFormat: &responseFormat{Type: "json_object"},
 	}
+	c.mu.Lock()
+	noTemp := c.noTemperature
+	c.mu.Unlock()
 	if e := c.reasoningEffort; e != "" && e != "none" {
 		body.ReasoningEffort = e
-	} else {
+	} else if !noTemp {
 		zero := 0.0
 		body.Temperature = &zero // deterministic when not reasoning
 	}
@@ -366,6 +379,22 @@ func (c *Client) GenerateJSON(ctx context.Context, systemPrompt, userPrompt stri
 			return out, nil
 		}
 		lastErr = err
+		// A host that refuses the temperature gets the same request
+		// without one, now and from now on.
+		if body.Temperature != nil && refusesTemperature(err) {
+			c.mu.Lock()
+			c.noTemperature = true
+			c.mu.Unlock()
+			if c.log != nil {
+				c.log.Warn("llm: the model refuses a temperature; sending none from now on", "model", c.model)
+			}
+			body.Temperature = nil
+			if buf, err = json.Marshal(body); err != nil {
+				return "", fmt.Errorf("llm: marshal request: %w", err)
+			}
+			attempt-- // not a retry of a transient failure: the first real try
+			continue
+		}
 		if !isRetryable(err) {
 			return "", err
 		}
@@ -491,6 +520,12 @@ type transportError struct{ err error }
 
 func (e *transportError) Error() string { return "llm transport: " + e.err.Error() }
 func (e *transportError) Unwrap() error { return e.err }
+
+// refusesTemperature: a 400 that complains about the temperature.
+func refusesTemperature(err error) bool {
+	var apiErr *Error
+	return errors.As(err, &apiErr) && apiErr.Status == http.StatusBadRequest && strings.Contains(strings.ToLower(apiErr.Body), "temperature")
+}
 
 // isRetryable reports whether err is worth a second try. Network
 // errors and a small set of HTTP status codes qualify; everything
