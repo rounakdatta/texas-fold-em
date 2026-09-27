@@ -203,10 +203,42 @@ func TestNeighboursAreFoundAroundTheTransaction(t *testing.T) {
 	ns := c.neighbours(context.Background(), staged, exclusion{foldUUID: "graded"})
 	var got []string
 	for _, n := range ns {
-		got = append(got, n.title+"["+n.state+"]")
+		if n.owner {
+			got = append(got, n.title+"["+n.state+"]")
+		} else {
+			got = append(got, "unreviewed "+n.bank+"["+n.state+"]")
+		}
 	}
-	if strings.Join(got, ", ") != "Ride to Tea Trail[sent], Filter coffee[held]" {
+	// the coffee is held, but nobody has reviewed its title: an older
+	// engine's "Filter coffee" is not the owner's word
+	if strings.Join(got, ", ") != "Ride to Tea Trail[sent], unreviewed UPI/teatrail@okaxis[held]" {
 		t.Errorf("neighbours = %v; want the ride before and the held coffee after, oldest first — not the skipped, the far or the graded row", got)
+	}
+}
+
+// A neighbour sent to firefly reads as firefly has it — the tags an older
+// engine suggested were never sent (push sends confirmed tags only) — and a
+// waiting card reads as the owner confirmed it.
+func TestNeighboursReadAsTheOwnerDecided(t *testing.T) {
+	db := learnDB(t)
+	c := New(db, slog.Default(), DefaultConfidenceThreshold, 10)
+	at := time.Date(2026, 9, 20, 7, 0, 0, 0, time.UTC)
+	stagedAt(t, db, "sent", "OUTGOING", "UPI/ridely@ok", "ridely", 18000, at.Add(-time.Hour), "pushed")
+	propose(t, db, "sent", 42, 7, "Ride (guess)", `["old-engine-tag"]`)
+	fireflyRow(t, db, 880, at.Add(-time.Hour), 42, "Streamly", "Subscriptions", "Ride to the office", "", "", 18000)
+	mustExec(t, db, `UPDATE firefly_txns SET external_id = 'sent' WHERE firefly_id = 880`)
+	stagedAt(t, db, "mine", "OUTGOING", "UPI/teatrail@okaxis", "tea trail cafe", 26000, at.Add(time.Hour), "needs_review")
+	propose(t, db, "mine", 41, 6, "Coffee (guess)", `["old-engine-tag"]`)
+	mustExec(t, db, `UPDATE staged_fold_txns SET confirmed_description = 'Filter coffee with Ravi' WHERE fold_uuid = 'mine'`)
+
+	ns := c.neighbours(context.Background(), StagedRow{FoldUUID: "x", TxnTimestamp: at.Format(time.RFC3339)}, exclusion{})
+	if len(ns) != 2 || ns[0].title != "Ride to the office" || ns[1].title != "Filter coffee with Ravi" {
+		t.Fatalf("neighbours = %+v; want firefly's title for the sent one, the confirmed one for the waiting one", ns)
+	}
+	for _, n := range ns {
+		if len(n.tags) != 0 {
+			t.Errorf("%q carries %v: tags nobody chose, never sent", n.title, n.tags)
+		}
 	}
 }
 
@@ -233,17 +265,22 @@ func TestAForeignChargeSeesItsTrip(t *testing.T) {
 	c := New(db, slog.Default(), DefaultConfidenceThreshold, 10)
 	at := time.Date(2026, 9, 12, 5, 0, 0, 0, time.UTC)
 	for i, u := range []string{"t1", "t2", "t3"} {
-		stagedAt(t, db, u, "OUTGOING", "CARD/x/SHOP/SGD/5.00/OUTGOING", "shop", 30000, at.Add(time.Duration(i-1)*48*time.Hour), "pushed")
-		propose(t, db, u, 41, 6, "Lunch", `["far-trip-2026"]`)
-		mustExec(t, db, `UPDATE staged_fold_txns SET foreign_currency = 'SGD', foreign_amount_paise = 500 WHERE fold_uuid = ?`, u)
+		stagedAt(t, db, u, "OUTGOING", "CARD/x/SHOP/SGD/5.00/OUTGOING", "shop", 30000, at.Add(time.Duration(i-1)*48*time.Hour), "needs_review")
+		propose(t, db, u, 41, 6, "Lunch", "")
+		// the owner tagged the trip themselves
+		mustExec(t, db, `UPDATE staged_fold_txns SET foreign_currency = 'SGD', foreign_amount_paise = 500, confirmed_tags_json = '["far-trip-2026"]' WHERE fold_uuid = ?`, u)
 	}
+	// an unreviewed card whose tag an older engine guessed doesn't count
+	stagedAt(t, db, "guess", "OUTGOING", "CARD/x/KIOSK/SGD/3.00/OUTGOING", "kiosk", 18000, at.Add(-24*time.Hour), "needs_review")
+	propose(t, db, "guess", 41, 6, "Snack", `["guessed-tag"]`)
+	mustExec(t, db, `UPDATE staged_fold_txns SET foreign_currency = 'SGD', foreign_amount_paise = 300 WHERE fold_uuid = 'guess'`)
 	stagedAt(t, db, "home", "OUTGOING", "UPI/x", "x", 100, at, "pushed") // not in SGD
 	stagedAt(t, db, "new", "OUTGOING", "CARD/x/HAWKER/SGD/4.50/OUTGOING", "hawker", 27000, at.Add(time.Hour), "needs_review")
 	mustExec(t, db, `UPDATE staged_fold_txns SET foreign_currency = 'SGD', foreign_amount_paise = 450 WHERE fold_uuid = 'new'`)
 
 	trip := c.tripContext(context.Background(), StagedRow{FoldUUID: "new", TxnTimestamp: at.Add(time.Hour).Format(time.RFC3339), RawPayload: `{}`}, exclusion{})
-	if !strings.Contains(trip, "3 other SGD charges") || !strings.Contains(trip, "far-trip-2026 ×3") {
-		t.Errorf("trip context = %q; want the three SGD charges and their tag", trip)
+	if !strings.Contains(trip, "4 other SGD charges") || !strings.Contains(trip, "far-trip-2026 ×3") || strings.Contains(trip, "guessed-tag") {
+		t.Errorf("trip context = %q; want the four SGD charges and the owner's tag — not the guessed one", trip)
 	}
 	if home := c.tripContext(context.Background(), StagedRow{FoldUUID: "home", TxnTimestamp: at.Format(time.RFC3339), RawPayload: `{}`}, exclusion{}); home != "" {
 		t.Errorf("a rupee charge got trip context %q", home)

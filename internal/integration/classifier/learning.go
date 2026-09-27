@@ -36,9 +36,13 @@ import (
 
 // exclusion hides one transaction from every lookup (the shadow
 // evaluation's target, so the engine never sees the answer it is graded on).
+// accountID is its payee's account when nothing else in the ledger uses it:
+// an account created by sending this very row, which the engine could not
+// have known when the row arrived.
 type exclusion struct {
 	foldUUID  string
 	fireflyID int64
+	accountID int64
 }
 
 // learnedExample is one past decision shown to the model.
@@ -67,7 +71,12 @@ type handleHit struct {
 	inDecided int // fold rows already decided
 }
 
-// neighbour is another transaction near this one in time.
+// neighbour is another transaction near this one in time. Its title, payee,
+// category and tags are shown only when they are the owner's (owner): what
+// firefly holds for a sent row, what they confirmed on a waiting one. An
+// unreviewed card's values are an older engine's guesses — shown as fact,
+// they taught the model the old engine's habits — so it shows as the bank
+// wrote it instead.
 type neighbour struct {
 	at       time.Time
 	dir      string
@@ -77,8 +86,38 @@ type neighbour struct {
 	payee    string
 	category string
 	tags     []string
-	state    string // "sent", "waiting", "held", "in firefly"
+	state    string // "sent", "waiting", "held"
+	owner    bool
+	bank     string // the bank's words, for an unreviewed one
 }
+
+// ownerValues are a staged row's values as the owner decided them: firefly's
+// row for a sent one, the confirmed fields (and only confirmed tags — push
+// sends no others) for a waiting one. ok is false when nobody has decided
+// anything on it yet.
+func (c *Classifier) ownerValues(ctx context.Context, uuid, status string, snap feedback.ReviewSnapshot) (feedback.ReviewValues, bool) {
+	if status == "pushed" {
+		if _, _, v, ok := fireflyTruth(ctx, c.db, uuid); ok {
+			return v, true
+		}
+	}
+	var touched int
+	var confirmedTags sql.NullString
+	_ = c.db.QueryRowContext(ctx, `SELECT `+humanTouchedSQL+`, s.confirmed_tags_json FROM staged_fold_txns s WHERE s.fold_uuid = ?`, uuid).Scan(&touched, &confirmedTags)
+	if status != "pushed" && touched == 0 {
+		return feedback.ReviewValues{}, false
+	}
+	v := snap.Effective
+	v.Tags = parseTags(confirmedTags.String)
+	return v, true
+}
+
+// humanTouchedSQL: a person chose something on the row (alias s).
+const humanTouchedSQL = `(s.confirmed_destination_account_id IS NOT NULL OR s.confirmed_destination_account_name IS NOT NULL
+	OR s.confirmed_source_account_id IS NOT NULL OR s.confirmed_source_account_name IS NOT NULL
+	OR s.confirmed_category_id IS NOT NULL OR s.confirmed_budget_id IS NOT NULL
+	OR s.confirmed_description IS NOT NULL OR s.confirmed_tags_json IS NOT NULL
+	OR s.confirmed_txn_type IS NOT NULL OR s.confirmed_refund_of IS NOT NULL)`
 
 // learningContext bundles the four pieces for the prompt.
 type learningContext struct {
@@ -358,8 +397,12 @@ func (c *Classifier) neighbours(ctx context.Context, staged StagedRow, ex exclus
 		if err != nil {
 			continue
 		}
-		n := neighbour{at: p.at, dir: snap.Direction, amount: snap.AmountPaise, foreign: snap.ForeignLabel,
-			title: snap.Effective.Title, payee: snap.Effective.Payee, category: snap.Effective.Category, tags: snap.Effective.Tags}
+		n := neighbour{at: p.at, dir: snap.Direction, amount: snap.AmountPaise, foreign: snap.ForeignLabel}
+		if v, mine := c.ownerValues(ctx, p.uuid, p.status, snap); mine {
+			n.owner, n.title, n.payee, n.category, n.tags = true, v.Title, v.Payee, v.Category, v.Tags
+		} else {
+			n.bank = shortNarration(snap.Narration)
+		}
 		switch {
 		case p.hold != "":
 			n.state = "held"
@@ -368,7 +411,7 @@ func (c *Classifier) neighbours(ctx context.Context, staged StagedRow, ex exclus
 		default:
 			n.state = "waiting"
 		}
-		if n.title == "" {
+		if n.owner && n.title == "" {
 			n.title = shortNarration(snap.Narration)
 		}
 		out = append(out, n)
@@ -395,19 +438,21 @@ func (c *Classifier) tripContext(ctx context.Context, staged StagedRow, ex exclu
 	}
 	fromDay, toDay := dayRange(at.Add(-tripWindow), at.Add(tripWindow))
 	rows, err := c.db.QueryContext(ctx, `
-		SELECT s.fold_uuid, `+effWhenSQL+` FROM staged_fold_txns s
+		SELECT s.fold_uuid, `+effWhenSQL+`, s.status FROM staged_fold_txns s
 		WHERE UPPER(s.foreign_currency) = ? AND s.fold_uuid <> ? AND s.fold_uuid <> ? AND s.status <> 'skipped'
 		  AND substr(`+effWhenSQL+`, 1, 10) BETWEEN ? AND ?`, cur, staged.FoldUUID, ex.foldUUID, fromDay, toDay)
 	if err != nil {
 		return ""
 	}
 	var uuids []string
+	statusOf := map[string]string{}
 	var first, last time.Time
 	for rows.Next() {
-		var u, ts string
-		if rows.Scan(&u, &ts) != nil {
+		var u, ts, st string
+		if rows.Scan(&u, &ts, &st) != nil {
 			continue
 		}
+		statusOf[u] = st
 		t, ok := parseTxnTime(ts)
 		if !ok || t.Sub(at).Abs() > tripWindow {
 			continue
@@ -424,21 +469,23 @@ func (c *Classifier) tripContext(ctx context.Context, staged StagedRow, ex exclu
 	if len(uuids) < 2 {
 		return ""
 	}
+	// Tags and categories as the owner decided them — an older engine's
+	// guesses on unreviewed cards would otherwise read as the trip's tag.
 	tags, cats := map[string]int{}, map[string]int{}
-	decided := 0
 	for _, u := range uuids {
 		snap, err := feedback.SnapshotReview(ctx, c.db, u)
 		if err != nil {
 			continue
 		}
-		for _, t := range snap.Effective.Tags {
+		v, mine := c.ownerValues(ctx, u, statusOf[u], snap)
+		if !mine {
+			continue
+		}
+		for _, t := range v.Tags {
 			tags[t]++
 		}
-		if snap.Effective.Category != "" && snap.Effective.Category != feedback.NoneValue {
-			cats[snap.Effective.Category]++
-		}
-		if !snap.Effective.Equal(snap.Suggested) {
-			decided++
+		if v.Category != "" && v.Category != feedback.NoneValue {
+			cats[v.Category]++
 		}
 	}
 	ist := time.FixedZone("IST", 5*3600+1800)
@@ -625,7 +672,12 @@ func (lc learningContext) render(b *strings.Builder) {
 			if n.dir == "INCOMING" {
 				sign = "+"
 			}
-			line := fmt.Sprintf("  %s  %s%s  %q", n.at.In(ist).Format("Mon 2 Jan 15:04"), sign, money(n.amount, n.foreign), n.title)
+			line := fmt.Sprintf("  %s  %s%s  ", n.at.In(ist).Format("Mon 2 Jan 15:04"), sign, money(n.amount, n.foreign))
+			if !n.owner {
+				b.WriteString(line + "not reviewed yet: " + n.bank + "  [" + n.state + "]\n")
+				continue
+			}
+			line += fmt.Sprintf("%q", n.title)
 			if n.payee != "" {
 				line += " → " + n.payee
 			}
@@ -637,7 +689,7 @@ func (lc learningContext) render(b *strings.Builder) {
 			}
 			b.WriteString(line + "  [" + n.state + "]\n")
 		}
-		b.WriteString("(Use these for context — a ride to the place, the meal before, a split bill, a trip — never copy a neighbour's title onto an unrelated charge.)\n\n")
+		b.WriteString("(Titles, payees and tags here are yours — sent or confirmed; an unreviewed one shows only what the bank said. Use them for context — a ride to the place, the meal before, a split bill, a trip — never copy a neighbour's title onto an unrelated charge.)\n\n")
 	}
 	if lc.trip != "" {
 		b.WriteString("== TRIP CONTEXT ==\n  " + lc.trip + "\n\n")
@@ -733,7 +785,7 @@ func (lc learningContext) summary() *LearnedCounts {
 // was unreachable) is one the re-suggest loop may revisit. Bump it when the
 // prompt or context change enough that every waiting suggestion deserves
 // another look.
-const EngineVersion = 2
+const EngineVersion = 3
 
 // engineVersionFor is the version to record for a decision: the current one
 // when the model made it (or a deterministic refund, which the model would

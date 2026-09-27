@@ -74,8 +74,10 @@ func waitEval(t *testing.T, c *Classifier) EvalReport {
 // send, not a lookup learned from nothing but that row.
 func TestTheEvaluationNeverShowsTheAnswer(t *testing.T) {
 	db := evalWorld(t)
-	fake := newCapturingLLM(t, `{"reasoning":"a dinner","txn_type":"withdrawal","destination_account_id":44,"category_id":6,
-		"tags":["celebration"],"description_suggestion":"___ dinner at Olive Room","unknowns":["occasion"],"confidence":0.8}`)
+	// Olive Room is a first-time payee here (its account exists only because
+	// this row was sent), so the engine has to name it, as it did then.
+	fake := newCapturingLLM(t, `{"reasoning":"a dinner","txn_type":"withdrawal","destination_account_id":null,"destination_name_suggestion":"Olive Room",
+		"category_id":6,"tags":["celebration"],"description_suggestion":"___ dinner at Olive Room","unknowns":["occasion"],"confidence":0.8}`)
 	c := New(db, slog.Default(), DefaultConfidenceThreshold, 10)
 	c.SetLLM(llm.NewClient("k", "claude-opus-5-5", fake.URL, fake.Client()))
 
@@ -101,7 +103,7 @@ func TestTheEvaluationNeverShowsTheAnswer(t *testing.T) {
 		t.Error("the graded row's own firefly journal was a historical example")
 	}
 	row := rep.Rows[0]
-	for field, want := range map[string]bool{"type": true, "payee": true, "category": true, "tags": true, "title": false, "titleFits": true} {
+	for field, want := range map[string]bool{"type": true, "payee": false, "payeeFits": true, "category": true, "tags": true, "title": false, "titleFits": true} {
 		if row.Right[field] != want {
 			t.Errorf("%s graded %v, want %v (got %+v, truth %+v)", field, row.Right[field], want, row.Got, row.Truth)
 		}
@@ -110,8 +112,11 @@ func TestTheEvaluationNeverShowsTheAnswer(t *testing.T) {
 		t.Errorf("title fit %q unknowns %v", row.TitleFit, row.Unknowns)
 	}
 	// the old suggestion, same row, is the baseline: it had the wrong payee
-	if rep.Baseline["payee"].Right != 0 || rep.Baseline["payee"].Total != 1 || rep.Engine["payee"].Rate != 1 {
-		t.Errorf("payee: engine %+v, baseline %+v", rep.Engine["payee"], rep.Baseline["payee"])
+	if rep.Baseline["payeeFits"].Right != 0 || rep.Baseline["payeeFits"].Total != 1 || rep.Engine["payeeFits"].Rate != 1 {
+		t.Errorf("payee: engine %+v, baseline %+v", rep.Engine["payeeFits"], rep.Baseline["payeeFits"])
+	}
+	if !row.NewPayee || strings.Contains(p, `"Olive Room, Indiranagar"`) {
+		t.Error("the payee account created by sending this row was shown to the engine")
 	}
 	if rep.Model != "claude-opus-5-5" || rep.Reasoning != "none" {
 		t.Errorf("report engine = %q/%q", rep.Model, rep.Reasoning)
@@ -211,5 +216,45 @@ func TestTheEvaluationHidesTheAnswerFromStyleSamples(t *testing.T) {
 	}
 	if strings.Contains(p, "Anniversary") {
 		t.Error("the graded row's own title was a style sample")
+	}
+}
+
+// A payee created by sending the graded row didn't exist when the row
+// arrived: the evaluation hides it, and grades the name the engine gives
+// the new payee instead.
+func TestAFirstTimePayeeIsHiddenFromTheEvaluation(t *testing.T) {
+	db := evalWorld(t) // Olive Room: this row's payee alone
+	fake := newCapturingLLM(t, `{"reasoning":"a dinner","txn_type":"withdrawal","destination_account_id":null,
+		"destination_name_suggestion":"Olive Room","category_id":6,"confidence":0.8}`)
+	c := New(db, slog.Default(), DefaultConfidenceThreshold, 10)
+	c.SetLLM(llm.NewClient("k", "m", fake.URL, fake.Client()))
+	if _, err := c.StartEval(EvalOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	rep := waitEval(t, c)
+	if strings.Contains(fake.last(), `"Olive Room, Indiranagar"`) {
+		t.Error("the payee created by sending this row was in the inventory")
+	}
+	row := rep.Rows[0]
+	if !row.NewPayee || row.Right["payee"] || !row.Right["payeeFits"] {
+		t.Errorf("new payee %v, payee %v, payeeFits %v; want a new payee, named right but written differently", row.NewPayee, row.Right["payee"], row.Right["payeeFits"])
+	}
+}
+
+func TestSamePlace(t *testing.T) {
+	for _, tc := range []struct {
+		got, truth string
+		want       bool
+	}{
+		{"Lantern Kopi", "Lantern Kopi, River Quay, Harbourtown", true},
+		{"Lantern Kopi, River Quay", "Lantern Kopi, River Quay, Harbourtown", true},
+		{"Tea Trail", "Tea Trail Cafe, Koramangala", true},
+		{"Tea", "Tea Trail Cafe, Koramangala", true},
+		{"Olive Room", "Lantern Books, Indiranagar", false},
+		{"", "Anything", false},
+	} {
+		if got := samePlace(tc.got, tc.truth); got != tc.want {
+			t.Errorf("samePlace(%q, %q) = %v, want %v", tc.got, tc.truth, got, tc.want)
+		}
 	}
 }
