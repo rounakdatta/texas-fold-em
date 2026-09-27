@@ -785,13 +785,14 @@ func (lc learningContext) summary() *LearnedCounts {
 // was unreachable) is one the re-suggest loop may revisit. Bump it when the
 // prompt or context change enough that every waiting suggestion deserves
 // another look.
-const EngineVersion = 3
+const EngineVersion = 4
 
 // engineVersionFor is the version to record for a decision: the current one
-// when the model made it (or a deterministic refund, which the model would
-// not improve), 0 when it fell back to the deterministic tiers.
+// when the model made it — or looked and declined, or it is a deterministic
+// refund, which the model would not improve — and 0 when the deterministic
+// tiers stood in for a model that wasn't there.
 func engineVersionFor(d Decision) int {
-	if d.Tier == TierLLM || d.Tier == TierRefund {
+	if d.Tier == TierLLM || d.Tier == TierRefund || d.Engine != "" {
 		return EngineVersion
 	}
 	return 0
