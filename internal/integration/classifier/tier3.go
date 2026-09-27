@@ -29,75 +29,76 @@ import (
 //     is what produced hallucinations like an "AU Ixigo" charge landing
 //     on "Axis Bank Ace". So the prompt tells it to leave source null for
 //     withdrawals; it focuses on destination, category, tags, description.
-const tier3SystemPrompt = `You are a personal-finance synthesiser mapping a fold.money transaction onto a firefly-iii transaction.
+const tier3SystemPrompt = `You are the review assistant in a personal-finance app. You turn one bank or card transaction, as the fold.money app recorded it, into the firefly-iii transaction its owner would book themselves: their payee, their category, their tags, their title. The owner reviews every suggestion before it is saved, so being right matters more than being complete — when you cannot know a detail, leave a placeholder instead of guessing.
 
-You will be given:
-  - the raw fold transaction (full JSON, including fold's own account_id, mode, type, merchant, narration)
-  - lists of the user's available firefly accounts, categories, budgets, and tags
-  - examples of similar past firefly transactions (RAG retrieval)
-  - the user's own past description strings for this exact merchant (STYLE SAMPLES) — these teach you their voice
-  - a TIME CONTEXT block: when the transaction happened. For a domestic charge this is IST. For a FOREIGN-currency charge it also shows the LIKELY-LOCAL time in the charge currency's region (the user travels), because meal/occasion depends on local time — not the server's IST.
-  - hints from deterministic tiers, when available (these are GUIDANCE, not commands)
+You will be given (in the user message):
+  - the raw fold transaction: narration, merchant, mode, type, amount, currency, source_amount/source_currency for a foreign charge, fold's summary, and the owner's own note in "notes"
+  - TIME CONTEXT: when it happened (IST, and the likely local time for a foreign charge)
+  - the paying account
+  - HOW YOU CORRECTED FOLD BEFORE: past suggestions for this merchant or handle the owner changed, and what they changed them to
+  - YOUR RECENT CORRECTIONS ELSEWHERE: their latest corrections on other merchants — style, not facts about this one
+  - WHAT YOU DID WITH SIMILAR TRANSACTIONS: what they sent, held back or skipped
+  - THIS HANDLE / DESCRIPTOR IN YOUR LEDGER: past firefly rows paid to the same UPI handle or card descriptor
+  - AROUND THIS TIME: their other transactions within ±36h; TRIP CONTEXT and RECURRING when they apply
+  - STYLE SAMPLES: titles they wrote for this merchant
+  - hints from deterministic tiers, the account/category/budget/tag inventories, and similar past firefly transactions
 
-Your job: produce the cleanest possible firefly proposal.
+How to weigh the evidence, strongest first:
+  1. The owner's corrections and decisions for the same merchant, handle or pattern. If they renamed a payee or rewrote a title for this merchant, do it their way — even when the historical examples or the hints disagree. A recent correction outweighs an older habit.
+  2. The same UPI handle or card descriptor in their ledger: whoever they booked it to is almost certainly this counterparty.
+  3. Their STYLE SAMPLES and titles for this payee.
+  4. Similar historical transactions and the deterministic hints.
+  5. The transaction's own text, the time, the neighbours, general knowledge.
+  When signals still conflict, prefer the more specific and the more recent; if they still disagree, choose the safer answer and lower your confidence.
 
-Output exactly this JSON shape (any nullable field may be null):
-{
-  "txn_type":               "withdrawal" | "deposit" | "transfer",
-  "destination_account_id": <int|null>,
-  "destination_name_suggestion": <string|null>,
-  "source_account_id":      <int|null>,
-  "category_id":            <int|null>,
-  "budget_id":              <int|null>,
-  "tags":                   [<string>...],
-  "description_suggestion": <string|null>,
-  "confidence":             <number 0..1>,
-  "reasoning":              <string>
-}
+PAYEE (the destination for money out, the source for money in):
+  - Reuse an existing account whenever one genuinely is this counterparty. Match the owner's naming shape: if their merchant accounts read "Merchant, Area, City", a new one should too.
+  - A new name is the clean, canonical merchant — never the raw narration. Strip payment-processor prefixes and codes: "TST* ", "SQ *", "UEP*", "SMP**", "GRB*", "FH* ", "SNACK* ", "SP ", "PAYU*", "RAZORPAY*", "CASHFREE*", "BILLDESK*", "PAYPAL *", store numbers, state and country codes, phone numbers. "TST* NOOR INDIAN FUSIO BERKELEY CA" → "Noor Indian Fusion Kitchen, Berkeley".
+  - A UPI payment to a person (a name, not a business) books to that person, named the way the owner named them before.
+
+TITLE (description_suggestion) — the most visible thing you write:
+  - Mirror the owner first. Their corrections and past titles for this merchant or handle set the format — length, vocabulary, structure. A structure they use repeatedly ("<items> from <shop>", "Ride from <A> to <B>", "<meal> at <place>") is followed with this transaction's specifics.
+  - Write "___" (three underscores) for any specific the evidence does not give you: items bought, dishes, people, the two ends of a ride, an occasion. Never guess a specific — a wrong specific is worse than a blank the owner fills in one tap. "___ for dinner" beats "Pasta for dinner" when nothing says pasta.
+  - The owner's own note (the payload's "notes") is the best source of specifics: keep its people, dishes and details.
+  - Name the meal from the time (the LOCAL time for a foreign charge; see TIME CONTEXT) only when the owner's titles for similar places name meals. Never attach a meal to an online service or a subscription.
+  - Neighbours may give context (the ride to the place, the meal before), never another transaction's specifics.
+  - When the owner's history offers nothing better: a card bill payment is "Credit card repayment"; a refund is "Refund for <the purchase's title>"; a card fee says what it is ("Forex charges", "GST", "Annual fee"); interest and cashback say what they are.
+  - Never put the raw narration, a reference number or the amount in the title.
+
+TAGS: mirror the tags the owner uses for this merchant or pattern. When TRIP CONTEXT shows the owner tagging a trip's charges, add that trip tag. Use the existing vocabulary; invent a tag only when the owner's own corrections did.
+
+BUDGET: only when the owner puts this kind of transaction in that budget; otherwise null.
+
+HOLDS: a card alert reporting an amount "credited back to your card" with no merchant is usually a released authorisation hold, not money received — and its original charge, the same amount a few days earlier, was usually never billed either. Say so in hold_suggestion; the owner decides.
 
 Hard rules:
 1. EVERY id MUST appear in the inventories you were shown. Inventing an id is a critical failure.
 2. Firefly has THREE transaction types — pick the right one and report it as txn_type:
    - "withdrawal" — fold OUTGOING; source is a user ASSET account, destination is an EXPENSE account (merchant)
    - "deposit"    — fold INCOMING; source is a REVENUE account (payer), destination is a user ASSET account
-   - "transfer"   — both source AND destination are the user's own ASSET accounts (e.g. savings → zerodha, credit-card-bill payment from savings to credit-card-account). Fold sees this as OUTGOING/INCOMING but it's a transfer if and only if BOTH endpoints are in the asset list.
-3. SOURCE ACCOUNT: for a WITHDRAWAL, set source_account_id to null — do NOT try to pick it. The paying card is resolved deterministically from fold's account_id AFTER you return, so any source you guess is discarded; a wrong guess only adds noise. For a DEPOSIT the source is the revenue-side payer — pick the best-matching revenue account (or null if none fits). For a TRANSFER, source is the user asset the money left from — pick it.
-4. Use the historical examples to pick category, budget, and tags. If the user has previously tagged this merchant, mirror those tags.
-5. If the signals genuinely conflict, return confidence < 0.5 and explain in 'reasoning'.
-6. NEW destination accounts: for a WITHDRAWAL whose merchant has NO good match in the expense inventory, do NOT force-fit an unrelated id and do NOT dump it in a generic catch-all account. Instead set destination_account_id to null and put a clean, canonical merchant name in destination_name_suggestion (e.g. "United Airlines" — never the raw bank narration, never a guessed id). firefly creates the expense account on push. Always prefer an existing id when one genuinely fits; only suggest a new name when none does. For deposits and transfers, always use an existing id (do not invent names).
-7. Output the JSON object only. No prose, no markdown fences.
+   - "transfer"   — both source AND destination are the user's own ASSET accounts (e.g. savings → brokerage, a credit-card bill paid from savings to the credit-card account). It's a transfer if and only if BOTH endpoints are in the asset list.
+3. SOURCE ACCOUNT: for a WITHDRAWAL, set source_account_id to null — do NOT try to pick it. The paying card is resolved deterministically from fold's account_id after you return, so any source you guess is discarded. For a DEPOSIT the source is the revenue-side payer — pick the best-matching revenue account (or null if none fits). For a TRANSFER, source is the user asset the money left from — pick it.
+4. NEW destination accounts: for a WITHDRAWAL whose merchant has NO good match in the expense inventory, do NOT force-fit an unrelated id or a generic catch-all. Set destination_account_id to null and put the clean canonical name in destination_name_suggestion; firefly creates the account on push. For deposits and transfers, always use an existing id.
+5. If the signals genuinely conflict, return confidence < 0.5 and explain in reasoning.
+6. Output the JSON object only. No prose, no markdown fences.
 
-description_suggestion guidance (this is what becomes the transaction TITLE in firefly — treat it as a first-class output, not an afterthought):
-  A. MIRROR the user's voice from STYLE SAMPLES. Their past descriptions for this merchant
-     show the format they prefer (length, vocabulary, structure). Match it.
-       e.g. samples are "Dinner with X", "Lunch with Y", "Coffee solo"
-            → produce "Dinner with ___" or "Lunch with ___", not "Restaurant meal"
-  B. USE the TIME CONTEXT to guess the meal/occasion — but use the LOCAL time where
-     the transaction happened, and LOCAL dining norms:
-       - When TIME CONTEXT shows a "likely-local" line (a foreign-currency charge),
-         judge the meal from THAT time, not IST — the user was abroad. Apply the
-         region's norms (e.g. a 19:00 US/Europe restaurant charge is dinner; the
-         same 19:00 in India is early-evening). If the timezone is flagged
-         approximate and the merchant name/narration names a city, refine to that
-         city's timezone.
-       - IGNORE time & location for online services / subscriptions (Anthropic,
-         OpenAI, Netflix, cloud bills, etc.) — a USD subscription bought from India
-         is not a US meal; don't attach a meal/occasion to it at all.
-       - Domestic (IST) charges: 21:42 at a restaurant is dinner; 13:15 lunch;
-         09:30 breakfast.
-     Fold the meal into the description only when STYLE SAMPLES show the user marks
-     it explicitly.
-  C. USE "___" (three underscores) as a placeholder when you don't know a specific detail
-     the user typically includes — companion name, dish name, occasion. The user will
-     fill these in during review. PREFER partial-with-placeholder over
-     generic-and-complete:
-       BETTER: "Dinner with ___"        WORSE: "Mezzaluna dinner"
-       BETTER: "___ for lunch at Zomato" WORSE: "Lunch at Zomato"
-  D. WHEN there are no STYLE SAMPLES for this merchant, fall back to a short
-     deterministic title: "[meal_bucket] at [merchant]" or just "[merchant]". Keep it
-     under ~6 words; the user will edit if they want richer.
-  E. NEVER write the raw bank narration as the description — that goes in notes
-     separately; description is the human-friendly title.
+Output exactly this JSON shape (any nullable field may be null). Write "reasoning" FIRST — think through the evidence before you decide:
+{
+  "reasoning":                   <string: what the evidence says about the payee, title, category, tags and type, citing it>,
+  "txn_type":                    "withdrawal" | "deposit" | "transfer",
+  "destination_account_id":      <int|null>,
+  "destination_name_suggestion": <string|null>,
+  "source_account_id":           <int|null>,
+  "category_id":                 <int|null>,
+  "budget_id":                   <int|null>,
+  "tags":                        [<string>...],
+  "description_suggestion":      <string|null>,
+  "unknowns":                    [<string>...],
+  "evidence":                    [<string>...],
+  "hold_suggestion":             <string|null>,
+  "confidence":                  <number 0..1>
+}
+"unknowns" names what the owner still has to tell you, one entry per ___ in the title ("items", "who with", "where from", "where to"). "evidence" is 1–4 short phrases naming what decided it ("your correction of 12 Sep", "handle paid 4 times before", "trip tag on the neighbouring charges").
 
 The output JSON MUST include a "txn_type" field set to "withdrawal", "deposit", or "transfer".`
 
@@ -117,6 +118,12 @@ type llmResponse struct {
 	DescriptionSuggestion     *string  `json:"description_suggestion"`
 	Confidence                float64  `json:"confidence"`
 	Reasoning                 string   `json:"reasoning"`
+	// Unknowns name what the owner still has to fill in (one per ___);
+	// Evidence the signals that decided it; HoldSuggestion a released
+	// authorisation or a charge never billed. All shown on the card.
+	Unknowns       []string `json:"unknowns"`
+	EvidenceNotes  []string `json:"evidence"`
+	HoldSuggestion *string  `json:"hold_suggestion"`
 }
 
 // tier3Inputs bundles everything the synthesiser sees. Built by
@@ -142,15 +149,29 @@ type tier3Inputs struct {
 	// merchant, used to teach the LLM the voice/format to mirror. Empty
 	// for first-time merchants; the renderer omits the block then.
 	styleSamples []styleSample
+
+	// learn is what the owner decided before and what surrounds this
+	// transaction (learning.go).
+	learn learningContext
+
+	// How often each payee was used in the last year, to rank the part of
+	// the inventory the prompt shows (rankedAccounts).
+	expenseUsage, revenueUsage map[int64]int
 }
+
+// Inventory sizes shown in one prompt; the guard accepts every account.
+const (
+	shownExpenseAccounts = 250
+	shownRevenueAccounts = 150
+)
 
 // tierThreeLLM gathers context, builds the prompt, calls the LLM,
 // parses + validates the response. Returns (decision, ok, err) like
 // the other tiers; err is non-nil only on transport / parse failure
 // (the caller in ClassifyOne logs+drops it). ok=false means the LLM
 // declined to commit (low confidence or missing destination).
-func (c *Classifier) tierThreeLLM(ctx context.Context, staged StagedRow, tier1Hint, tier2Hint *Decision) (Decision, bool, error) {
-	inputs, err := c.gatherTier3Inputs(ctx, staged, tier1Hint, tier2Hint)
+func (c *Classifier) tierThreeLLM(ctx context.Context, staged StagedRow, tier1Hint, tier2Hint *Decision, ex exclusion) (Decision, bool, error) {
+	inputs, err := c.gatherTier3Inputs(ctx, staged, tier1Hint, tier2Hint, ex)
 	if err != nil {
 		return Decision{}, false, fmt.Errorf("gather inputs: %w", err)
 	}
@@ -160,7 +181,7 @@ func (c *Classifier) tierThreeLLM(ctx context.Context, staged StagedRow, tier1Hi
 	if err != nil {
 		return Decision{}, false, fmt.Errorf("llm call: %w", err)
 	}
-	jsonText = stripJSONFences(jsonText)
+	jsonText = extractJSONObject(jsonText)
 
 	var llm llmResponse
 	if err := json.Unmarshal([]byte(jsonText), &llm); err != nil {
@@ -280,12 +301,17 @@ func (c *Classifier) tierThreeLLM(ctx context.Context, staged StagedRow, tier1Hi
 		BudgetName:             budName,
 		Description:            desc,
 		Tags:                   llm.Tags,
+		Engine:                 c.llm.Model(),
 		Evidence: Evidence{
 			Tier:               TierLLM,
 			MerchantNormalized: staged.MerchantExtracted,
 			FTSHits:            ftsView,
 			Note:               llm.Reasoning,
 			Tags:               llm.Tags,
+			Signals:            capStrings(llm.EvidenceNotes, 4),
+			Unknowns:           capStrings(llm.Unknowns, 6),
+			HoldSuggestion:     strings.TrimSpace(derefString(llm.HoldSuggestion)),
+			Learned:            inputs.learn.summary(),
 		},
 	}, true, nil
 }
@@ -318,8 +344,8 @@ type tier3Hit struct {
 // gatherTier3Inputs assembles every slice of context the prompt needs.
 // Cheap: 5 small lookups against firefly_txns. Heavy lifting (the FTS
 // retrieval) is the only part bounded by query work.
-func (c *Classifier) gatherTier3Inputs(ctx context.Context, staged StagedRow, tier1, tier2 *Decision) (tier3Inputs, error) {
-	hits, err := c.retrieveTier3Candidates(ctx, staged)
+func (c *Classifier) gatherTier3Inputs(ctx context.Context, staged StagedRow, tier1, tier2 *Decision, ex exclusion) (tier3Inputs, error) {
+	hits, err := c.retrieveTier3Candidates(ctx, staged, ex)
 	if err != nil {
 		return tier3Inputs{}, err
 	}
@@ -340,7 +366,18 @@ func (c *Classifier) gatherTier3Inputs(ctx context.Context, staged StagedRow, ti
 	if tier1 != nil && tier1.DestinationAccountID != nil {
 		destForStyle = *tier1.DestinationAccountID
 	}
-	samples, _ := recentSameMerchantDescriptions(ctx, c.db, destForStyle, staged.MerchantExtracted, 10)
+	samples, _ := recentSameMerchantDescriptions(ctx, c.db, destForStyle, staged.MerchantExtracted, 10, ex.fireflyID)
+	// The payee the deterministic tiers point at, for the recurring check.
+	var payeeHint *int64
+	switch {
+	case tier1 != nil && tier1.DestinationAccountID != nil:
+		payeeHint = tier1.DestinationAccountID
+	case tier2 != nil && tier2.DestinationAccountID != nil:
+		payeeHint = tier2.DestinationAccountID
+	}
+	if staged.Type != "OUTGOING" {
+		payeeHint = nil
+	}
 
 	return tier3Inputs{
 		hits:            hits,
@@ -355,6 +392,9 @@ func (c *Classifier) gatherTier3Inputs(ctx context.Context, staged StagedRow, ti
 		foldAccount:     foldAcc,
 		mealCtx:         mealContext(staged.TxnTimestamp, foreignCurrencyOf(staged.RawPayload)),
 		styleSamples:    samples,
+		learn:           c.gatherLearning(ctx, staged, payeeHint, ex),
+		expenseUsage:    accountUsage(ctx, c.db, "destination", time.Now().AddDate(-1, 0, 0)),
+		revenueUsage:    accountUsage(ctx, c.db, "source", time.Now().AddDate(-1, 0, 0)),
 	}, nil
 }
 
@@ -372,7 +412,7 @@ func (c *Classifier) gatherTier3Inputs(ctx context.Context, staged StagedRow, ti
 //
 // Pull more rows than Tier 2 (15 vs 10) because the LLM benefits
 // from broader context.
-func (c *Classifier) retrieveTier3Candidates(ctx context.Context, staged StagedRow) ([]tier3Hit, error) {
+func (c *Classifier) retrieveTier3Candidates(ctx context.Context, staged StagedRow, ex exclusion) ([]tier3Hit, error) {
 	const k = 15
 	query := buildFTSQuery(staged.MerchantExtracted)
 	if query == "" {
@@ -394,9 +434,10 @@ func (c *Classifier) retrieveTier3Candidates(ctx context.Context, staged StagedR
 		JOIN firefly_txns t ON t.firefly_id = firefly_txns_fts.rowid
 		WHERE firefly_txns_fts MATCH ?
 		  AND t.txn_type = ?
+		  AND t.firefly_id <> ?
 		ORDER BY score
 		LIMIT ?
-	`, query, fireflyTxnTypeFor(staged.Type), k)
+	`, query, fireflyTxnTypeFor(staged.Type), ex.fireflyID, k)
 	if err != nil {
 		return nil, err
 	}
@@ -565,6 +606,11 @@ func buildTier3Prompt(staged StagedRow, in tier3Inputs) string {
 		}
 	}
 
+	// Block 1e: what the owner decided before, and what surrounds this
+	// transaction — ahead of the hints and inventories because it
+	// outranks them (learning.go).
+	in.learn.render(&b)
+
 	// Block 2: hints from the deterministic tiers.
 	b.WriteString("== DETERMINISTIC HINTS ==\n")
 	if in.tier1 != nil {
@@ -584,16 +630,25 @@ func buildTier3Prompt(staged StagedRow, in tier3Inputs) string {
 	// Block 3: user's account inventories, scoped by what the LLM
 	// will need given the fold direction.
 	b.WriteString("== USER'S ACCOUNT INVENTORIES ==\n")
+	words := promptWords(staged)
+	partial := func(shown, all int, what string) string {
+		if shown >= all {
+			return ""
+		}
+		return fmt.Sprintf(" — %d of your %d %s: every one whose name shares a word with this transaction, then the ones you use most", shown, all, what)
+	}
 	if staged.Type == "OUTGOING" {
 		b.WriteString("\nasset accounts (pick SOURCE from these):\n")
 		writeAccountList(&b, in.assetAccounts)
-		b.WriteString("\nexpense accounts (pick DESTINATION from these — or any from the FTS examples below):\n")
-		writeAccountList(&b, capList(in.expenseAccounts, 200))
+		shown := rankedAccounts(in.expenseAccounts, in.expenseUsage, words, shownExpenseAccounts)
+		b.WriteString("\nexpense accounts (pick DESTINATION from these, or any from the historical examples below" + partial(len(shown), len(in.expenseAccounts), "payees") + "):\n")
+		writeAccountList(&b, shown)
 	} else {
 		b.WriteString("\nasset accounts (pick DESTINATION from these):\n")
 		writeAccountList(&b, in.assetAccounts)
-		b.WriteString("\nrevenue accounts (pick SOURCE from these):\n")
-		writeAccountList(&b, capList(in.revenueAccounts, 200))
+		shown := rankedAccounts(in.revenueAccounts, in.revenueUsage, words, shownRevenueAccounts)
+		b.WriteString("\nrevenue accounts (pick SOURCE from these" + partial(len(shown), len(in.revenueAccounts), "payers") + "):\n")
+		writeAccountList(&b, shown)
 	}
 	b.WriteString("\ncategories:\n")
 	writeAccountList(&b, in.categories)
@@ -667,13 +722,6 @@ func writeAccountList(b *strings.Builder, list []AccountRef) {
 	if len(list) == 0 {
 		b.WriteString("  (none)\n")
 	}
-}
-
-func capList(list []AccountRef, n int) []AccountRef {
-	if len(list) > n {
-		return list[:n]
-	}
-	return list
 }
 
 // idsAreFromInventories generalises the old idsAreFromCandidates to
@@ -794,6 +842,39 @@ func nameFromRefs(refs []AccountRef, id int64) string {
 		}
 	}
 	return ""
+}
+
+// extractJSONObject returns the JSON object in a model's reply: the text
+// itself when it is one, else the outermost {...} — a model behind an
+// OpenAI-shaped gateway without a native JSON mode may add a fence or a line
+// of prose around it.
+func extractJSONObject(s string) string {
+	s = stripJSONFences(s)
+	if json.Valid([]byte(s)) {
+		return s
+	}
+	start, end := strings.Index(s, "{"), strings.LastIndex(s, "}")
+	if start >= 0 && end > start && json.Valid([]byte(s[start:end+1])) {
+		return s[start : end+1]
+	}
+	return s
+}
+
+func capStrings(list []string, n int) []string {
+	var out []string
+	for _, s := range list {
+		if s = strings.TrimSpace(s); s != "" && len(out) < n {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func derefString(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 // stripJSONFences removes ``` fences if the LLM wraps the JSON

@@ -28,6 +28,7 @@ import (
 type reviewHarness struct {
 	srv *httptest.Server
 	db  *integration.DB
+	h   *Handler // for wiring a classifier into a test that needs one
 
 	mu      sync.Mutex
 	creates []map[string]any
@@ -98,6 +99,7 @@ func newReviewHarness(t *testing.T) *reviewHarness {
 		t.Fatalf("ui.New: %v", err)
 	}
 	h.SetFireflyPublicURL("https://firefly.example")
+	rh.h = h
 	mux := http.NewServeMux()
 	h.Mount(mux)
 	rh.srv = httptest.NewServer(mux)

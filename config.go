@@ -105,6 +105,22 @@ type Config struct {
 	// DeepSeek (the LLM client retries 429s with backoff); raise/lower to
 	// taste, or set 1 to force the original sequential behaviour.
 	ClassifyConcurrency int // TEXAS_FOLDEM_CLASSIFY_CONCURRENCY  default 8
+
+	// LLMReasoningEffort asks the model to think before answering ("",
+	// "low", "medium", "high"); the host maps it to its own mechanism
+	// (auth2api: an Anthropic thinking budget). LLMTimeout bounds one
+	// attempt — a model that reasons needs longer than the 60s default —
+	// and LLMMaxTokens caps a reply.
+	LLMReasoningEffort string        // TEXAS_FOLDEM_LLM_REASONING_EFFORT  default "" (none)
+	LLMTimeout         time.Duration // TEXAS_FOLDEM_LLM_TIMEOUT           default 0 (60s)
+	LLMMaxTokens       int           // TEXAS_FOLDEM_LLM_MAX_TOKENS        default 0 (4096)
+
+	// ResuggestEvery is how often waiting cards are revisited — the ones a
+	// newer correction or a newer engine could suggest better
+	// (classifier/resuggest.go). 0 disables it. ResuggestLimit caps how
+	// many cards one pass takes.
+	ResuggestEvery time.Duration // TEXAS_FOLDEM_RESUGGEST_EVERY  default 0 (off)
+	ResuggestLimit int           // TEXAS_FOLDEM_RESUGGEST_LIMIT  default 8
 }
 
 // LoadConfig reads env vars and returns a validated Config. It never reads
@@ -139,6 +155,11 @@ func LoadConfig() (Config, error) {
 		PeriodicSyncEvery:   envDur("TEXAS_FOLDEM_PERIODIC_SYNC_EVERY", 0),
 		PeriodicSyncLimit:   envInt("TEXAS_FOLDEM_PERIODIC_SYNC_LIMIT", 2000),
 		ClassifyConcurrency: envInt("TEXAS_FOLDEM_CLASSIFY_CONCURRENCY", 8),
+		LLMReasoningEffort:  envStr("TEXAS_FOLDEM_LLM_REASONING_EFFORT", ""),
+		LLMTimeout:          envDur("TEXAS_FOLDEM_LLM_TIMEOUT", 0),
+		LLMMaxTokens:        envInt("TEXAS_FOLDEM_LLM_MAX_TOKENS", 0),
+		ResuggestEvery:      envDur("TEXAS_FOLDEM_RESUGGEST_EVERY", 0),
+		ResuggestLimit:      envInt("TEXAS_FOLDEM_RESUGGEST_LIMIT", 8),
 	}
 
 	var problems []string

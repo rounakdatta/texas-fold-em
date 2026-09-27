@@ -37,7 +37,7 @@ func TestGenerateJSON_HappyPath(t *testing.T) {
 		if body.Model != "deepseek-v4-flash" {
 			t.Errorf("model = %q", body.Model)
 		}
-		if body.Temperature != 0 {
+		if body.Temperature == nil || *body.Temperature != 0 {
 			t.Errorf("temperature = %v, want 0 (deterministic)", body.Temperature)
 		}
 		if body.ResponseFormat == nil || body.ResponseFormat.Type != "json_object" {

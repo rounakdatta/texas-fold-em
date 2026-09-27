@@ -410,6 +410,11 @@ details.more > summary { cursor: pointer; color: var(--fg-2); font-weight: 600; 
 details.more > summary::-webkit-details-marker { display: none; }
 details.more > summary::before { content: "›"; display: inline-block; transition: transform .15s; font-size: 18px; line-height: 1; }
 details.more[open] > summary::before { transform: rotate(90deg); }
+/* what the engine said about its suggestion: plain sentences, not alarms */
+.why-list { margin: 0 0 10px; padding-left: 18px; color: var(--fg-2); font-size: 14px; line-height: 1.45; }
+.why-list li + li { margin-top: 2px; }
+.why-note { margin: 0 0 8px; color: var(--fg-2); font-size: 13.5px; line-height: 1.45; }
+.why-reasoning { margin: 8px 0 0; color: var(--fg-2); font-size: 13.5px; line-height: 1.5; white-space: pre-wrap; }
 details.more pre { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--mono); font-size: 12px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 10px; padding: 12px; max-height: 360px; overflow: auto; }
 .actionbar {
   position: sticky; bottom: 0; z-index: 10; display: flex; gap: 10px; flex-wrap: wrap; align-items: center;

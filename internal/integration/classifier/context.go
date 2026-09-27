@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -16,13 +17,13 @@ import (
 // sees only an opaque UUID; with it, "Tata Neu Plus 8943 (HDFC,
 // RuPay)" — directly text-matchable against firefly's asset list.
 type FoldAccountRef struct {
-	ID        string // fold's per-account UUID
-	Kind      string // "BANK" | "CREDIT_CARD"
-	Name      string // composed display name, e.g. "HDFC Tata Neu Plus ****8943"
-	Provider  string // "HDFC", "Axis Bank"
-	Network   string // credit-card-only: "Visa", "RuPay"
-	LastFour  string
-	IsClosed  bool
+	ID       string // fold's per-account UUID
+	Kind     string // "BANK" | "CREDIT_CARD"
+	Name     string // composed display name, e.g. "HDFC Tata Neu Plus ****8943"
+	Provider string // "HDFC", "Axis Bank"
+	Network  string // credit-card-only: "Visa", "RuPay"
+	LastFour string
+	IsClosed bool
 }
 
 // lookupFoldAccountForStaged extracts account_id from the staged row's
@@ -43,10 +44,10 @@ func lookupFoldAccountForStaged(ctx context.Context, db *sql.DB, rawPayload stri
 		return nil, nil
 	}
 	var (
-		ref   FoldAccountRef
-		prov  sql.NullString
-		net   sql.NullString
-		lf    sql.NullString
+		ref       FoldAccountRef
+		prov      sql.NullString
+		net       sql.NullString
+		lf        sql.NullString
 		closedInt int
 	)
 	err := db.QueryRowContext(ctx, `
@@ -141,35 +142,170 @@ func listAssetAccounts(ctx context.Context, db *sql.DB) ([]AccountRef, error) {
 // fold transaction is INCOMING and we need to pick where the money
 // came from.
 func listRevenueAccounts(ctx context.Context, db *sql.DB) ([]AccountRef, error) {
-	return listDistinct(ctx, db, `
-		SELECT DISTINCT source_account_id, source_account_name
+	return listNamed(ctx, db, `
+		SELECT firefly_id, name, 0 FROM firefly_accounts WHERE type = 'revenue' AND active = 1
+		UNION ALL
+		SELECT DISTINCT source_account_id, source_account_name, 1
 		FROM firefly_txns
-		WHERE txn_type = 'deposit' AND source_account_id IS NOT NULL AND source_account_name IS NOT NULL
-		ORDER BY source_account_name COLLATE NOCASE
-	`)
+		WHERE txn_type = 'deposit' AND source_account_id IS NOT NULL AND source_account_name IS NOT NULL`)
 }
 
 // listExpenseAccounts is the withdrawal-side merchant inventory.
 // Used as the destination_account candidate set for OUTGOING fold
 // transactions.
 func listExpenseAccounts(ctx context.Context, db *sql.DB) ([]AccountRef, error) {
-	return listDistinct(ctx, db, `
-		SELECT DISTINCT destination_account_id, destination_account_name
+	return listNamed(ctx, db, `
+		SELECT firefly_id, name, 0 FROM firefly_accounts WHERE type = 'expense' AND active = 1
+		UNION ALL
+		SELECT DISTINCT destination_account_id, destination_account_name, 1
 		FROM firefly_txns
-		WHERE txn_type = 'withdrawal' AND destination_account_id IS NOT NULL AND destination_account_name IS NOT NULL
-		ORDER BY destination_account_name COLLATE NOCASE
-	`)
+		WHERE txn_type = 'withdrawal' AND destination_account_id IS NOT NULL AND destination_account_name IS NOT NULL`)
 }
 
-// listCategories / listBudgets are the dimension tables, also derived
-// from firefly_txns.
+// listCategories / listBudgets are the dimension tables. Categories come
+// from firefly's own list (the mirror, which has one created in the deck
+// minutes ago) and from history; budgets from history.
 func listCategories(ctx context.Context, db *sql.DB) ([]AccountRef, error) {
-	return listDistinct(ctx, db, `
-		SELECT DISTINCT category_id, category_name
+	return listNamed(ctx, db, `
+		SELECT firefly_id, name, 0 FROM firefly_categories
+		UNION ALL
+		SELECT DISTINCT category_id, category_name, 1
 		FROM firefly_txns
-		WHERE category_id IS NOT NULL AND category_name IS NOT NULL
-		ORDER BY category_name COLLATE NOCASE
-	`)
+		WHERE category_id IS NOT NULL AND category_name IS NOT NULL`)
+}
+
+// listNamed reads (id, name, rank) rows into one entry per id, the lowest
+// rank's name winning — firefly's own list (rank 0) over a name seen in
+// history (rank 1), which may predate a rename — sorted by name.
+func listNamed(ctx context.Context, db *sql.DB, query string) ([]AccountRef, error) {
+	rows, err := db.QueryContext(ctx, query+` ORDER BY 3`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	seen := map[int64]bool{}
+	var out []AccountRef
+	for rows.Next() {
+		var a AccountRef
+		var rank int
+		if err := rows.Scan(&a.ID, &a.Name, &rank); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(a.Name) == "" || seen[a.ID] {
+			continue // the first row for an id has the best name
+		}
+		seen[a.ID] = true
+		out = append(out, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sort.Slice(out, func(i, j int) bool {
+		a, b := strings.ToLower(out[i].Name), strings.ToLower(out[j].Name)
+		return a < b || (a == b && out[i].ID < out[j].ID)
+	})
+	return out, nil
+}
+
+// accountUsage counts, per account, the last year's firefly rows on the
+// given side ("destination" of withdrawals, "source" of deposits).
+func accountUsage(ctx context.Context, db *sql.DB, side string, since time.Time) map[int64]int {
+	col, typ := "destination_account_id", "withdrawal"
+	if side == "source" {
+		col, typ = "source_account_id", "deposit"
+	}
+	out := map[int64]int{}
+	rows, err := db.QueryContext(ctx, `SELECT `+col+`, COUNT(*) FROM firefly_txns
+		WHERE txn_type = ? AND `+col+` IS NOT NULL AND substr(date, 1, 10) >= ? GROUP BY `+col, typ, since.Format("2006-01-02"))
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var n int
+		if rows.Scan(&id, &n) == nil {
+			out[id] = n
+		}
+	}
+	return out
+}
+
+// rankedAccounts is the part of an account inventory one prompt shows, at
+// most n, the most useful first: every account whose name shares a word
+// with the transaction, then the ones the owner uses most, then the rest by
+// name. The whole list stays the hallucination guard's whitelist. (An
+// alphabetical list cut at 200, as it was, never showed the model a payee
+// late in the alphabet — so it proposed a "new" one for an account that
+// exists.)
+func rankedAccounts(all []AccountRef, usage map[int64]int, words map[string]bool, n int) []AccountRef {
+	if len(all) <= n {
+		return all
+	}
+	type scored struct {
+		a        AccountRef
+		relevant bool
+		use      int
+	}
+	list := make([]scored, 0, len(all))
+	for _, a := range all {
+		list = append(list, scored{a: a, relevant: sharesWord(a.Name, words), use: usage[a.ID]})
+	}
+	sort.SliceStable(list, func(i, j int) bool {
+		if list[i].relevant != list[j].relevant {
+			return list[i].relevant
+		}
+		return list[i].use > list[j].use
+	})
+	out := make([]AccountRef, 0, n)
+	for _, s := range list[:n] {
+		out = append(out, s.a)
+	}
+	return out
+}
+
+// promptWords are the words in a transaction worth matching account names
+// on: the merchant's and the narration's, minus the rails' boilerplate.
+func promptWords(staged StagedRow) map[string]bool {
+	out := map[string]bool{}
+	for _, w := range nameWords(staged.MerchantExtracted + " " + staged.Narration) {
+		if !railWords[w] {
+			out[w] = true
+		}
+	}
+	return out
+}
+
+var railWords = map[string]bool{"upi": true, "card": true, "outgoing": true, "incoming": true, "payment": true, "from": true,
+	"phone": true, "neft": true, "imps": true, "rtgs": true, "ach": true, "nach": true, "the": true, "and": true, "pvt": true,
+	"ltd": true, "private": true, "limited": true, "india": true, "bank": true, "credited": true, "back": true, "your": true,
+	"received": true, "refund": true, "debit": true, "credit": true, "txn": true, "ref": true, "inr": true, "usd": true}
+
+func nameWords(s string) []string {
+	return strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+		return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9')
+	})
+}
+
+// sharesWord: a name word of three letters or more equals a transaction
+// word, or one starts the other ("swiggy" / "swiggyinstamart").
+func sharesWord(name string, words map[string]bool) bool {
+	for _, w := range nameWords(name) {
+		if len(w) < 3 || railWords[w] {
+			continue
+		}
+		if words[w] {
+			return true
+		}
+		if len(w) >= 4 {
+			for t := range words {
+				if len(t) >= 4 && (strings.HasPrefix(t, w) || strings.HasPrefix(w, t)) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func listBudgets(ctx context.Context, db *sql.DB) ([]AccountRef, error) {
@@ -215,7 +351,8 @@ type styleSample struct {
 //
 // Returns nil when neither lookup yields anything (e.g., first-time
 // merchant) — the prompt skips the STYLE SAMPLES block in that case.
-func recentSameMerchantDescriptions(ctx context.Context, db *sql.DB, destAccountID int64, merchantNormalized string, n int) ([]styleSample, error) {
+// excludeFireflyID hides one firefly row (the shadow evaluation's target).
+func recentSameMerchantDescriptions(ctx context.Context, db *sql.DB, destAccountID int64, merchantNormalized string, n int, excludeFireflyID int64) ([]styleSample, error) {
 	if n <= 0 {
 		n = 10
 	}
@@ -229,17 +366,19 @@ func recentSameMerchantDescriptions(ctx context.Context, db *sql.DB, destAccount
 			SELECT description, date FROM firefly_txns
 			WHERE destination_account_id = ?
 			  AND description IS NOT NULL AND TRIM(description) <> ''
+			  AND firefly_id <> ?
 			ORDER BY date DESC
 			LIMIT ?
-		`, destAccountID, n)
+		`, destAccountID, excludeFireflyID, n)
 	case merchantNormalized != "":
 		rows, err = db.QueryContext(ctx, `
 			SELECT description, date FROM firefly_txns
 			WHERE destination_account_name_normalized = ?
 			  AND description IS NOT NULL AND TRIM(description) <> ''
+			  AND firefly_id <> ?
 			ORDER BY date DESC
 			LIMIT ?
-		`, merchantNormalized, n)
+		`, merchantNormalized, excludeFireflyID, n)
 	default:
 		return nil, nil
 	}

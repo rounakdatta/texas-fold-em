@@ -36,6 +36,7 @@ import (
 	"github.com/rounakdatta/texas-fold-em/internal/integration"
 	"github.com/rounakdatta/texas-fold-em/internal/integration/classifier"
 	"github.com/rounakdatta/texas-fold-em/internal/integration/cron"
+	"github.com/rounakdatta/texas-fold-em/internal/integration/feedback"
 	"github.com/rounakdatta/texas-fold-em/internal/integration/firefly"
 	"github.com/rounakdatta/texas-fold-em/internal/integration/fold"
 	"github.com/rounakdatta/texas-fold-em/internal/integration/llm"
@@ -110,6 +111,15 @@ func run() error {
 			}
 		}()
 		srv.SetIntegration(intDB)
+		// The classifier learns from what a person did with its suggestions
+		// (review_feedback). Decisions made before that table existed are
+		// seeded from the staged rows once, so it starts from months of
+		// history rather than from nothing. A no-op on every later start.
+		if n, err := feedback.BackfillFeedback(context.Background(), intDB.DB); err != nil {
+			intLog.Warn("feedback backfill failed; continuing", "err", err)
+		} else if n > 0 {
+			intLog.Info("feedback backfilled from past decisions", "rows", n)
+		}
 
 		// Firefly read-side client + syncer. The PAT is sourced from the
 		// firefly-pat key of the Bitwarden-synced texas-fold-em-credentials
@@ -159,6 +169,9 @@ func run() error {
 		if cfg.LLMAPIKey != "" {
 			llmClient := llm.NewClient(cfg.LLMAPIKey, cfg.LLMModel, cfg.LLMBaseURL, nil)
 			llmClient.SetLogger(intLog.With("component", "llm"))
+			llmClient.SetTimeout(cfg.LLMTimeout)
+			llmClient.SetMaxTokens(cfg.LLMMaxTokens)
+			llmClient.SetReasoningEffort(cfg.LLMReasoningEffort)
 			cls.SetLLM(llmClient)
 			llmEnabled = true
 		}
@@ -209,6 +222,8 @@ func run() error {
 			"ui_auth", uiAuthLabel(uiAuth),
 			"classify_concurrency", cfg.ClassifyConcurrency,
 			"periodic_sync_every", cfg.PeriodicSyncEvery,
+			"llm_reasoning_effort", cfg.LLMReasoningEffort,
+			"resuggest_every", cfg.ResuggestEvery,
 			"endpoints", []string{
 				"POST /admin/firefly/sync",
 				"POST /admin/firefly/accounts/sync",
@@ -228,6 +243,15 @@ func run() error {
 			go func() {
 				defer wg.Done()
 				cron.PeriodicSync(rootCtx, foldSyncer, foldAccountsSyncer, fireflyAccountsSyncer, cls, cfg.PeriodicSyncEvery, cfg.PeriodicSyncLimit, intLog)
+			}()
+		}
+		// Continuous re-suggestion: waiting cards improve as corrections
+		// arrive and when the engine gets better. Needs the model.
+		if cfg.ResuggestEvery > 0 && llmEnabled {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				cron.Resuggest(rootCtx, cls, cfg.ResuggestEvery, cfg.ResuggestLimit, intLog)
 			}()
 		}
 	}

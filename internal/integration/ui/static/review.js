@@ -152,13 +152,19 @@
     return 'what?';
   }
 
-  function titleNodes(title) {
+  // blanks: what the engine says each ___ stands for ("items", "who with"),
+  // when it knows; otherwise a guess from the word before it.
+  function titleNodes(title, blanks) {
     if (!title.trim()) return [h('span', { text: 'Add a title' })];
     const parts = title.split('___');
+    const named = blanks && blanks.length === parts.length - 1 ? blanks : null;
     const out = [];
     parts.forEach((p, i) => {
       if (p) out.push(document.createTextNode(p));
-      if (i < parts.length - 1) out.push(h('span', { class: 'blank', 'data-hint': blankHint(parts.slice(0, i + 1).join(' ')), 'aria-label': 'blank' }));
+      if (i < parts.length - 1) {
+        const hint = named ? named[i] + '?' : blankHint(parts.slice(0, i + 1).join(' '));
+        out.push(h('span', { class: 'blank', 'data-hint': hint, 'aria-label': 'blank: ' + hint }));
+      }
     });
     return out;
   }
@@ -252,7 +258,7 @@
     // What it was: the title and category push will send.
     const what = h('div', { class: 'what' });
     what.append(h('button', { type: 'button', class: 'title-btn' + (c.title.trim() ? '' : ' is-empty'), 'data-act': 'title', 'aria-label': 'Title: ' + (c.title || 'none') + '. Edit' },
-      h('span', { class: 't' }, ...titleNodes(c.title)), icon('pen')));
+      h('span', { class: 't' }, ...titleNodes(c.title, c.why && c.why.blanks)), icon('pen')));
     const meta = h('div', { class: 'meta-row' });
     meta.append(c.category
       ? h('button', { type: 'button', class: 'chip chip-cat', 'data-act': 'category', 'aria-label': 'Category: ' + c.category + '. Change', text: c.category })
@@ -265,7 +271,11 @@
     const attn = h('div', { class: 'attn' });
     if (c.error) attn.append(banner('alert', h('span', {}, h('b', { text: 'Not sent. ' }), c.error),
       h('button', { type: 'button', class: 'btn btn-sm btn-quiet', 'data-act': 'editor', text: 'Open the editor' })));
-    if (c.hold) attn.append(banner('alert', h('span', {}, h('b', { text: 'On hold: ' }), sentence(c.hold), ' It won’t be sent.')));
+    if (c.hold && c.holdBy === 'fold') attn.append(banner('alert', h('span', {}, h('b', { text: 'Held by fold: ' }), sentence(c.hold)),
+      h('button', { type: 'button', class: 'btn btn-sm btn-quiet', 'data-act': 'release', text: 'Release the hold' })));
+    else if (c.hold) attn.append(banner('alert', h('span', {}, h('b', { text: 'On hold: ' }), sentence(c.hold), ' It won’t be sent.')));
+    else if (c.why && c.why.hold) attn.append(banner('alert', h('span', {}, h('b', { text: 'Worth holding? ' }), sentence(c.why.hold)),
+      h('button', { type: 'button', class: 'btn btn-sm btn-quiet', 'data-act': 'hold-suggested', text: 'Hold it' })));
     if (c.problemText) attn.append(banner('alert', c.problemText, problemActions(c)));
     if (c.duplicate) attn.append(banner('alert', 'fold.money thinks this may be a duplicate alert.',
       h('button', { type: 'button', class: 'btn btn-sm btn-quiet', 'data-act': 'skip', text: 'Skip it' })));
@@ -277,6 +287,7 @@
     const foot = h('footer', { class: 'foot' });
     if (c.note) foot.append(h('p', { class: 'note-quote', text: c.note }));
     if (c.refund && !c.refund.needsPick && c.refund.label) foot.append(h('p', { class: 'bank' }, h('b', { text: 'Refund of' }), h('span', { text: c.refund.label })));
+    if (c.why && c.why.learned) foot.append(h('p', { class: 'bank learned', title: 'Suggested again after your corrections: ' + c.why.learned }, h('b', { text: 'Learned' }), h('span', { text: c.why.learned })));
     if (c.manual) foot.append(h('p', { class: 'bank', title: c.narration }, h('b', { text: 'From the statement' }), h('span', { text: c.bankSaid.replace(/^Statement: /, '') })));
     else if (c.bankSaid && addsInfo(c.bankSaid, c)) foot.append(h('p', { class: 'bank', title: c.narration }, h('b', { text: /^CARD\//.test(c.narration) ? 'On the alert' : 'On the bank line' }), h('span', { text: c.bankSaid })));
     if (foot.childNodes.length) scroll.append(foot);
@@ -856,6 +867,8 @@
     else if (act === 'editor') location.href = c.editUrl;
     else if (act === 'guess') { const g = guessFor(c); if (g) edit(c, { type: c.type, payee: g }).catch(() => {}); }
     else if (act === 'account') openAccount(c);
+    else if (act === 'release') setHold(c, '');
+    else if (act === 'hold-suggested' && c.why && c.why.hold) setHold(c, c.why.hold);
   }
 
   // ---- saving an edit -------------------------------------------------------------
@@ -1351,6 +1364,33 @@
     }
   });
 
+  // ---- the engine, in the side panel ----------------------------------------------
+  // What makes the suggestions, whether it is answering and what it has
+  // learned from: a few quiet lines, and one amber one while it rests.
+  const engineEl = $('#side-engine'), engineLines = $('#engine-lines');
+  const clockOf = iso => new Date(iso).toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit', timeZone: 'Asia/Kolkata' }).toLowerCase();
+  async function loadEngine() {
+    if (!engineEl || document.hidden || getComputedStyle(engineEl.parentElement).display === 'none') return;
+    let s;
+    try { s = await api('engine'); } catch (_) { return; } // keep the last lines
+    const lines = [];
+    if (!s.configured) lines.push(h('p', { text: 'From your history alone — no model is set up.' }));
+    else {
+      lines.push(h('p', { class: 'engine-model' }, h('b', { text: s.modelName || s.model })));
+      if (s.health && !s.health.available) lines.push(h('p', { class: 'engine-rest', text: 'Resting until ' + clockOf(s.health.restUntil) + (s.health.reason ? ': ' + s.health.reason : '') + '. Cards keep what they say.' }));
+      const learned = Object.values(s.feedback || {}).reduce((a, b) => a + b, 0);
+      if (learned) lines.push(h('p', { text: 'Learning from ' + (learned === 1 ? 'one decision of yours' : group(learned) + ' of your decisions') }));
+      const w = s.waiting || {};
+      if (w.improved24h) lines.push(h('p', { text: (w.improved24h === 1 ? 'One suggestion' : group(w.improved24h) + ' suggestions') + ' updated today' }));
+      if (w.older) lines.push(h('p', { class: 'engine-queue', text: group(w.older) + ' older ' + (w.older === 1 ? 'suggestion' : 'suggestions') + ' queued for a second look' }));
+    }
+    engineLines.replaceChildren(...lines);
+    engineEl.hidden = false;
+  }
+  setInterval(loadEngine, 120000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) loadEngine(); });
+
   render();
   load(true);
+  loadEngine();
 })();

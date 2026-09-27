@@ -28,6 +28,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/rounakdatta/texas-fold-em/internal/integration/feedback"
 	"html/template"
 	"log/slog"
 	"net/http"
@@ -38,6 +39,7 @@ import (
 
 	"github.com/rounakdatta/texas-fold-em/internal/integration"
 	"github.com/rounakdatta/texas-fold-em/internal/integration/classifier"
+	"github.com/rounakdatta/texas-fold-em/internal/integration/llm"
 )
 
 //go:embed templates/*.html
@@ -101,7 +103,9 @@ func (h *Handler) SetClassifier(c *classifier.Classifier) { h.cls = c }
 
 // SetFireflyAccountsSyncer wires the firefly-accounts mirror syncer so the
 // review UI can refresh it on demand (the "sync accounts" button). Optional.
-func (h *Handler) SetFireflyAccountsSyncer(s *integration.FireflyAccountsSyncer) { h.fireflyAccounts = s }
+func (h *Handler) SetFireflyAccountsSyncer(s *integration.FireflyAccountsSyncer) {
+	h.fireflyAccounts = s
+}
 
 // New constructs a UI Handler.
 func New(db *sql.DB, pusher *integration.Pusher, log *slog.Logger, adminKey string, auth AuthMode) (*Handler, error) {
@@ -188,6 +192,9 @@ func (h *Handler) Mount(mux *http.ServeMux) {
 	mux.Handle("POST /api/rows/{fold_uuid}/restore", h.withAPI(h.handleCardRestore))
 	mux.Handle("POST /api/sync-accounts", h.withAPI(h.handleAPISyncAccounts))
 	mux.Handle("POST /api/categories", h.withAPI(h.handleAPICreateCategory))
+	mux.Handle("GET /api/engine", h.withAPI(h.handleEngine))
+	mux.Handle("GET /api/engine/eval", h.withAPI(h.handleEvalStatus))
+	mux.Handle("POST /api/engine/eval", h.withAPI(h.handleEvalStart))
 	if h.auth == AuthModeCookie {
 		mux.HandleFunc("GET /login", h.handleLogin)
 	}
@@ -255,18 +262,18 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 // rendering. TxnTimestamp keeps a server-side fallback for clients
 // without JS (still UTC, but readable).
 type indexRow struct {
-	FoldUUID             string
-	TxnTimestamp         string
-	TxnTimestampUTC      string
-	AmountDisplay        string
-	Currency             string
-	ForeignDisplay       string // e.g. "AED 25.00"; empty for domestic
-	Mode                 string
-	Type                 string
-	MerchantExtracted    string
-	Status               string
-	TierLabel            string
-	Confidence           float64
+	FoldUUID          string
+	TxnTimestamp      string
+	TxnTimestampUTC   string
+	AmountDisplay     string
+	Currency          string
+	ForeignDisplay    string // e.g. "AED 25.00"; empty for domestic
+	Mode              string
+	Type              string
+	MerchantExtracted string
+	Status            string
+	TierLabel         string
+	Confidence        float64
 	// CategoryName is the category push will send: firefly's live one for a
 	// pushed row, else the human's choice (blank for an explicit "none"),
 	// else the classifier's suggestion.
@@ -842,6 +849,14 @@ type detailRow struct {
 	// (its refund_group_id, notes, merchant …), for the operator to inspect.
 	RawPayload string
 	IsRefund   bool // the row gives money back for a purchase (see the refund card)
+	// What the engine said about its suggestion (Tier 3's evidence).
+	Engine      string   // "Claude Opus 5.5", or "" for the deterministic tiers
+	Signals     []string // what decided it
+	Unknowns    string   // what its title left blank, "items, who with"
+	Learned     string   // what it drew on from your history
+	Reasoning   string   // its reasoning, in its words
+	Resuggested string   // when and why it suggested again
+	HoldBy      string   // "fold" when fold put it on hold
 }
 
 // editForm is the editable subset of the row, in form-field shape.
@@ -1016,6 +1031,8 @@ func (h *Handler) fetchDetail(ctx context.Context, uuid string) (detailRow, edit
 		cAmt, cFx                       sql.NullInt64
 		cTs                             sql.NullString
 		dup                             int
+		model, resReason, resAt         string
+		resChanged                      bool
 	)
 	err := h.db.QueryRowContext(ctx, `
 		SELECT fold_uuid, narration, txn_timestamp, amount_paise, currency,
@@ -1030,7 +1047,9 @@ func (h *Handler) fetchDetail(ctx context.Context, uuid string) (detailRow, edit
 		       confirmed_destination_account_name, proposed_destination_account_name,
 		       confirmed_source_account_name, proposed_source_account_name,
 		       confirmed_amount_paise, confirmed_foreign_amount_paise, confirmed_txn_timestamp,
-		       `+possibleDuplicateSQL("raw_payload")+`, raw_payload
+		       `+possibleDuplicateSQL("raw_payload")+`, raw_payload,
+		       COALESCE(classifier_model, ''), COALESCE(resuggest_reason, ''), resuggest_changed,
+		       COALESCE(resuggested_at || '', ''), COALESCE(hold_by, '')
 		FROM staged_fold_txns
 		WHERE fold_uuid = ?
 	`, uuid).Scan(
@@ -1041,6 +1060,7 @@ func (h *Handler) fetchDetail(ctx context.Context, uuid string) (detailRow, edit
 		&cDestName, &pDestName,
 		&cSrcName, &pSrcName,
 		&cAmt, &cFx, &cTs, &dup, &r.RawPayload,
+		&model, &resReason, &resChanged, &resAt, &r.HoldBy,
 	)
 	if err != nil {
 		return r, editForm{}, "", err
@@ -1070,6 +1090,8 @@ func (h *Handler) fetchDetail(ctx context.Context, uuid string) (detailRow, edit
 	if conf.Valid {
 		r.Confidence = conf.Float64
 	}
+	r.Engine = llm.DisplayName(model)
+	describeEngine(&r, evidence.String, resReason, resChanged, resAt)
 
 	edit := editForm{
 		CategoryID:  nullableInt64Str(cCatID, pCatID),
@@ -1281,6 +1303,7 @@ func (h *Handler) handleSkip(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/transactions/"+uuid, http.StatusSeeOther)
 		return
 	}
+	h.recordDecision(r.Context(), uuid, feedback.FeedbackSkip, "")
 	h.flashOk(w, "marked skipped")
 	http.Redirect(w, r, back, http.StatusSeeOther)
 }
@@ -1340,6 +1363,16 @@ func (h *Handler) handleReclassify(w http.ResponseWriter, r *http.Request) {
 // doesn't carry the field at all keeps what is stored. Status is bumped
 // to ready_to_push if it was needs_review.
 func (h *Handler) saveEdits(ctx context.Context, uuid string, form url.Values) (unresolved []string, err error) {
+	// What the card said before this save, so a save that changes it is
+	// kept as a decision the classifier learns from (feedback.go).
+	before, snapErr := feedback.SnapshotReview(ctx, h.db, uuid)
+	defer func() {
+		if err == nil && snapErr == nil {
+			if ferr := feedback.RecordEdit(ctx, h.db, uuid, before); ferr != nil {
+				h.log.Warn("record edit feedback", "fold_uuid", uuid, "err", ferr)
+			}
+		}
+	}()
 	destName := strings.TrimSpace(form.Get("destination_name"))
 	srcName := strings.TrimSpace(form.Get("source_name"))
 	catName := strings.TrimSpace(form.Get("category_name"))
@@ -1465,13 +1498,28 @@ func (h *Handler) saveEdits(ctx context.Context, uuid string, form url.Values) (
 		return unresolved, err
 	}
 	// A hold's reason, when the form carried the field ("" releases it).
+	// The form sends the stored reason back unchanged on every save, so
+	// only a changed reason is a decision: a new hold is a person's, and
+	// releasing one fold set tells fold never to set it again.
 	if formHas(form, "hold_reason") {
-		var reason any
-		if v := strings.TrimSpace(form.Get("hold_reason")); v != "" {
-			reason = v
-		}
-		if _, err := h.db.ExecContext(ctx, `UPDATE staged_fold_txns SET hold_reason = ? WHERE fold_uuid = ?`, reason, uuid); err != nil {
-			return unresolved, err
+		v := strings.TrimSpace(form.Get("hold_reason"))
+		var current string
+		_ = h.db.QueryRowContext(ctx, `SELECT COALESCE(hold_reason, '') FROM staged_fold_txns WHERE fold_uuid = ?`, uuid).Scan(&current)
+		if v != strings.TrimSpace(current) {
+			heldByFold := h.heldByFold(ctx, uuid)
+			var reason any
+			if v != "" {
+				reason = v
+			}
+			if _, err := h.db.ExecContext(ctx, `UPDATE staged_fold_txns SET hold_reason = ?, hold_by = NULL WHERE fold_uuid = ?`, reason, uuid); err != nil {
+				return unresolved, err
+			}
+			switch {
+			case v != "":
+				h.recordDecision(ctx, uuid, feedback.FeedbackHold, v)
+			case heldByFold:
+				h.recordDecision(ctx, uuid, feedback.FeedbackRelease, "")
+			}
 		}
 	}
 	// Which purchase a refund refunds (the "refund of" picker). Only when
@@ -1939,4 +1987,75 @@ func (h *Handler) lookupBudgetName(ctx context.Context, id int64) string {
 		return name.String
 	}
 	return ""
+}
+
+// describeEngine fills in what the engine said about a row's suggestion, in
+// the words the detail page shows.
+func describeEngine(r *detailRow, evidenceJSON, resReason string, resChanged bool, resAt string) {
+	var ev struct {
+		Note     string   `json:"note"`
+		Signals  []string `json:"signals"`
+		Unknowns []string `json:"unknowns"`
+		Learned  *struct {
+			Corrections int  `json:"corrections"`
+			Decisions   int  `json:"decisions"`
+			LedgerRows  int  `json:"ledger_rows"`
+			Neighbours  int  `json:"neighbours"`
+			Trip        bool `json:"trip"`
+			Recurring   bool `json:"recurring"`
+		} `json:"learned"`
+	}
+	if evidenceJSON == "" || json.Unmarshal([]byte(evidenceJSON), &ev) != nil {
+		return
+	}
+	r.Signals = ev.Signals
+	var blanks []string
+	for _, u := range ev.Unknowns {
+		blanks = append(blanks, blankLabel(u))
+	}
+	r.Unknowns = strings.Join(blanks, ", ")
+	if l := ev.Learned; l != nil {
+		var parts []string
+		count := func(n int, one, many string) {
+			switch {
+			case n == 1:
+				parts = append(parts, "1 "+one)
+			case n > 1:
+				parts = append(parts, fmt.Sprintf("%d %s", n, many))
+			}
+		}
+		count(l.Corrections, "correction of yours", "of your corrections")
+		count(l.Decisions, "past decision", "past decisions")
+		count(l.LedgerRows, "Firefly row naming the same payee", "Firefly rows naming the same payee")
+		count(l.Neighbours, "transaction around it", "transactions around it")
+		if l.Trip {
+			parts = append(parts, "the trip it belongs to")
+		}
+		if l.Recurring {
+			parts = append(parts, "its recurring pattern")
+		}
+		r.Learned = strings.Join(parts, " · ")
+	}
+	if r.Engine != "" {
+		r.Reasoning = strings.TrimSpace(ev.Note)
+	}
+	if resAt != "" {
+		if t, ok := parseDBTime(resAt); ok {
+			day := spokenDay(t, time.Now())
+			if day == "Today" || day == "Yesterday" { // mid-sentence
+				day = strings.ToLower(day)
+			}
+			when := day + ", " + spokenClock(t)
+			switch {
+			case resReason == "learned" && resChanged:
+				r.Resuggested = "Suggested again " + when + ", after your corrections to similar transactions — and it changed."
+			case resReason == "learned":
+				r.Resuggested = "Checked again " + when + " after your corrections to similar transactions; it still says the same."
+			case resChanged:
+				r.Resuggested = "Suggested again " + when + " by the newer engine — and it changed."
+			default:
+				r.Resuggested = "Checked again " + when + " by the newer engine; it still says the same."
+			}
+		}
+	}
 }

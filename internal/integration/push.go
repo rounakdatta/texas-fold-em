@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/rounakdatta/texas-fold-em/internal/integration/feedback"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -99,17 +100,17 @@ func (p *Pusher) SetEagerSyncer(s *Syncer) { p.eagerSyncer = s }
 
 // pushableRow is the slim view of staged_fold_txns we read for a push.
 type pushableRow struct {
-	FoldUUID     string
-	AmountPaise  int64
-	Currency     string
+	FoldUUID    string
+	AmountPaise int64
+	Currency    string
 	// Foreign side of a cross-currency charge (e.g. AED 5.99) — set when the
 	// original charge currency differs from the home currency. NULL for
 	// domestic transactions.
 	ForeignAmountPaise sql.NullInt64
 	ForeignCurrency    sql.NullString
-	TxnTimestamp time.Time
-	Type         string // INCOMING | OUTGOING
-	Status       string
+	TxnTimestamp       time.Time
+	Type               string // INCOMING | OUTGOING
+	Status             string
 
 	ConfirmedSourceAccountID        sql.NullInt64
 	ConfirmedSourceAccountName      sql.NullString
@@ -295,6 +296,11 @@ func (p *Pusher) Push(ctx context.Context, foldUUID string, confirm bool) (PushR
 		if err := p.learner.LearnFromPushed(ctx, row.FoldUUID); err != nil {
 			p.log.Warn("learner failed; push still succeeded", "fold_uuid", row.FoldUUID, "err", err)
 		}
+	}
+	// What was sent is the person's final word on this transaction — the
+	// example the classifier learns most from (feedback.go).
+	if err := feedback.RecordDecision(ctx, p.db.DB, row.FoldUUID, feedback.FeedbackSend, ""); err != nil {
+		p.log.Warn("record send feedback; push still succeeded", "fold_uuid", row.FoldUUID, "err", err)
 	}
 
 	// Refunds: record "this refunds that purchase" in firefly as a native
@@ -671,6 +677,9 @@ func (p *Pusher) Update(ctx context.Context, foldUUID string) (PushReport, error
 	}
 	if p.learner != nil {
 		_ = p.learner.LearnFromPushed(ctx, foldUUID)
+	}
+	if err := feedback.RecordDecision(ctx, p.db.DB, foldUUID, feedback.FeedbackSend, ""); err != nil {
+		p.log.Warn("record update feedback", "fold_uuid", foldUUID, "err", err)
 	}
 	p.linkRefunds(ctx, foldUUID)
 	return PushReport{
