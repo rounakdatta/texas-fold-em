@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/rounakdatta/texas-fold-em/internal/integration/feedback"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -108,12 +109,29 @@ type reviewCard struct {
 	Manual    bool        `json:"manual,omitempty"`
 	Later     bool        `json:"later,omitempty"`
 	Hold      string      `json:"hold,omitempty"`
+	HoldBy    string      `json:"holdBy,omitempty"` // "fold" when the classifier held it
 	Duplicate bool        `json:"duplicate,omitempty"`
 	Refund    *cardRefund `json:"refund,omitempty"`
 	// Blockers: what must change before this can be sent. The same list
 	// guards the send endpoint, so the card and the server never disagree.
 	Blockers []string `json:"blockers,omitempty"`
 	EditURL  string   `json:"editUrl"`
+	// Why: what the engine can add about its own suggestion, when it has
+	// something worth a line.
+	Why *cardWhy `json:"why,omitempty"`
+}
+
+// cardWhy is the engine's word on a card, each part present only when it
+// says something.
+type cardWhy struct {
+	// Blanks name what each ___ in the title stands for, in order ("items",
+	// "who with"), while the title is still the engine's own.
+	Blanks []string `json:"blanks,omitempty"`
+	// Learned says what a re-suggestion learned from, when your corrections
+	// changed this card's suggestion.
+	Learned string `json:"learned,omitempty"`
+	// Hold is the engine's case for holding this one back.
+	Hold string `json:"hold,omitempty"`
 }
 
 // blocker kinds, shared with static/review.js.
@@ -162,8 +180,18 @@ var cardSelect = `
 	         OR (s.type = 'INCOMING' AND COALESCE(s.confirmed_category_id, s.proposed_category_id) IN
 	             (SELECT category_id FROM firefly_txns WHERE LOWER(category_name) = 'refund')),
 	       COALESCE(NULLIF(s.confirmed_refund_of,''), s.proposed_refund_of, ''),
-	       COALESCE(s.confirmed_txn_type, ''), COALESCE(s.proposed_txn_type, '')
+	       COALESCE(s.confirmed_txn_type, ''), COALESCE(s.proposed_txn_type, ''),
+	       COALESCE(s.hold_by, ''), COALESCE(s.resuggest_reason, ''), s.resuggest_changed,
+	       COALESCE(s.classifier_evidence_json, ''), NULLIF(TRIM(s.confirmed_description), '') IS NULL,
+	       ` + humanTouchedSQL + `
 	FROM staged_fold_txns s`
+
+// humanTouchedSQL: a person chose something on this row.
+const humanTouchedSQL = `(s.confirmed_destination_account_id IS NOT NULL OR s.confirmed_destination_account_name IS NOT NULL
+	    OR s.confirmed_source_account_id IS NOT NULL OR s.confirmed_source_account_name IS NOT NULL
+	    OR s.confirmed_category_id IS NOT NULL OR s.confirmed_budget_id IS NOT NULL
+	    OR s.confirmed_description IS NOT NULL OR s.confirmed_tags_json IS NOT NULL
+	    OR s.confirmed_txn_type IS NOT NULL OR s.confirmed_refund_of IS NOT NULL)`
 
 // reviewable: rows a human still has to decide about. pending rows haven't
 // been classified yet; pushed and skipped rows are decided.
@@ -191,19 +219,27 @@ type cardRow struct {
 	isRefund                           sql.NullBool
 	refundRef                          string
 	confType, propType                 string
+	holdBy, resuggestReason            string
+	resuggestChanged                   bool
+	evidenceJSON                       string
+	titleIsEngines, touched            bool
 }
 
 func scanCardRow(rows interface{ Scan(...any) error }) (cardRow, error) {
 	var r cardRow
 	err := rows.Scan(&r.uuid, &r.status, &r.typ, &r.mode, &r.narration, &r.tsStr, &r.amountPaise, &r.foldPaise,
 		&r.fxPaise, &r.fxCur, &r.title, &r.category, &r.tagsJSON, &r.srcID, &r.srcName, &r.dstID, &r.dstName,
-		&r.merchant, &r.notes, &r.dup, &r.hold, &r.later, &r.isRefund, &r.refundRef, &r.confType, &r.propType)
+		&r.merchant, &r.notes, &r.dup, &r.hold, &r.later, &r.isRefund, &r.refundRef, &r.confType, &r.propType,
+		&r.holdBy, &r.resuggestReason, &r.resuggestChanged, &r.evidenceJSON, &r.titleIsEngines, &r.touched)
 	return r, err
 }
 
 // buildCard turns a read row into the card the deck shows.
 func (h *Handler) buildCard(ctx context.Context, r cardRow) reviewCard {
 	c := reviewCard{UUID: r.uuid, Status: r.status, AmountPaise: r.amountPaise, Title: r.title, Hold: r.hold, Later: r.later}
+	if r.hold != "" {
+		c.HoldBy = r.holdBy
+	}
 	c.Narration = r.narration
 	c.Manual = r.mode == manualMode
 	c.Duplicate = r.dup == 1
@@ -299,7 +335,58 @@ func (h *Handler) buildCard(ctx context.Context, r cardRow) reviewCard {
 		c.Blockers = insertBlocker(c.Blockers, blockSource)
 	}
 	c.EditURL = txnPath(c.UUID) + "?back=" + url.QueryEscape(pathDeck)
+	c.Why = engineWhy(r, c)
 	return c
+}
+
+// engineWhy is what the engine can say about a card's suggestion — only
+// what is worth a line (a badge on every card would say nothing):
+//
+//   - what each blank in its title stands for, while the title is its own;
+//   - what it learned from, when a re-suggestion after your corrections
+//     changed this card and you haven't touched it since;
+//   - its case for holding the card back, when nobody has held it.
+func engineWhy(r cardRow, c reviewCard) *cardWhy {
+	if r.evidenceJSON == "" {
+		return nil
+	}
+	var ev struct {
+		Signals  []string `json:"signals"`
+		Unknowns []string `json:"unknowns"`
+		Hold     string   `json:"hold_suggestion"`
+	}
+	if json.Unmarshal([]byte(r.evidenceJSON), &ev) != nil {
+		return nil
+	}
+	var w cardWhy
+	if r.titleIsEngines && len(ev.Unknowns) > 0 && strings.Count(c.Title, titleBlank) == len(ev.Unknowns) {
+		for _, u := range ev.Unknowns {
+			w.Blanks = append(w.Blanks, blankLabel(u))
+		}
+	}
+	if r.resuggestReason == "learned" && r.resuggestChanged && !r.touched && len(ev.Signals) > 0 {
+		w.Learned = strings.Join(ev.Signals[:min(len(ev.Signals), 2)], " · ")
+	}
+	if c.Hold == "" && !r.touched && strings.TrimSpace(ev.Hold) != "" {
+		w.Hold = strings.TrimSpace(ev.Hold)
+	}
+	if len(w.Blanks) == 0 && w.Learned == "" && w.Hold == "" {
+		return nil
+	}
+	return &w
+}
+
+// blankLabel is a blank's hint as it sits in the title: short, lower case,
+// no stop ("Items bought." → "items bought").
+func blankLabel(s string) string {
+	r := []rune(strings.TrimRight(strings.TrimSpace(s), ".?!"))
+	if len(r) > 1 && unicode.IsUpper(r[0]) && unicode.IsLower(r[1]) { // "Items", not "UPI"
+		r[0] = unicode.ToLower(r[0])
+	}
+	if len(r) > 22 {
+		r = append(r[:21], '…')
+	}
+	return string(r)
 }
 
 // cardBlockers lists what must change before a card can be sent. Firefly is
@@ -1180,10 +1267,18 @@ func (h *Handler) handleCardHold(w http.ResponseWriter, r *http.Request) {
 	if s := strings.TrimSpace(body.Reason); s != "" {
 		reason = s
 	}
+	heldByFold := h.heldByFold(r.Context(), uuid)
+	// Whoever sets or releases a hold here is a person: hold_by clears.
 	if _, err := h.db.ExecContext(r.Context(),
-		`UPDATE staged_fold_txns SET hold_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE fold_uuid = ?`, reason, uuid); err != nil {
+		`UPDATE staged_fold_txns SET hold_reason = ?, hold_by = NULL, updated_at = CURRENT_TIMESTAMP WHERE fold_uuid = ?`, reason, uuid); err != nil {
 		h.apiError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	switch {
+	case reason != nil: // a hold is a decision the classifier learns from
+		h.recordDecision(r.Context(), uuid, feedback.FeedbackHold, body.Reason)
+	case heldByFold: // fold was wrong to hold it: never again
+		h.recordDecision(r.Context(), uuid, feedback.FeedbackRelease, "")
 	}
 	c, _ := h.loadCard(r.Context(), uuid)
 	writeJSON(w, http.StatusOK, actionResponse{OK: true, Card: &c})
@@ -1201,6 +1296,7 @@ func (h *Handler) handleCardSkip(w http.ResponseWriter, r *http.Request) {
 		h.apiError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	h.recordDecision(r.Context(), uuid, feedback.FeedbackSkip, "")
 	writeJSON(w, http.StatusOK, actionResponse{OK: true})
 }
 
@@ -1599,4 +1695,19 @@ func (h *Handler) handleReview(w http.ResponseWriter, r *http.Request) {
 		"AccountsJSON": string(accountsJSON),
 		"Flash":        flashFromCookie(r, w),
 	})
+}
+
+// heldByFold reports whether the row's current hold is one fold set.
+func (h *Handler) heldByFold(ctx context.Context, uuid string) bool {
+	var by string
+	_ = h.db.QueryRowContext(ctx, `SELECT COALESCE(hold_by, '') FROM staged_fold_txns WHERE fold_uuid = ? AND hold_reason IS NOT NULL`, uuid).Scan(&by)
+	return by == "fold"
+}
+
+// recordDecision keeps a hold or skip as feedback; a failure to record it is
+// logged, never surfaced — the decision itself already stands.
+func (h *Handler) recordDecision(ctx context.Context, uuid, action, note string) {
+	if err := feedback.RecordDecision(ctx, h.db, uuid, action, note); err != nil {
+		h.log.Warn("record decision feedback", "fold_uuid", uuid, "action", action, "err", err)
+	}
 }

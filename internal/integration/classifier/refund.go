@@ -181,6 +181,18 @@ func (c *Classifier) tierRefund(ctx context.Context, staged StagedRow) (Decision
 	if err != nil {
 		return Decision{}, false, err
 	}
+	// A card's "credited back" alert names no merchant, so the search above
+	// finds nothing; the charge it gives back is the same amount on the same
+	// card shortly before (creditback.go). Booked like a refund of it — and
+	// held, because it is almost always a charge never billed.
+	if isCreditBack(staged) {
+		ch := c.findCreditBackCharge(ctx, staged, payload.AccountID, probe.When)
+		if ch != nil && ch.status != "skipped" {
+			cands = append([]RefundCandidate{ch.cand}, cands...)
+		}
+		d.Hold = creditBackHold(staged, ch, probe.When)
+		why = "a card's credit-back with no merchant: a released authorisation"
+	}
 	best, conf, note := pickRefundCandidate(cands)
 
 	merchant := refundMerchantName(ctx, c.db, staged)

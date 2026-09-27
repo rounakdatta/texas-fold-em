@@ -2,6 +2,7 @@ package integration
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -148,14 +149,23 @@ func (s *FireflyAccountsSyncer) Sync(ctx context.Context) (FireflyAccountsSyncRe
 // accounts back. A category created from the deck while this runs is stamped
 // later than the sync began, so the clean-up leaves it alone.
 func (s *FireflyAccountsSyncer) syncCategories(ctx context.Context) (int, error) {
-	// millisecond stamps (the same shape SQLite's strftime('%Y-%m-%d %H:%M:%f')
-	// writes), so two syncs in one second still tell their rows apart
-	began := time.Now().UTC().Format("2006-01-02 15:04:05.000")
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	// Millisecond stamps (the shape SQLite's strftime('%Y-%m-%d %H:%M:%f')
+	// writes), and strictly later than any stamp already stored: two syncs
+	// inside one millisecond would otherwise share a stamp, and the second
+	// one's clean-up could not tell the first one's rows from its own.
+	const stampLayout = "2006-01-02 15:04:05.000"
+	now := time.Now().UTC().Truncate(time.Millisecond) // compared as it is written
+	var last sql.NullString
+	_ = tx.QueryRowContext(ctx, `SELECT MAX(last_synced_at) FROM firefly_categories`).Scan(&last)
+	if t, err := time.Parse(stampLayout, last.String); err == nil && !now.After(t) {
+		now = t.Add(time.Millisecond)
+	}
+	began := now.Format(stampLayout)
 	n, page := 0, 1
 	var seen []any
 	for {

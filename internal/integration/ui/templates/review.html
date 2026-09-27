@@ -56,6 +56,10 @@
       <h2 id="side-sync-title">Accounts</h2>
       {{template "accounts-sync" .}}
     </section>{{end}}
+    <section class="side-engine" id="side-engine" aria-labelledby="side-engine-title" hidden>
+      <h2 id="side-engine-title">Suggestions</h2>
+      <div class="engine-lines" id="engine-lines" role="status"></div>
+    </section>
   </aside>
 
   <div class="toasts" id="toasts" role="status" aria-live="polite"></div>

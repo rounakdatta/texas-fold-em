@@ -23,7 +23,7 @@
       </div>
     </section>
 
-    {{if .Card.Hold}}<div class="banner banner-attn"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3.5 18 17H2z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M10 8.5v3.6M10 14.4v.1" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg><div class="banner-body"><b>On hold:</b> {{sentence .Card.Hold}} It can't be sent until the hold is released — clear the reason below.</div></div>{{end}}
+    {{if .Card.Hold}}<div class="banner banner-attn"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3.5 18 17H2z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M10 8.5v3.6M10 14.4v.1" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg><div class="banner-body"><b>{{if eq .Card.HoldBy "fold"}}Held by fold:{{else}}On hold:{{end}}</b> {{sentence .Card.Hold}} It can't be sent until the hold is released — clear the reason below.</div></div>{{end}}
     {{if .Card.ProblemText}}<div class="banner banner-attn"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3.5 18 17H2z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M10 8.5v3.6M10 14.4v.1" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg><div class="banner-body"><b>It can't be sent like this.</b> {{.Card.ProblemText}}{{if eq .Card.Problem "swapped"}}
       <div class="banner-actions"><button type="button" class="btn btn-sm btn-quiet" data-swap-sides>Swap them</button></div>{{end}}</div></div>{{end}}
     {{if .IsPushed}}<div class="banner banner-info"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M10 9v5M10 6.3v.1" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg><div class="banner-body"><b>Already in Firefly.</b>{{if .FireflyPulled}} These are Firefly's current values.{{end}} Saving updates that transaction in place — no duplicate.</div></div>{{end}}
@@ -189,9 +189,14 @@
     {{end}}
 
     <section class="panel">
-      <h2>How it was classified</h2>
-      <p class="muted" style="margin:0 0 10px;font-size:13.5px">Tier {{.Row.TierLabel}} · confidence {{if .Row.Confidence}}{{printf "%.2f" .Row.Confidence}}{{else}}—{{end}}</p>
-      {{if .EvidencePretty}}<details class="more"><summary>The classifier's evidence</summary><pre>{{.EvidencePretty}}</pre></details>{{end}}
+      <h2>How it was suggested</h2>
+      <p class="muted" style="margin:0 0 10px;font-size:13.5px">{{if .Row.Engine}}{{.Row.Engine}} · {{end}}Tier {{.Row.TierLabel}} · confidence {{if .Row.Confidence}}{{printf "%.2f" .Row.Confidence}}{{else}}—{{end}}</p>
+      {{if .Row.Signals}}<ul class="why-list">{{range .Row.Signals}}<li>{{.}}</li>{{end}}</ul>{{end}}
+      {{if .Row.Learned}}<p class="why-note">Drew on {{.Row.Learned}}.</p>{{end}}
+      {{if .Row.Unknowns}}<p class="why-note">Left blank for you: {{.Row.Unknowns}}.</p>{{end}}
+      {{if .Row.Resuggested}}<p class="why-note">{{.Row.Resuggested}}</p>{{end}}
+      {{if .Row.Reasoning}}<details class="more"><summary>Its reasoning</summary><p class="why-reasoning">{{.Row.Reasoning}}</p></details>{{end}}
+      {{if .EvidencePretty}}<details class="more"{{if .Row.Reasoning}} style="margin-top:10px"{{end}}><summary>The classifier's evidence</summary><pre>{{.EvidencePretty}}</pre></details>{{end}}
       {{if .Row.RawPayload}}<details class="more" style="margin-top:10px"><summary>fold.money's raw payload</summary><pre>{{.Row.RawPayload}}</pre></details>{{end}}
       <p class="mono muted" style="margin:12px 0 0">{{.Row.FoldUUID}}</p>
     </section>

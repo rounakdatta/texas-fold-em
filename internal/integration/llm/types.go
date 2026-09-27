@@ -7,11 +7,18 @@ package llm
 // Docs: https://api-docs.deepseek.com/api/create-chat-completion
 
 type chatCompletionRequest struct {
-	Model          string          `json:"model"`
-	Messages       []chatMessage   `json:"messages"`
-	Temperature    float64         `json:"temperature"`
-	MaxTokens      int             `json:"max_tokens"`
-	ResponseFormat *responseFormat `json:"response_format,omitempty"`
+	Model    string        `json:"model"`
+	Messages []chatMessage `json:"messages"`
+	// Temperature is a pointer so it can be left out: Anthropic models
+	// behind an OpenAI-shaped gateway reject any temperature but 1 while
+	// extended thinking is on, so a reasoning request sends none.
+	Temperature *float64 `json:"temperature,omitempty"`
+	MaxTokens   int      `json:"max_tokens"`
+	// ReasoningEffort asks the host to think before answering ("low",
+	// "medium", "high" …). auth2api maps it to an Anthropic thinking
+	// budget; hosts that don't know the field ignore it.
+	ReasoningEffort string          `json:"reasoning_effort,omitempty"`
+	ResponseFormat  *responseFormat `json:"response_format,omitempty"`
 }
 
 type chatMessage struct {

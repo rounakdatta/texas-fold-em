@@ -87,6 +87,13 @@ type Decision struct {
 	// for ("fold:<uuid>" or "journal:<id>", see refund.go). Push turns it
 	// into firefly's native "Refund" transaction link.
 	RefundOf string
+	// Engine is the model that made a Tier-3 decision ("" for the
+	// deterministic tiers) — recorded so a better engine can revisit it.
+	Engine string
+	// Hold, when set, is why fold holds this row back from firefly (a
+	// card's credit-back of a charge never billed, creditback.go). Applied
+	// only to a row nobody has held or released.
+	Hold     string
 	Evidence Evidence
 }
 
@@ -102,6 +109,14 @@ type Evidence struct {
 	Tags               []string       `json:"tags,omitempty"`
 	// RefundCandidates are the purchases a refund could be for, best first.
 	RefundCandidates []RefundCandidate `json:"refund_candidates,omitempty"`
+	// Signals are the model's own short account of what decided it;
+	// Unknowns what the owner still has to fill in (one per ___);
+	// HoldSuggestion a released authorisation or a charge never billed;
+	// Learned what it was shown from the owner's history (learning.go).
+	Signals        []string       `json:"signals,omitempty"`
+	Unknowns       []string       `json:"unknowns,omitempty"`
+	HoldSuggestion string         `json:"hold_suggestion,omitempty"`
+	Learned        *LearnedCounts `json:"learned,omitempty"`
 }
 
 // LookupHitView is a denormalised view of merchant_lookup for the UI.
@@ -157,6 +172,12 @@ type Classifier struct {
 	threshold float64
 	ftsTopK   int
 	llm       *llm.Client // nil → Tier-3 skipped
+
+	// mu guards lastResuggest (resuggest.go), read by the engine status.
+	mu            sync.Mutex
+	lastResuggest *ResuggestReport
+	// eval is the shadow evaluation, one at a time (eval.go).
+	eval evalState
 	// concurrency bounds how many rows classifyMatching processes in
 	// parallel. <=1 (the default) is strictly sequential. The Tier-3 LLM
 	// call dominates per-row latency and holds no DB connection, so a
@@ -218,6 +239,12 @@ func (c *Classifier) SetConcurrency(n int) { c.concurrency = n }
 //   - LLM configured but errored / declined → use Tier 1, else Tier 2,
 //     else Tier 4. (Same priority — Tier 3 enriches, never breaks.)
 func (c *Classifier) ClassifyOne(ctx context.Context, staged StagedRow) (Decision, error) {
+	return c.classifyOne(ctx, staged, exclusion{})
+}
+
+// classifyOne is ClassifyOne with an exclusion: the shadow evaluation hides
+// the row it grades from every lookup, so the engine never sees the answer.
+func (c *Classifier) classifyOne(ctx context.Context, staged StagedRow, ex exclusion) (Decision, error) {
 	// Refunds first, and deterministically — see refund.go for why they
 	// never reach the merchant lookup or the LLM.
 	if d, ok, err := c.tierRefund(ctx, staged); err != nil {
@@ -228,14 +255,14 @@ func (c *Classifier) ClassifyOne(ctx context.Context, staged StagedRow) (Decisio
 
 	var tier1Hint, tier2Hint *Decision
 
-	if d, ok, err := c.tierOneMerchantLookup(ctx, staged); err != nil {
+	if d, ok, err := c.tierOneMerchantLookup(ctx, staged, ex); err != nil {
 		return Decision{}, fmt.Errorf("tier 1: %w", err)
 	} else if ok {
 		dCopy := d
 		tier1Hint = &dCopy
 	}
 
-	if d, ok, err := c.tierTwoFTSVote(ctx, staged); err != nil {
+	if d, ok, err := c.tierTwoFTSVote(ctx, staged, ex); err != nil {
 		return Decision{}, fmt.Errorf("tier 2: %w", err)
 	} else if ok {
 		dCopy := d
@@ -243,7 +270,7 @@ func (c *Classifier) ClassifyOne(ctx context.Context, staged StagedRow) (Decisio
 	}
 
 	if c.llm != nil {
-		if d, ok, err := c.tierThreeLLM(ctx, staged, tier1Hint, tier2Hint); err != nil {
+		if d, ok, err := c.tierThreeLLM(ctx, staged, tier1Hint, tier2Hint, ex); err != nil {
 			// Tier-3 transport / parse / hallucination failure. If a
 			// deterministic tier already produced an above-threshold
 			// hint, that's not a mediocre fallback — it's deterministic
@@ -286,7 +313,7 @@ func (c *Classifier) ClassifyOne(ctx context.Context, staged StagedRow) (Decisio
 // in merchant_lookup. Returns (decision, true, nil) when above
 // threshold; (zero, false, nil) when miss or below threshold; error
 // only on unexpected DB failures.
-func (c *Classifier) tierOneMerchantLookup(ctx context.Context, staged StagedRow) (Decision, bool, error) {
+func (c *Classifier) tierOneMerchantLookup(ctx context.Context, staged StagedRow, ex exclusion) (Decision, bool, error) {
 	if staged.MerchantExtracted == "" {
 		return Decision{}, false, nil
 	}
@@ -308,6 +335,11 @@ func (c *Classifier) tierOneMerchantLookup(ctx context.Context, staged StagedRow
 	// produce a stronger signal for an unusual narration of a known
 	// merchant.
 	if row.Confidence < c.threshold {
+		return Decision{}, false, nil
+	}
+	// Graded on a row already sent, a lookup built from one sample may be
+	// built from that very row: it would hand the engine its answer.
+	if ex.fireflyID != 0 && row.SampleSize <= 1 {
 		return Decision{}, false, nil
 	}
 	return Decision{
@@ -414,7 +446,7 @@ func (c *Classifier) queryMerchantLookup(ctx context.Context, merchantNorm strin
 // We require the merchant to have been extracted; without that, FTS5
 // over the full narration is too noisy (UPI handles, transaction refs
 // etc. drown out the signal). Better to send to human review.
-func (c *Classifier) tierTwoFTSVote(ctx context.Context, staged StagedRow) (Decision, bool, error) {
+func (c *Classifier) tierTwoFTSVote(ctx context.Context, staged StagedRow, ex exclusion) (Decision, bool, error) {
 	merch := staged.MerchantExtracted
 	if merch == "" {
 		return Decision{}, false, nil
@@ -436,9 +468,10 @@ func (c *Classifier) tierTwoFTSVote(ctx context.Context, staged StagedRow) (Deci
 		JOIN firefly_txns t ON t.firefly_id = firefly_txns_fts.rowid
 		WHERE firefly_txns_fts MATCH ?
 		  AND t.txn_type = ?
+		  AND t.firefly_id <> ?
 		ORDER BY score
 		LIMIT ?
-	`, query, fireflyTxnTypeFor(staged.Type), c.ftsTopK)
+	`, query, fireflyTxnTypeFor(staged.Type), ex.fireflyID, c.ftsTopK)
 	if err != nil {
 		return Decision{}, false, fmt.Errorf("fts query: %w", err)
 	}
@@ -674,6 +707,12 @@ func (c *Classifier) ApplyDecision(ctx context.Context, foldUUID string, d Decis
 		}
 	}
 
+	// fold's own hold (creditback.go) lands only on a row with no hold, and
+	// never on one where a person released fold's hold before. SQLite reads
+	// every SET expression against the row as it was, so both CASEs see the
+	// old hold_reason.
+	const foldMayHold = `? <> '' AND hold_reason IS NULL AND NOT EXISTS (
+		SELECT 1 FROM review_feedback f WHERE f.fold_uuid = staged_fold_txns.fold_uuid AND f.action = 'release')`
 	_, err = c.db.ExecContext(ctx, `
 		UPDATE staged_fold_txns
 		SET status                            = ?,
@@ -690,7 +729,11 @@ func (c *Classifier) ApplyDecision(ctx context.Context, foldUUID string, d Decis
 		    proposed_tags_json                = COALESCE(NULLIF(?, ''), proposed_tags_json),
 		    proposed_txn_type                 = ?,
 		    proposed_refund_of                = ?,
-		    classified_at                     = CURRENT_TIMESTAMP,
+		    classifier_model                  = ?,
+		    classifier_version                = ?,
+		    hold_by                           = CASE WHEN `+foldMayHold+` THEN 'fold' ELSE hold_by END,
+		    hold_reason                       = CASE WHEN `+foldMayHold+` THEN ? ELSE hold_reason END,
+		    classified_at                     = strftime('%Y-%m-%d %H:%M:%f', 'now'), -- to the ms: resuggest.go compares it
 		    updated_at                        = CURRENT_TIMESTAMP
 		WHERE fold_uuid = ?
 	`,
@@ -708,6 +751,10 @@ func (c *Classifier) ApplyDecision(ctx context.Context, foldUUID string, d Decis
 		tagsJSON,                   // proposed_tags_json (COALESCE preserves existing on empty)
 		nullableString(d.TxnType),  // proposed_txn_type
 		nullableString(d.RefundOf), // proposed_refund_of
+		nullableString(d.Engine),   // classifier_model
+		engineVersionFor(d),        // classifier_version
+		d.Hold,                     // hold_by: may fold hold it?
+		d.Hold, d.Hold,             // hold_reason: may fold hold it? then why
 		foldUUID,
 	)
 	if err != nil {
@@ -958,30 +1005,7 @@ func (c *Classifier) classifyAndApply(ctx context.Context, s StagedRow, report *
 	// credit could land on whichever asset a tier guessed — refunds were
 	// proposed onto "Axis Bank Ace" and even "CDSL".) The source of an
 	// INCOMING row is the payer, which stays the tiers' call.
-	if s.Type == "INCOMING" {
-		if fa, _ := lookupFoldAccountForStaged(ctx, c.db, s.RawPayload); fa != nil && fa.Name != "" {
-			assets, _ := listFireflyAssetsFromMirror(ctx, c.db)
-			if id, name, ok := matchFoldCardToFireflyAsset(fa, assets); ok {
-				d.DestinationAccountID = &id
-				d.DestinationAccountName = name
-			} else {
-				d.DestinationAccountID = nil
-				d.DestinationAccountName = fa.Name
-			}
-		}
-	}
-	if s.Type == "OUTGOING" {
-		if fa, _ := lookupFoldAccountForStaged(ctx, c.db, s.RawPayload); fa != nil && fa.Name != "" {
-			assets, _ := listFireflyAssetsFromMirror(ctx, c.db)
-			if id, name, ok := matchFoldCardToFireflyAsset(fa, assets); ok {
-				d.SourceAccountID = &id
-				d.SourceAccountName = name
-			} else {
-				d.SourceAccountID = nil
-				d.SourceAccountName = fa.Name
-			}
-		}
-	}
+	c.resolveOwnSide(ctx, s, &d)
 	if err := c.ApplyDecision(ctx, s.FoldUUID, d); err != nil {
 		return fmt.Errorf("apply %s: %w", s.FoldUUID, err)
 	}
@@ -1034,3 +1058,37 @@ func nullableToString(n sql.NullString) string {
 	}
 	return ""
 }
+
+// resolveOwnSide pins the person's own side of the move to the account fold
+// saw it on (see classifyAndApply for why that is ground truth): the paying
+// card of money out, the receiving account of money in.
+func (c *Classifier) resolveOwnSide(ctx context.Context, s StagedRow, d *Decision) {
+	if s.Type == "INCOMING" {
+		if fa, _ := lookupFoldAccountForStaged(ctx, c.db, s.RawPayload); fa != nil && fa.Name != "" {
+			assets, _ := listFireflyAssetsFromMirror(ctx, c.db)
+			if id, name, ok := matchFoldCardToFireflyAsset(fa, assets); ok {
+				d.DestinationAccountID = &id
+				d.DestinationAccountName = name
+			} else {
+				d.DestinationAccountID = nil
+				d.DestinationAccountName = fa.Name
+			}
+		}
+	}
+	if s.Type == "OUTGOING" {
+		if fa, _ := lookupFoldAccountForStaged(ctx, c.db, s.RawPayload); fa != nil && fa.Name != "" {
+			assets, _ := listFireflyAssetsFromMirror(ctx, c.db)
+			if id, name, ok := matchFoldCardToFireflyAsset(fa, assets); ok {
+				d.SourceAccountID = &id
+				d.SourceAccountName = name
+			} else {
+				d.SourceAccountID = nil
+				d.SourceAccountName = fa.Name
+			}
+		}
+	}
+}
+
+// LLM is the Tier-3 client (nil when none is configured), for the engine's
+// status in the UI.
+func (c *Classifier) LLM() *llm.Client { return c.llm }

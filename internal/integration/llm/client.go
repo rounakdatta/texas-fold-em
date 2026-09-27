@@ -40,6 +40,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -84,6 +85,182 @@ type Client struct {
 	// tests replace it with a zero-delay function so the retry suite
 	// runs in milliseconds. Set via package-internal field access.
 	backoffFunc func(int, error) time.Duration
+
+	// Tunables for a stronger, slower model (SetTimeout, SetMaxTokens,
+	// SetReasoningEffort). Zero values keep the defaults above.
+	timeout         time.Duration
+	maxTokens       int
+	reasoningEffort string
+
+	// calls remembers the last requests (outcome, latency, tokens) so the
+	// engine's health can be read from the UI without logs or keys.
+	mu        sync.Mutex
+	calls     []CallStat
+	okCount   int
+	failCount int
+
+	// The breaker (guarded by mu): after a long Retry-After, a refused key
+	// or a run of failed calls, the client stops calling until openUntil.
+	// A classify pass must not sleep for hours inside one call, and a
+	// struggling gateway — or a subscription at its limit — is not helped
+	// by being asked again every few seconds. Callers get ErrUnavailable at
+	// once and keep what they have.
+	openUntil   time.Time
+	openReason  string
+	failStreak  int
+	lastOK      time.Time
+	lastFailure string
+}
+
+// ErrUnavailable is returned, without a request, while the client rests.
+var ErrUnavailable = errors.New("llm: resting after failures")
+
+// Health is the breaker's state, for the engine status.
+type Health struct {
+	Available  bool      `json:"available"`
+	RestUntil  time.Time `json:"restUntil,omitempty"`
+	Reason     string    `json:"reason,omitempty"`
+	FailStreak int       `json:"failStreak,omitempty"`
+	LastOK     time.Time `json:"lastOk,omitempty"`
+	LastError  string    `json:"lastError,omitempty"`
+}
+
+// Health reports whether the client will call now, and if not, until when.
+func (c *Client) Health() Health {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	h := Health{Available: !time.Now().Before(c.openUntil), FailStreak: c.failStreak, LastOK: c.lastOK, LastError: c.lastFailure}
+	if !h.Available {
+		h.RestUntil, h.Reason = c.openUntil, c.openReason
+	}
+	return h
+}
+
+// maxInlineWait is the longest Retry-After waited out inside a call; a
+// longer one rests the client instead.
+const maxInlineWait = 30 * time.Second
+
+// maxRest caps any rest, so a bad header can't park the engine for days.
+const maxRest = 6 * time.Hour
+
+func (c *Client) rest(d time.Duration, why string) {
+	if d > maxRest {
+		d = maxRest
+	}
+	c.mu.Lock()
+	if until := time.Now().Add(d); until.After(c.openUntil) {
+		c.openUntil, c.openReason = until, why
+	}
+	c.mu.Unlock()
+	if c.log != nil {
+		c.log.Warn("llm: resting", "for", d.Round(time.Second), "reason", why)
+	}
+}
+
+// settle updates the breaker after a whole GenerateJSON (all its attempts).
+func (c *Client) settle(err error) {
+	if err == nil {
+		c.mu.Lock()
+		c.failStreak, c.lastOK, c.lastFailure = 0, time.Now(), ""
+		c.mu.Unlock()
+		return
+	}
+	if errors.Is(err, ErrUnavailable) || errors.Is(err, context.Canceled) {
+		return
+	}
+	var apiErr *Error
+	isAPI := errors.As(err, &apiErr)
+	c.mu.Lock()
+	c.failStreak++
+	streak := c.failStreak
+	c.lastFailure = truncate(err.Error(), 200)
+	c.mu.Unlock()
+	switch {
+	case isAPI && (apiErr.Status == http.StatusUnauthorized || apiErr.Status == http.StatusForbidden):
+		// the key was refused: asking again won't change that
+		c.rest(15*time.Minute, fmt.Sprintf("the gateway refused the key (HTTP %d)", apiErr.Status))
+	case streak >= 3:
+		// 2, 4, 8 … minutes, up to an hour
+		c.rest(min(time.Duration(1<<min(streak-2, 6))*time.Minute, time.Hour), fmt.Sprintf("%d calls in a row failed", streak))
+	}
+}
+
+// CallStat is one chat-completion request as the engine saw it.
+type CallStat struct {
+	At               time.Time `json:"at"`
+	DurationMS       int64     `json:"durationMs"`
+	OK               bool      `json:"ok"`
+	Status           int       `json:"status,omitempty"` // HTTP status, when there was one
+	Error            string    `json:"error,omitempty"`
+	PromptTokens     int       `json:"promptTokens,omitempty"`
+	CompletionTokens int       `json:"completionTokens,omitempty"`
+}
+
+const keptCalls = 50
+
+func (c *Client) record(s CallStat) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if s.OK {
+		c.okCount++
+	} else {
+		c.failCount++
+	}
+	c.calls = append(c.calls, s)
+	if len(c.calls) > keptCalls {
+		c.calls = c.calls[len(c.calls)-keptCalls:]
+	}
+}
+
+// RecentCalls returns the last requests, newest first, and the totals since
+// the process started.
+func (c *Client) RecentCalls() (calls []CallStat, ok, failed int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i := len(c.calls) - 1; i >= 0; i-- {
+		calls = append(calls, c.calls[i])
+	}
+	return calls, c.okCount, c.failCount
+}
+
+// SetTimeout bounds one attempt (default DefaultPerAttemptTimeout). A model
+// that reasons before answering needs longer than a fast chat model.
+func (c *Client) SetTimeout(d time.Duration) {
+	if d > 0 {
+		c.timeout = d
+	}
+}
+
+// SetMaxTokens caps the reply (default DefaultMaxTokens).
+func (c *Client) SetMaxTokens(n int) {
+	if n > 0 {
+		c.maxTokens = n
+	}
+}
+
+// SetReasoningEffort asks the host to think before answering ("", "none",
+// "low", "medium", "high"). The request then carries no temperature:
+// extended thinking accepts none but the default.
+func (c *Client) SetReasoningEffort(e string) { c.reasoningEffort = strings.TrimSpace(e) }
+
+// ReasoningEffort is the configured effort, for the engine's status.
+func (c *Client) ReasoningEffort() string { return c.reasoningEffort }
+
+// WithOverrides is a client like c — same key, endpoint, HTTP client and
+// tunables — with another model or reasoning effort ("" keeps c's), and
+// stats and a breaker of its own. The shadow evaluation uses it to compare
+// engines without disturbing the one that makes suggestions.
+func (c *Client) WithOverrides(model, reasoningEffort string) *Client {
+	n := NewClient(c.apiKey, c.model, c.endpoint, c.httpClient)
+	if m := strings.TrimSpace(model); m != "" {
+		n.model = m
+	}
+	n.log, n.backoffFunc = c.log, c.backoffFunc
+	n.timeout, n.maxTokens, n.reasoningEffort = c.timeout, c.maxTokens, c.reasoningEffort
+	if e := strings.TrimSpace(reasoningEffort); e != "" {
+		n.reasoningEffort = e
+	}
+	return n
 }
 
 // NewClient returns a configured client. apiKey is required; model and
@@ -129,7 +306,11 @@ func (c *Client) Endpoint() string { return c.endpoint }
 // Retries automatically on 429/5xx/network errors with exponential
 // backoff. Returns the original typed error on terminal failure so
 // the caller can branch on it.
-func (c *Client) GenerateJSON(ctx context.Context, systemPrompt, userPrompt string) (string, error) {
+func (c *Client) GenerateJSON(ctx context.Context, systemPrompt, userPrompt string) (_ string, err error) {
+	if h := c.Health(); !h.Available {
+		return "", fmt.Errorf("%w until %s: %s", ErrUnavailable, h.RestUntil.Format(time.RFC3339), h.Reason)
+	}
+	defer func() { c.settle(err) }()
 	if c.apiKey == "" {
 		return "", errors.New("llm: api key is empty")
 	}
@@ -137,11 +318,20 @@ func (c *Client) GenerateJSON(ctx context.Context, systemPrompt, userPrompt stri
 		return "", errors.New("llm: user prompt is empty")
 	}
 
+	maxTokens := DefaultMaxTokens
+	if c.maxTokens > 0 {
+		maxTokens = c.maxTokens
+	}
 	body := chatCompletionRequest{
 		Model:          c.model,
-		Temperature:    0,
-		MaxTokens:      DefaultMaxTokens,
+		MaxTokens:      maxTokens,
 		ResponseFormat: &responseFormat{Type: "json_object"},
+	}
+	if e := c.reasoningEffort; e != "" && e != "none" {
+		body.ReasoningEffort = e
+	} else {
+		zero := 0.0
+		body.Temperature = &zero // deterministic when not reasoning
 	}
 	if systemPrompt != "" {
 		body.Messages = append(body.Messages, chatMessage{Role: "system", Content: systemPrompt})
@@ -179,6 +369,13 @@ func (c *Client) GenerateJSON(ctx context.Context, systemPrompt, userPrompt stri
 		if !isRetryable(err) {
 			return "", err
 		}
+		// A long Retry-After (a subscription at its limit) is not waited
+		// out inside the call: the client rests, and the caller moves on.
+		var apiErr *Error
+		if errors.As(err, &apiErr) && apiErr.RetryAfter > maxInlineWait {
+			c.rest(apiErr.RetryAfter, fmt.Sprintf("the gateway asked for a %s pause (HTTP %d)", apiErr.RetryAfter.Round(time.Second), apiErr.Status))
+			return "", err
+		}
 	}
 	return "", fmt.Errorf("llm: exhausted %d retries: %w", MaxRetries, lastErr)
 }
@@ -187,7 +384,11 @@ func (c *Client) GenerateJSON(ctx context.Context, systemPrompt, userPrompt stri
 // timeout is enforced via a derived context so each retry gets a
 // fresh deadline.
 func (c *Client) doOnce(ctx context.Context, url string, buf []byte) (string, error) {
-	attemptCtx, cancel := context.WithTimeout(ctx, DefaultPerAttemptTimeout)
+	timeout := DefaultPerAttemptTimeout
+	if c.timeout > 0 {
+		timeout = c.timeout
+	}
+	attemptCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(attemptCtx, http.MethodPost, url, bytes.NewReader(buf))
@@ -199,21 +400,33 @@ func (c *Client) doOnce(ctx context.Context, url string, buf []byte) (string, er
 	req.Header.Set("Accept", "application/json")
 
 	start := time.Now()
+	stat := CallStat{At: start}
+	defer func() {
+		if stat.DurationMS == 0 {
+			stat.DurationMS = time.Since(start).Milliseconds()
+		}
+		c.record(stat)
+	}()
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		// Wrap to make the retry policy able to distinguish transport
 		// errors from API errors via errors.As.
+		stat.Error = truncate(err.Error(), 160)
 		return "", &transportError{err: err}
 	}
 	defer resp.Body.Close()
+	stat.Status = resp.StatusCode
 
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
+		stat.Error = "read body: " + truncate(err.Error(), 140)
 		return "", &transportError{err: fmt.Errorf("read body: %w", err)}
 	}
 	duration := time.Since(start)
+	stat.DurationMS = duration.Milliseconds()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		stat.Error = truncate(string(raw), 160)
 		return "", &Error{
 			Status:     resp.StatusCode,
 			Body:       string(raw),
@@ -223,9 +436,12 @@ func (c *Client) doOnce(ctx context.Context, url string, buf []byte) (string, er
 
 	var parsed chatCompletionResponse
 	if err := json.Unmarshal(raw, &parsed); err != nil {
+		stat.Error = "decode response"
 		return "", fmt.Errorf("llm: decode response: %w (body preview: %s)", err, truncate(string(raw), 256))
 	}
+	stat.PromptTokens, stat.CompletionTokens = parsed.Usage.PromptTokens, parsed.Usage.CompletionTokens
 	if len(parsed.Choices) == 0 || parsed.Choices[0].Message.Content == "" {
+		stat.Error = "empty response choice"
 		return "", errors.New("llm: empty response choice")
 	}
 	// finish_reason=length means the model was cut off mid-output.
@@ -233,8 +449,10 @@ func (c *Client) doOnce(ctx context.Context, url string, buf []byte) (string, er
 	// downstream parsing anyway, and surfacing it here gives a clearer
 	// log message for the operator.
 	if fr := parsed.Choices[0].FinishReason; fr == "length" {
+		stat.Error = "truncated (finish_reason=length)"
 		return "", fmt.Errorf("llm: response truncated (finish_reason=length); raise DefaultMaxTokens or trim prompt")
 	}
+	stat.OK = true
 	if c.log != nil {
 		u := parsed.Usage
 		c.log.Debug("llm: ok",
@@ -296,7 +514,8 @@ func isRetryable(err error) bool {
 			http.StatusInternalServerError, // 500
 			http.StatusBadGateway,          // 502
 			http.StatusServiceUnavailable,  // 503
-			http.StatusGatewayTimeout:      // 504
+			http.StatusGatewayTimeout,      // 504
+			529:                            // Anthropic: overloaded
 			return true
 		}
 		return false
@@ -355,4 +574,47 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// DisplayName is a model id the way a person would say it:
+// "claude-opus-5-5" → "Claude Opus 5.5", "deepseek-v4-flash" → "DeepSeek V4
+// Flash". Trailing version numbers join with dots.
+func DisplayName(model string) string {
+	parts := strings.FieldsFunc(strings.TrimSpace(model), func(r rune) bool { return r == '-' || r == '_' || r == ' ' })
+	if len(parts) == 0 {
+		return ""
+	}
+	known := map[string]string{"claude": "Claude", "deepseek": "DeepSeek", "gpt": "GPT", "gemini": "Gemini", "llama": "Llama"}
+	var words, version []string
+	for i, p := range parts {
+		if isDigits(p) && (len(version) > 0 || i > 0) {
+			version = append(version, p)
+			continue
+		}
+		if len(version) > 0 { // a word after the version: keep the version where it was
+			words = append(words, strings.Join(version, "."))
+			version = nil
+		}
+		if k, ok := known[strings.ToLower(p)]; ok {
+			words = append(words, k)
+		} else {
+			words = append(words, strings.ToUpper(p[:1])+p[1:])
+		}
+	}
+	if len(version) > 0 {
+		words = append(words, strings.Join(version, "."))
+	}
+	return strings.Join(words, " ")
+}
+
+func isDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }

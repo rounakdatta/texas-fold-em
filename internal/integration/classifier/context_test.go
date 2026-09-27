@@ -19,17 +19,17 @@ func TestMealContext_Buckets(t *testing.T) {
 		wantBucket  string // substring expected in the bucket label
 		wantDayKind string // "weekday" or "weekend"
 	}{
-		{"breakfast", "2026-05-12T01:00:00Z", "breakfast", "weekday"},     // 06:30 IST Tue
-		{"snack",     "2026-05-12T05:30:00Z", "mid-morning",  "weekday"},  // 11:00 IST Tue
-		{"lunch",     "2026-05-12T08:30:00Z", "lunch",        "weekday"},  // 14:00 IST Tue
-		{"tea",       "2026-05-12T11:00:00Z", "tea",          "weekday"},  // 16:30 IST Tue
+		{"breakfast", "2026-05-12T01:00:00Z", "breakfast", "weekday"},        // 06:30 IST Tue
+		{"snack", "2026-05-12T05:30:00Z", "mid-morning", "weekday"},          // 11:00 IST Tue
+		{"lunch", "2026-05-12T08:30:00Z", "lunch", "weekday"},                // 14:00 IST Tue
+		{"tea", "2026-05-12T11:00:00Z", "tea", "weekday"},                    // 16:30 IST Tue
 		{"earlyevening", "2026-05-12T13:00:00Z", "early evening", "weekday"}, // 18:30 IST Tue
-		{"dinner",    "2026-05-12T16:00:00Z", "dinner",       "weekday"},  // 21:30 IST Tue
-		{"latenight", "2026-05-12T19:00:00Z", "late-night",   "weekday"},  // 00:30 IST Wed
+		{"dinner", "2026-05-12T16:00:00Z", "dinner", "weekday"},              // 21:30 IST Tue
+		{"latenight", "2026-05-12T19:00:00Z", "late-night", "weekday"},       // 00:30 IST Wed
 		// Saturday (2026-05-16): 10:00 UTC = 15:30 IST — boundary between
 		// tea bucket lower edge. Use 09:00 UTC = 14:30 IST → still lunch.
-		{"weekend_lunch", "2026-05-16T09:00:00Z", "lunch",    "weekend"},  // 14:30 IST Sat
-		{"weekend_dinner", "2026-05-17T15:00:00Z", "dinner",  "weekend"},  // 20:30 IST Sun
+		{"weekend_lunch", "2026-05-16T09:00:00Z", "lunch", "weekend"},   // 14:30 IST Sat
+		{"weekend_dinner", "2026-05-17T15:00:00Z", "dinner", "weekend"}, // 20:30 IST Sun
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -126,8 +126,8 @@ func TestForeignCurrencyOf(t *testing.T) {
 	cases := []struct{ raw, want string }{
 		{`{"currency":"INR","source_currency":"USD"}`, "USD"},
 		{`{"currency":"INR","source_currency":"inr"}`, ""}, // same as home
-		{`{"currency":"INR"}`, ""},                          // no source
-		{`{"amount":100}`, ""},                              // neither
+		{`{"currency":"INR"}`, ""},                         // no source
+		{`{"amount":100}`, ""},                             // neither
 		{`not json`, ""},
 		{``, ""},
 	}

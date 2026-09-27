@@ -69,9 +69,28 @@ the steps in order and stops at the first one with enough confidence.
 
 Three things that fall out of this design and are worth knowing:
 
-- **It learns from you.** Every time you confirm or push a transaction,
-  the merchant lookup table — the data behind step 1 — gets reinforced.
-  The same merchant next time skips the LLM entirely.
+- **It learns from you.** Every correction you make, every send, hold and
+  skip is kept (`review_feedback`), and step 3 reads them back before
+  anything else: how you corrected it on this merchant or UPI handle
+  ("fold said *Coffee*, you wrote *Filter coffee and bun*"), who your
+  ledger says a handle belongs to, what happened around the transaction
+  (the ride there, a trip in progress and its tag), and whether it recurs.
+  The merchant lookup behind step 1 is reinforced on every push too.
+- **It keeps getting better while you're away.** Waiting cards don't keep
+  the suggestion they arrived with. When you correct one card, its
+  siblings from the same merchant are suggested again with that
+  correction in hand, and cards an older engine suggested are revisited
+  when a newer one ships (`TEXAS_FOLDEM_RESUGGEST_EVERY`). Nothing a person
+  chose is ever touched: a card with any confirmed field, a hold or a
+  manual row is left alone, and a failed attempt keeps the old suggestion.
+- **It knows what it doesn't know.** A title's `___` blanks come with what
+  they stand for ("items?", "who with?"), so filling one in is one tap.
+- **It holds back what shouldn't be sent.** A card's "credited back" alert
+  with no merchant is almost always a released authorisation — a charge
+  that was never billed. fold books it as a refund of that charge (found
+  by its foreign amount on the same card) and puts it on hold, saying
+  which charge and what to check. Release the hold and fold never sets it
+  on that transaction again.
 - **It handles transfers.** Most categorisers only know
   spend-vs-income. This one explicitly picks between firefly's three
   transaction types — withdrawal, deposit, **and transfer** — so a
@@ -209,11 +228,14 @@ You're now in broker mode. Anything in your network can call `/token`
 with the broker key and use the result against fold's API.
 
 To enable integration mode, point the broker at your firefly-iii
-instance and (optionally) give it an LLM API key. The default model
-is `deepseek-v4-flash` (cost-efficient, JSON-mode-native), targeting
-DeepSeek's OpenAI-compatible endpoint — swap `LLM_BASE_URL` and
-`LLM_MODEL` to use OpenAI, Groq, or any other OpenAI-API-compatible
-host without code changes.
+instance and (optionally) give it an LLM API key. Any OpenAI-compatible
+chat-completions host works — DeepSeek (`deepseek-v4-flash`, the default),
+OpenAI, or a gateway in front of Claude — by setting `LLM_BASE_URL` and
+`LLM_MODEL`; no code changes. A slower, stronger model wants a longer
+`LLM_TIMEOUT`; `LLM_REASONING_EFFORT` (`low`, `medium` …) asks a host that
+supports it to think first. If the host starts failing or rate-limits,
+the engine rests (the deck's side panel says until when) and cards keep
+what they say.
 
 ```yaml
 # values.yaml
@@ -230,9 +252,25 @@ extraEnv:
   #   value: "deepseek-v4-pro"
   # - name: TEXAS_FOLDEM_LLM_BASE_URL        # default https://api.deepseek.com/v1
   #   value: "https://api.openai.com/v1"
+  # - name: TEXAS_FOLDEM_LLM_TIMEOUT         # per attempt; default 60s
+  #   value: "110s"
+  # - name: TEXAS_FOLDEM_LLM_REASONING_EFFORT # none | low | medium | high
+  #   value: "low"
   - name: TEXAS_FOLDEM_PERIODIC_SYNC_EVERY   # set to 1h to run the pipeline hands-off
     value: "0"
+  - name: TEXAS_FOLDEM_RESUGGEST_EVERY       # revisit waiting cards; 0 = off
+    value: "0"
+  # - name: TEXAS_FOLDEM_RESUGGEST_LIMIT     # cards per pass; default 8
+  #   value: "6"
 ```
+
+How good are the suggestions? `POST /api/engine/eval` (from the UI, with
+`{"limit": 30}`, optionally another `model` or `reasoning`) re-suggests
+transactions you already sent, hiding each one's answer from every lookup,
+and grades type, payee, category, budget, tags and title against what
+firefly holds — beside the suggestion fold made at the time. Poll
+`GET /api/engine/eval` for the report; `GET /api/engine` is the engine's
+status.
 
 Then prime the pipeline (admin-key endpoints) — once, in this order:
 
