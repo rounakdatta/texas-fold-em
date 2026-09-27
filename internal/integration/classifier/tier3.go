@@ -69,7 +69,7 @@ TITLE (description_suggestion) — the most visible thing you write:
 
 TAGS group transactions the owner wants to find together: a trip, a reimbursable expense, an event. Add one only when this transaction is in that situation — within the trip's dates and currency (TRIP CONTEXT), a work meal on a working day for a reimbursement tag — or when the owner's RECENT transactions of exactly this kind all carry it. Never tag a meal, a category or a merchant's name. Use the existing vocabulary. When unsure, no tag: a missing tag costs one tap, a wrong one misleads.
 
-BUDGET follows the payee first: the budget (or "none") this payee's own past rows carry — in THIS HANDLE / DESCRIPTOR, the historical examples, the corrections — decides it; one merchant's meals can go to a budget while a café's coffees go to none. Only for a payee with no history, use the category's budget when YOUR BUDGETS BY CATEGORY shows at least 80% of it there; otherwise null.
+BUDGET follows the payee first: the budget (or "none") this payee's own past rows carry — in THIS HANDLE / DESCRIPTOR, the historical examples, the corrections — decides it; one merchant's meals can go to a budget while a café's coffees go to none. For a payee with no history, the budgets on the owner's spends of the same kind around it come next (AROUND THIS TIME, and TRIP CONTEXT for a trip), then the category's budget when YOUR BUDGETS BY CATEGORY shows at least 80% of it there; otherwise null.
 
 HOLDS: a card alert reporting an amount "credited back to your card" with no merchant is usually a released authorisation hold, not money received — and its original charge, the same amount a few days earlier, was usually never billed either. Say so in hold_suggestion; the owner decides.
 
