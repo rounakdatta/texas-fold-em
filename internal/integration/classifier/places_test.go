@@ -158,15 +158,19 @@ func TestPlacesWaitOutARestingModel(t *testing.T) {
 // A suggestion is what was typed, completed or corrected — never a
 // different name the model reached for.
 func TestOnlySuggestionsThatFitWhatWasTypedReachThePicker(t *testing.T) {
-	list := []PlaceSuggestion{{Name: "Sunrise Tiffins, Lakeview"}, {Name: "Shankar's, Spice Market"}, {Name: "Starbucks, Lakeview"}, {Name: "Sunshine Tea House"}}
+	list := []PlaceSuggestion{{Name: "Sunrise Tiffins, Lakeview"}, {Name: "Shankar's, Spice Market"}, {Name: "Starbucks, Lakeview"}, {Name: "Sunshine Tea House"},
+		{Name: "Harbour Noodle, Maxfield, Harbourtown"}, {Name: "Maxfield Food Centre, Harbourtown"}, {Name: "Sunrise Tiffins, J.P. Lakeview"}}
 	for typed, want := range map[string]string{
-		"sunrise ti":  "Sunrise Tiffins, Lakeview",
-		"su":          "Sunrise Tiffins, Lakeview|Sunshine Tea House",
-		"starbuks":    "Starbucks, Lakeview",       // a slip in a longer word
-		"sn ti":       "",                          // not what either says
-		"sunrise lak": "Sunrise Tiffins, Lakeview", // an area typed too
-		"tea sun":     "Sunshine Tea House",        // words in any order
-		"stbx":        "",
+		"sunrise ti":     "Sunrise Tiffins, Lakeview|Sunrise Tiffins, J.P. Lakeview",
+		"su":             "Sunrise Tiffins, Lakeview|Sunshine Tea House|Sunrise Tiffins, J.P. Lakeview",
+		"starbuks":       "Starbucks, Lakeview",                                      // a slip in a longer word
+		"sn ti":          "",                                                         // not what any says
+		"sunrise lak":    "Sunrise Tiffins, Lakeview|Sunrise Tiffins, J.P. Lakeview", // an area typed too
+		"tea sun":        "Sunshine Tea House",                                       // words in any order within the place
+		"stbx":           "",
+		"maxfield":       "Maxfield Food Centre, Harbourtown", // the place, not another place in that area
+		"sunrise ti jp":  "Sunrise Tiffins, J.P. Lakeview",    // initials run together
+		"sunrisetiffins": "Sunrise Tiffins, Lakeview|Sunrise Tiffins, J.P. Lakeview",
 	} {
 		var got []string
 		for _, s := range fitting(list, typed) {
