@@ -183,7 +183,7 @@ func (c *Classifier) ComparePlaces(ctx context.Context, cases []PlacesCase, mode
 
 const placesSystemPrompt = `You help someone name who they paid, in their personal-finance ledger, while they type the name. From what they have typed and what is known about the payment, suggest up to 3 names for the place or business they mean. The typed text itself is already offered to them as it is; offer only what improves on it.
 
-- Every suggestion is what they typed, completed or corrected — its words start the way the typed words do ("sn ref" can become "SN Refreshments", never "Shankar's"; "starbuks" can become "Starbucks"). Nothing else.
+- Every suggestion is what they typed, completed or corrected — its words start the way the typed words do ("blue ta" can become "Blue Tokai", never "Bluestone"; "starbuks" can become "Starbucks"). Nothing else.
 - Complete a half-typed word only into a real place you know. When you don't know one, don't guess the rest of the word: tidy what they typed (capitals, spacing, an area it names) or suggest nothing.
 - Their style: "<Place>, <Area>" in their home city (the one YOUR AREAS are in), "<Place>, <Area>, <City>" anywhere else (see YOUR STYLE). The business's usual name — no legal suffixes (Pvt Ltd, LLP), store codes or payment-processor prefixes (TST*, SQ *, UEP*, PAYU*…).
 - The area: a place you know has one location takes its real area, wherever they were that day. A chain or an unknown place takes the area where they were (YOUR OTHER PAYMENTS AROUND IT, a trip in progress) only when that is where this payment was plainly made; otherwise leave the area out. Never invent a branch.
@@ -387,7 +387,7 @@ func parsePlaces(out string, expense []AccountRef) []PlaceSuggestion {
 // fitting keeps the suggestions that are what was typed, completed or
 // corrected: every typed word starts one of the name's words, allowing a
 // slip or two in a longer word ("starbuks" for "Starbucks"). A model that
-// answers "sn ref" with "Shankar's" has stopped completing and started
+// answers "blue ta" with "Shankar's" has stopped completing and started
 // inventing — that answer never reaches the picker.
 func fitting(list []PlaceSuggestion, typed string) []PlaceSuggestion {
 	out := []PlaceSuggestion{}
