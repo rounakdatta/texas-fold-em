@@ -115,6 +115,11 @@ type Config struct {
 	LLMTimeout         time.Duration // TEXAS_FOLDEM_LLM_TIMEOUT           default 0 (60s)
 	LLMMaxTokens       int           // TEXAS_FOLDEM_LLM_MAX_TOKENS        default 0 (4096)
 
+	// LLMFastModel answers while someone types a payee (the picker's
+	// suggested places): a quicker model than the one that classifies, on
+	// the same host and key. "" uses the classifying model.
+	LLMFastModel string // TEXAS_FOLDEM_LLM_FAST_MODEL        default ""
+
 	// ResuggestEvery is how often waiting cards are revisited — the ones a
 	// newer correction or a newer engine could suggest better
 	// (classifier/resuggest.go). 0 disables it. ResuggestLimit caps how
@@ -158,6 +163,7 @@ func LoadConfig() (Config, error) {
 		LLMReasoningEffort:  envStr("TEXAS_FOLDEM_LLM_REASONING_EFFORT", ""),
 		LLMTimeout:          envDur("TEXAS_FOLDEM_LLM_TIMEOUT", 0),
 		LLMMaxTokens:        envInt("TEXAS_FOLDEM_LLM_MAX_TOKENS", 0),
+		LLMFastModel:        envStr("TEXAS_FOLDEM_LLM_FAST_MODEL", ""),
 		ResuggestEvery:      envDur("TEXAS_FOLDEM_RESUGGEST_EVERY", 0),
 		ResuggestLimit:      envInt("TEXAS_FOLDEM_RESUGGEST_LIMIT", 8),
 	}

@@ -27,6 +27,29 @@ func (h *Handler) handleEngine(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, h.cls.Status(r.Context()))
 }
 
+// handlePlaces offers names for who was paid while someone types one
+// (classifier.SuggestPlaces). Always 200 with a list — empty when there is
+// nothing to offer — so the picker never has an error to show for a hint.
+func (h *Handler) handlePlaces(w http.ResponseWriter, r *http.Request) {
+	empty := classifier.PlacesResult{Suggestions: []classifier.PlaceSuggestion{}}
+	if h.cls == nil {
+		writeJSON(w, http.StatusOK, empty)
+		return
+	}
+	res, err := h.cls.SuggestPlaces(r.Context(), r.PathValue("fold_uuid"), r.URL.Query().Get("q"))
+	switch {
+	case errors.Is(err, classifier.ErrNoPlaces), r.Context().Err() != nil:
+		writeJSON(w, http.StatusOK, empty)
+		return
+	case err != nil:
+		h.log.Warn("place suggestions", "fold_uuid", r.PathValue("fold_uuid"), "err", err)
+		writeJSON(w, http.StatusOK, empty)
+		return
+	}
+	w.Header().Set("Cache-Control", "private, max-age=600")
+	writeJSON(w, http.StatusOK, res)
+}
+
 func (h *Handler) handleEvalStatus(w http.ResponseWriter, r *http.Request) {
 	if h.cls == nil {
 		h.apiError(w, http.StatusServiceUnavailable, "no classifier configured")

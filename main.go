@@ -173,6 +173,13 @@ func run() error {
 			llmClient.SetMaxTokens(cfg.LLMMaxTokens)
 			llmClient.SetReasoningEffort(cfg.LLMReasoningEffort)
 			cls.SetLLM(llmClient)
+			// The picker's suggested places answer while someone types: a
+			// quicker model, a short reply, no thinking, and a clock of its own.
+			fast := llmClient.WithOverrides(cfg.LLMFastModel, "none")
+			fast.SetMaxTokens(600)
+			fast.SetTimeout(15 * time.Second)
+			fast.SetLogger(intLog.With("component", "llm-fast"))
+			cls.SetFastLLM(fast)
 			llmEnabled = true
 		}
 		srv.SetClassifier(cls)
