@@ -67,7 +67,7 @@ TITLE (description_suggestion) — the most visible thing you write:
 
 TAGS: mirror the tags the owner uses for this merchant or pattern. When TRIP CONTEXT shows the owner tagging a trip's charges, add that trip tag. Use the existing vocabulary; invent a tag only when the owner's own corrections did.
 
-BUDGET: only when the owner puts this kind of transaction in that budget; otherwise null.
+BUDGET: follow the owner's habit for the category you chose (YOUR BUDGETS BY CATEGORY): when that category nearly always goes to one budget, use it; when it mostly has none, null.
 
 HOLDS: a card alert reporting an amount "credited back to your card" with no merchant is usually a released authorisation hold, not money received — and its original charge, the same amount a few days earlier, was usually never billed either. Say so in hold_suggestion; the owner decides.
 
@@ -157,6 +157,9 @@ type tier3Inputs struct {
 	// How often each payee was used in the last year, to rank the part of
 	// the inventory the prompt shows (rankedAccounts).
 	expenseUsage, revenueUsage map[int64]int
+
+	// budgetHabits: which budget each category went to, last year.
+	budgetHabits []string
 }
 
 // Inventory sizes shown in one prompt; the guard accepts every account.
@@ -352,6 +355,9 @@ func (c *Classifier) gatherTier3Inputs(ctx context.Context, staged StagedRow, ti
 	asset, _ := listAssetAccounts(ctx, c.db)
 	expense, _ := listExpenseAccounts(ctx, c.db)
 	revenue, _ := listRevenueAccounts(ctx, c.db)
+	if ex.accountID != 0 {
+		expense, revenue = withoutAccount(expense, ex.accountID), withoutAccount(revenue, ex.accountID)
+	}
 	cats, _ := listCategories(ctx, c.db)
 	buds, _ := listBudgets(ctx, c.db)
 	tags, _ := allTagsFromMirror(ctx, c.db)
@@ -395,6 +401,7 @@ func (c *Classifier) gatherTier3Inputs(ctx context.Context, staged StagedRow, ti
 		learn:           c.gatherLearning(ctx, staged, payeeHint, ex),
 		expenseUsage:    accountUsage(ctx, c.db, "destination", time.Now().AddDate(-1, 0, 0)),
 		revenueUsage:    accountUsage(ctx, c.db, "source", time.Now().AddDate(-1, 0, 0)),
+		budgetHabits:    budgetHabits(ctx, c.db, fireflyTxnTypeFor(staged.Type), time.Now().AddDate(-1, 0, 0)),
 	}, nil
 }
 
@@ -487,6 +494,73 @@ func (c *Classifier) retrieveTier3Candidates(ctx context.Context, staged StagedR
 		out = append(out, h)
 	}
 	return out, rows.Err()
+}
+
+// budgetHabits says, per category the owner used at least five times in the
+// last year on this kind of move, which budget it went to most: "Food →
+// "Eating outside" (212 of 230)", or "Grocery → no budget (40 of 45)". Most
+// used first, at most 30.
+func budgetHabits(ctx context.Context, db *sql.DB, txnType string, since time.Time) []string {
+	rows, err := db.QueryContext(ctx, `
+		SELECT category_name, COALESCE(budget_name, ''), COUNT(*) FROM firefly_txns
+		WHERE txn_type = ? AND category_name IS NOT NULL AND TRIM(category_name) <> '' AND substr(date, 1, 10) >= ?
+		GROUP BY 1, 2`, txnType, since.Format("2006-01-02"))
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	type habit struct {
+		cat, top string
+		topN, n  int
+	}
+	byCat := map[string]*habit{}
+	for rows.Next() {
+		var cat, bud string
+		var n int
+		if rows.Scan(&cat, &bud, &n) != nil {
+			continue
+		}
+		h := byCat[cat]
+		if h == nil {
+			h = &habit{cat: cat}
+			byCat[cat] = h
+		}
+		h.n += n
+		if n > h.topN || (n == h.topN && bud < h.top) {
+			h.top, h.topN = bud, n
+		}
+	}
+	var list []*habit
+	for _, h := range byCat {
+		if h.n >= 5 {
+			list = append(list, h)
+		}
+	}
+	sort.Slice(list, func(i, j int) bool {
+		return list[i].n > list[j].n || (list[i].n == list[j].n && list[i].cat < list[j].cat)
+	})
+	var out []string
+	for i, h := range list {
+		if i >= 30 {
+			break
+		}
+		to := "no budget"
+		if h.top != "" {
+			to = fmt.Sprintf("%q", h.top)
+		}
+		out = append(out, fmt.Sprintf("%s → %s (%d of %d)", h.cat, to, h.topN, h.n))
+	}
+	return out
+}
+
+func withoutAccount(list []AccountRef, id int64) []AccountRef {
+	out := make([]AccountRef, 0, len(list))
+	for _, a := range list {
+		if a.ID != id {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // allTagsFromMirror flattens firefly_txns.tags_json into a deduped
@@ -655,6 +729,12 @@ func buildTier3Prompt(staged StagedRow, in tier3Inputs) string {
 	if len(in.budgets) > 0 {
 		b.WriteString("\nbudgets:\n")
 		writeAccountList(&b, in.budgets)
+	}
+	if len(in.budgetHabits) > 0 {
+		b.WriteString("\nYOUR BUDGETS BY CATEGORY (last 12 months: the budget you used most, of how many):\n")
+		for _, h := range in.budgetHabits {
+			b.WriteString("  " + h + "\n")
+		}
 	}
 	if len(in.tagLibrary) > 0 {
 		b.WriteString("\nexisting tag vocabulary (use these when applicable):\n")

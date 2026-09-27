@@ -69,12 +69,15 @@ type EvalRow struct {
 	Confidence float64               `json:"confidence"`
 	Right      map[string]bool       `json:"right"`
 	TitleFit   string                `json:"titleFit"` // exact | fits | overlap | miss
-	Unknowns   []string              `json:"unknowns,omitempty"`
-	Signals    []string              `json:"signals,omitempty"`
-	Reasoning  string                `json:"reasoning,omitempty"`
-	Learned    *LearnedCounts        `json:"learned,omitempty"`
-	DurationMS int64                 `json:"durationMs"`
-	Error      string                `json:"error,omitempty"`
+	// NewPayee: the payee's account exists only because this row was sent,
+	// so it was hidden — the engine had to name a new one, as it did then.
+	NewPayee   bool           `json:"newPayee,omitempty"`
+	Unknowns   []string       `json:"unknowns,omitempty"`
+	Signals    []string       `json:"signals,omitempty"`
+	Reasoning  string         `json:"reasoning,omitempty"`
+	Learned    *LearnedCounts `json:"learned,omitempty"`
+	DurationMS int64          `json:"durationMs"`
+	Error      string         `json:"error,omitempty"`
 }
 
 // EvalReport is an evaluation, running or done.
@@ -95,7 +98,7 @@ type EvalReport struct {
 	Error      string                 `json:"error,omitempty"`
 }
 
-var evalFields = []string{"type", "payee", "category", "budget", "tags", "title", "titleFits"}
+var evalFields = []string{"type", "payee", "payeeFits", "category", "budget", "tags", "title", "titleFits"}
 
 func newScores() map[string]*FieldScore {
 	m := map[string]*FieldScore{}
@@ -221,6 +224,7 @@ func misses(r EvalRow) int {
 type evalTarget struct {
 	staged    StagedRow
 	fireflyID int64
+	accountID int64 // the payee's account, when nothing else uses it
 	truth     feedback.ReviewValues
 	before    feedback.ReviewValues
 }
@@ -263,8 +267,17 @@ func (c *Classifier) evalTargets(ctx context.Context, opt EvalOptions) ([]evalTa
 		}
 		t := evalTarget{staged: staged[0]}
 		var ok bool
-		if t.fireflyID, t.truth, ok = fireflyTruth(ctx, c.db, u); !ok {
+		var payeeID int64
+		if t.fireflyID, payeeID, t.truth, ok = fireflyTruth(ctx, c.db, u); !ok {
 			continue // not mirrored yet: nothing to grade against
+		}
+		if payeeID != 0 {
+			var others int
+			_ = c.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM firefly_txns
+				WHERE firefly_id <> ? AND (destination_account_id = ? OR source_account_id = ?)`, t.fireflyID, payeeID, payeeID).Scan(&others)
+			if others == 0 {
+				t.accountID = payeeID
+			}
 		}
 		if snap, err := feedback.SnapshotReview(ctx, c.db, u); err == nil {
 			t.before = snap.Suggested
@@ -275,28 +288,36 @@ func (c *Classifier) evalTargets(ctx context.Context, opt EvalOptions) ([]evalTa
 }
 
 // fireflyTruth is what firefly holds for a sent row now, in the review's
-// terms: the other side as the payee.
-func fireflyTruth(ctx context.Context, db *sql.DB, uuid string) (int64, feedback.ReviewValues, bool) {
+// terms (the other side as the payee), and that payee's account id.
+func fireflyTruth(ctx context.Context, db *sql.DB, uuid string) (int64, int64, feedback.ReviewValues, bool) {
 	var (
 		id                           int64
+		srcID, dstID                 sql.NullInt64
 		typ, desc                    string
 		src, dst, cat, bud, tagsJSON sql.NullString
 	)
 	err := db.QueryRowContext(ctx, `
-		SELECT t.firefly_id, t.txn_type, t.description, t.source_account_name, t.destination_account_name,
-		       t.category_name, t.budget_name, t.tags_json
+		SELECT t.firefly_id, t.txn_type, t.description, t.source_account_id, t.source_account_name,
+		       t.destination_account_id, t.destination_account_name, t.category_name, t.budget_name, t.tags_json
 		FROM firefly_txns t
 		WHERE t.external_id = ?
 		   OR t.group_id = (SELECT firefly_txn_id FROM staged_fold_txns WHERE fold_uuid = ? AND firefly_txn_id IS NOT NULL)
-		ORDER BY (t.external_id = ?) DESC LIMIT 1`, uuid, uuid, uuid).Scan(&id, &typ, &desc, &src, &dst, &cat, &bud, &tagsJSON)
+		ORDER BY (t.external_id = ?) DESC LIMIT 1`, uuid, uuid, uuid).Scan(&id, &typ, &desc, &srcID, &src, &dstID, &dst, &cat, &bud, &tagsJSON)
 	if err != nil {
-		return 0, feedback.ReviewValues{}, false
+		return 0, 0, feedback.ReviewValues{}, false
 	}
 	v := feedback.ReviewValues{Type: typ, Title: desc, Category: cat.String, Budget: bud.String, Tags: parseTags(tagsJSON.String)}
 	var foldType string
 	_ = db.QueryRowContext(ctx, `SELECT type FROM staged_fold_txns WHERE fold_uuid = ?`, uuid).Scan(&foldType)
 	v.Payee = otherSide(typ, foldType, src.String, dst.String)
-	return id, v, true
+	var payeeID int64 // the other side's account; a transfer's is the owner's own, never hidden
+	switch {
+	case typ == "deposit":
+		payeeID = srcID.Int64
+	case typ == "withdrawal":
+		payeeID = dstID.Int64
+	}
+	return id, payeeID, v, true
 }
 
 // otherSide is the review's payee: who was paid on money out, who paid on
@@ -348,7 +369,8 @@ func (c *Classifier) runEval(ctx context.Context, rep *EvalReport, client *llm.C
 func (c *Classifier) evalOne(ctx context.Context, t evalTarget) EvalRow {
 	row := EvalRow{UUID: t.staged.FoldUUID, Narration: t.staged.Narration, Truth: t.truth, Before: t.before}
 	start := time.Now()
-	d, err := c.classifyOne(ctx, t.staged, exclusion{foldUUID: t.staged.FoldUUID, fireflyID: t.fireflyID})
+	row.NewPayee = t.accountID != 0
+	d, err := c.classifyOne(ctx, t.staged, exclusion{foldUUID: t.staged.FoldUUID, fireflyID: t.fireflyID, accountID: t.accountID})
 	row.DurationMS = time.Since(start).Milliseconds()
 	if err != nil {
 		row.Error = truncate(err.Error(), 300)
@@ -381,12 +403,24 @@ func gradeValues(got, truth feedback.ReviewValues) map[string]bool {
 	return map[string]bool{
 		"type":      norm(got.Type) == norm(truth.Type),
 		"payee":     norm(got.Payee) == norm(truth.Payee),
+		"payeeFits": samePlace(got.Payee, truth.Payee),
 		"category":  norm(noneToEmpty(got.Category)) == norm(noneToEmpty(truth.Category)),
 		"budget":    norm(noneToEmpty(got.Budget)) == norm(noneToEmpty(truth.Budget)),
 		"tags":      sameTags(got.Tags, truth.Tags),
 		"title":     fit == "exact",
 		"titleFits": fit == "exact" || fit == "fits",
 	}
+}
+
+// samePlace: the same merchant, however its area and city are written —
+// "Lantern Kopi" for "Lantern Kopi, River Quay, Harbourtown".
+func samePlace(got, truth string) bool {
+	first := func(s string) string {
+		s, _, _ = strings.Cut(s, ",")
+		return strings.Join(nameWords(s), " ")
+	}
+	g, t := first(got), first(truth)
+	return g != "" && (g == t || strings.HasPrefix(t, g+" ") || strings.HasPrefix(g, t+" "))
 }
 
 var spaceRun = regexp.MustCompile(`\s+`)

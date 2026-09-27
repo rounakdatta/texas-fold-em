@@ -104,3 +104,25 @@ func TestSharesWord(t *testing.T) {
 		}
 	}
 }
+
+// The model sees where each category's spends go: the budget used most, of
+// how many — so "Food" lands in the budget the owner always uses for it.
+func TestBudgetHabitsSayWhereEachCategoryGoes(t *testing.T) {
+	db := learnDB(t)
+	now := time.Now().AddDate(0, -1, 0)
+	for i := range 9 {
+		fireflyRow(t, db, int64(4000+i), now, 41, "Tea Trail Cafe, Koramangala", "Eating out", "x", "", "", 100)
+	}
+	mustExec(t, db, `UPDATE firefly_txns SET budget_id = 3, budget_name = 'Eating outside' WHERE firefly_id BETWEEN 4000 AND 4007`)
+	for i := range 6 {
+		fireflyRow(t, db, int64(4100+i), now, 40, "Lantern Books, Indiranagar", "Books", "x", "", "", 100)
+	}
+	fireflyRow(t, db, 4200, now, 40, "Lantern Books, Indiranagar", "Subscriptions", "rare", "", "", 100) // fewer than five: left out
+	fireflyRow(t, db, 4201, now.AddDate(-2, 0, 0), 40, "Lantern Books, Indiranagar", "Books", "old", "", "", 100)
+	mustExec(t, db, `UPDATE firefly_txns SET budget_id = 3, budget_name = 'Eating outside' WHERE firefly_id = 4201`) // older than a year: left out
+	got := budgetHabits(context.Background(), db, "withdrawal", time.Now().AddDate(-1, 0, 0))
+	want := []string{`Eating out → "Eating outside" (8 of 9)`, `Books → no budget (6 of 6)`}
+	if strings.Join(got, " | ") != strings.Join(want, " | ") {
+		t.Errorf("budget habits = %q, want %q", got, want)
+	}
+}
