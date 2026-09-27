@@ -43,6 +43,8 @@ type PlacesResult struct {
 	// Resting: the model is resting (a limit, a refused key, failures);
 	// the picker shows only the real payees meanwhile.
 	Resting bool `json:"resting,omitempty"`
+
+	raw []string // what the model offered, before the fit guard
 }
 
 // Typed text shorter than this names nothing yet; longer is a sentence.
@@ -118,9 +120,14 @@ func (c *Classifier) suggestPlacesWith(ctx context.Context, model *llm.Client, u
 		}
 		return PlacesResult{}, err
 	}
-	res := PlacesResult{Suggestions: fitting(parsePlaces(out, expense), typed)}
+	parsed := parsePlaces(out, expense)
+	res := PlacesResult{Suggestions: fitting(parsed, typed)}
 	if cached {
 		c.places.put(key, res)
+	} else {
+		for _, s := range parsed {
+			res.raw = append(res.raw, s.Name)
+		}
 	}
 	return res, nil
 }
@@ -138,7 +145,9 @@ type PlacesRun struct {
 	Typed       string            `json:"q"`
 	DurationMS  int64             `json:"durationMs"`
 	Suggestions []PlaceSuggestion `json:"suggestions"`
-	Error       string            `json:"error,omitempty"`
+	// Raw: what the model offered before the fit guard (a comparison only).
+	Raw   []string `json:"raw,omitempty"`
+	Error string   `json:"error,omitempty"`
 }
 
 // ComparePlaces asks each model the picker's question for each case — fresh,
@@ -171,7 +180,7 @@ func (c *Classifier) ComparePlaces(ctx context.Context, cases []PlacesCase, mode
 			start := time.Now()
 			res, err := c.suggestPlacesWith(ctx, clients[r.Model], r.UUID, r.Typed, false)
 			r.DurationMS = time.Since(start).Milliseconds()
-			r.Suggestions = res.Suggestions
+			r.Suggestions, r.Raw = res.Suggestions, res.raw
 			if err != nil {
 				r.Error = err.Error()
 			}
@@ -186,7 +195,7 @@ const placesSystemPrompt = `You help someone name who they paid, in their person
 - Every suggestion is what they typed, completed or corrected — its words start the way the typed words do ("blue ta" can become "Blue Tokai", never "Bluestone"; "starbuks" can become "Starbucks"). Nothing else.
 - Complete a half-typed word only into a real place you know. When you don't know one, don't guess the rest of the word: tidy what they typed (capitals, spacing, an area it names) or suggest nothing.
 - Their style: "<Place>, <Area>" in their home city (the one YOUR AREAS are in), "<Place>, <Area>, <City>" anywhere else (see YOUR STYLE). The business's usual name — no legal suffixes (Pvt Ltd, LLP), store codes or payment-processor prefixes (TST*, SQ *, UEP*, PAYU*…).
-- The area: a place you know has one location takes its real area, wherever they were that day. A chain or an unknown place takes the area where they were (YOUR OTHER PAYMENTS AROUND IT, a trip in progress) only when that is where this payment was plainly made; otherwise leave the area out. Never invent a branch.
+- The area: a place you know has one location takes its real area, wherever they were that day. A chain or an unknown place takes the area where they were (YOUR OTHER PAYMENTS AROUND IT, a trip in progress) only when that is where this payment was plainly made; otherwise leave the area out. YOUR AREAS shows how they write areas — never evidence of where this payment was. Never invent a branch.
 - A payee they already have that is this place (YOUR PAYEES THAT SHARE A WORD) comes first, in its exact name.
 - "what" is 2–6 words on what the place is, only from what you know for certain or what its name plainly says ("egg tart bakery", "kaya toast café"); "" when unsure. A wrong "what" misleads more than none.
 - "confidence" is 0..1 that this is the place they mean. Fewer and right beats more and wrong.
@@ -389,20 +398,41 @@ func parsePlaces(out string, expense []AccountRef) []PlaceSuggestion {
 // slip or two in a longer word ("starbuks" for "Starbucks"). A model that
 // answers "blue ta" with "Shankar's" has stopped completing and started
 // inventing — that answer never reaches the picker.
+//
+// The first typed word names the place itself, so it must start a word in
+// the name's first part — "maxwell" can become "Maxwell Food Centre", not
+// another place "…, Maxwell". Initials count run together, the way people
+// type them: "jp" fits "J.P. Nagar".
 func fitting(list []PlaceSuggestion, typed string) []PlaceSuggestion {
 	out := []PlaceSuggestion{}
 	tw := nameWords(typed)
 	for _, s := range list {
-		nw := nameWords(s.Name)
-		ok := len(tw) > 0
-		for _, t := range tw {
-			if !startsSome(t, nw) {
-				ok = false
+		place, _, _ := strings.Cut(s.Name, ",")
+		ok := len(tw) > 0 && startsSome(tw[0], wordStarts(place))
+		for _, t := range tw[min(1, len(tw)):] {
+			if !ok {
 				break
 			}
+			ok = startsSome(t, wordStarts(s.Name))
 		}
 		if ok {
 			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// wordStarts are a name's words, and each run of them from there on written
+// together ("J.P. Nagar" → j, p, nagar, jp, jpnagar, pnagar), so typed
+// initials or a name typed without its spaces still start one.
+func wordStarts(name string) []string {
+	w := nameWords(name)
+	out := append([]string(nil), w...)
+	for i := range w {
+		joined := w[i]
+		for j := i + 1; j < len(w) && j < i+4; j++ {
+			joined += w[j]
+			out = append(out, joined)
 		}
 	}
 	return out

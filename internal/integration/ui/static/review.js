@@ -1179,8 +1179,10 @@
     const places = { items: [], forQ: '', loading: false, since: 0, timer: 0, slow: 0, ctrl: null, seen: new Map() };
     const wantPlaces = q => !incoming && q.length >= 3 && q !== current;
     const words = s => (s || '').toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
-    // an answer for fewer letters still fits while every typed word starts one of its words
-    const stillFits = (name, q) => { const w = words(name); return words(q).every(t => w.some(x => x.startsWith(t))); };
+    // an answer for fewer letters still fits while every typed word starts one of
+    // its words — or a run of them written together ("jp" for "J.P. Nagar")
+    const starts = name => { const w = words(name), out = w.slice(); w.forEach((_, i) => { let j = w[i]; for (let k = i + 1; k < w.length && k < i + 4; k++) { j += w[k]; out.push(j); } }); return out; };
+    const stillFits = (name, q) => { const s = starts(name); return words(q).every(t => s.some(x => x.startsWith(t))); };
     const askPlaces = q => {
       if (places.ctrl) places.ctrl.abort();
       const ctrl = new AbortController();
