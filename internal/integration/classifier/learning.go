@@ -63,7 +63,7 @@ type handleHit struct {
 	token     string
 	count     int
 	latest    time.Time
-	payees    []string // "Payee · Category", most frequent first
+	payees    []string // "Payee · Category · budget (×n, ₹lo–₹hi)", most frequent first
 	titles    []string // most recent distinct titles
 	txnTypes  []string
 	tagsSeen  []string
@@ -234,7 +234,7 @@ var (
 func handleTokens(narration string) []string {
 	var out []string
 	seen := map[string]bool{}
-	for _, v := range vpaRe.FindAllString(narration, -1) {
+	for _, v := range upiHandles(narration) {
 		v = strings.ToLower(v)
 		if !seen[v] {
 			seen[v] = true
@@ -250,8 +250,42 @@ func handleTokens(narration string) []string {
 	if len(out) > 3 {
 		out = out[:3]
 	}
+	// The note on a UPI payment is a handle of its own when it names a kind
+	// of payment the owner makes again and again: "RAPIDO" ends every ride
+	// paid to a Rapido driver, whoever the driver is.
+	if note := upiNote(narration); len(note) >= 4 && noteWordRe.MatchString(note) && upiDashRe.MatchString(strings.TrimSpace(narration)) {
+		out = append(out, "-"+strings.ToUpper(note))
+	}
 	return out
 }
+
+// upiHandles finds the UPI handles in a narration. In the dash format
+// ("UPI-<name>-<handle>-<IFSC>-…") the handle's own dash can't be told from
+// the one before it by a pattern — "RIDE DRIVER-9000000002@YBL" is a name
+// and a handle — so there the handle is the dash-separated segment holding
+// the "@", joined to the one before it only for a numbered handle's short
+// suffix ("ASHA.M-1@OKICICI"). Elsewhere slashes delimit it.
+func upiHandles(narration string) []string {
+	n := strings.TrimSpace(narration)
+	if !upiDashRe.MatchString(n) {
+		return vpaRe.FindAllString(n, -1)
+	}
+	parts := strings.Split(n, "-")
+	for i, p := range parts {
+		local, domain, ok := strings.Cut(p, "@")
+		if !ok || domain == "" || strings.ContainsAny(p, " ") {
+			continue
+		}
+		if len(local) <= 2 && i > 0 && !strings.ContainsAny(parts[i-1], " ") {
+			return []string{parts[i-1] + "-" + p}
+		}
+		return []string{p}
+	}
+	return nil
+}
+
+// noteWordRe: a note worth looking up is words, not a reference.
+var noteWordRe = regexp.MustCompile(`^[A-Za-z][A-Za-z ]+$`)
 
 func (c *Classifier) handleHistory(ctx context.Context, staged StagedRow, ex exclusion) []handleHit {
 	var hits []handleHit
@@ -260,6 +294,7 @@ func (c *Classifier) handleHistory(ctx context.Context, staged StagedRow, ex exc
 		type agg struct {
 			n      int
 			latest time.Time
+			lo, hi int64 // the amounts seen
 		}
 		payees := map[string]*agg{}
 		titleSeen := map[string]bool{}
@@ -267,7 +302,8 @@ func (c *Classifier) handleHistory(ctx context.Context, staged StagedRow, ex exc
 		tagCount := map[string]int{}
 		rows, err := c.db.QueryContext(ctx, `
 			SELECT txn_type, COALESCE(destination_account_name, ''), COALESCE(source_account_name, ''),
-			       COALESCE(category_name, ''), COALESCE(budget_name, ''), COALESCE(description, ''), COALESCE(tags_json, ''), date
+			       COALESCE(category_name, ''), COALESCE(budget_name, ''), COALESCE(description, ''), COALESCE(tags_json, ''), date,
+			       amount_paise
 			FROM firefly_txns
 			WHERE notes LIKE ? AND firefly_id <> ?
 			ORDER BY date DESC LIMIT 40`, "%"+tok+"%", ex.fireflyID)
@@ -276,7 +312,8 @@ func (c *Classifier) handleHistory(ctx context.Context, staged StagedRow, ex exc
 		}
 		for rows.Next() {
 			var typ, dst, src, cat, bud, desc, tagsJS, date string
-			if rows.Scan(&typ, &dst, &src, &cat, &bud, &desc, &tagsJS, &date) != nil {
+			var amt int64
+			if rows.Scan(&typ, &dst, &src, &cat, &bud, &desc, &tagsJS, &date, &amt) != nil {
 				continue
 			}
 			h.inLedger++
@@ -298,9 +335,10 @@ func (c *Classifier) handleHistory(ctx context.Context, staged StagedRow, ex exc
 				key += " · no budget"
 			}
 			if payees[key] == nil {
-				payees[key] = &agg{}
+				payees[key] = &agg{lo: amt, hi: amt}
 			}
 			payees[key].n++
+			payees[key].lo, payees[key].hi = min(payees[key].lo, amt), max(payees[key].hi, amt)
 			if desc != "" && !titleSeen[desc] && len(h.titles) < 4 {
 				titleSeen[desc] = true
 				h.titles = append(h.titles, desc)
@@ -334,7 +372,14 @@ func (c *Classifier) handleHistory(ctx context.Context, staged StagedRow, ex exc
 			if i >= 3 {
 				break
 			}
-			h.payees = append(h.payees, fmt.Sprintf("%s (×%d)", p.k, p.n))
+			// the amounts say which of two payees a new payment is, when a
+			// handle is shared (a ₹38 ride is the bike, a ₹160 one the auto)
+			a := payees[p.k]
+			amounts := rupeesShort(a.lo)
+			if a.hi != a.lo {
+				amounts += "–" + rupeesShort(a.hi)
+			}
+			h.payees = append(h.payees, fmt.Sprintf("%s (×%d, %s)", p.k, p.n, amounts))
 		}
 		var ts []kv
 		for k, v := range tagCount {
@@ -668,7 +713,11 @@ func (lc learningContext) render(b *strings.Builder) {
 	if len(lc.handles) > 0 {
 		b.WriteString("== THIS HANDLE / DESCRIPTOR IN YOUR LEDGER (firefly rows whose notes carry it) ==\n")
 		for _, h := range lc.handles {
-			b.WriteString(fmt.Sprintf("  %q — %d firefly rows, latest %s\n", h.token, h.count, h.latest.In(ist).Format("2 Jan 2006")))
+			label := fmt.Sprintf("%q", h.token)
+			if strings.HasPrefix(h.token, "-") {
+				label = fmt.Sprintf("the payment note %q", strings.TrimPrefix(h.token, "-"))
+			}
+			b.WriteString(fmt.Sprintf("  %s — %d firefly rows, latest %s\n", label, h.count, h.latest.In(ist).Format("2 Jan 2006")))
 			if len(h.payees) > 0 {
 				b.WriteString("     booked to: " + strings.Join(h.payees, "; ") + "\n")
 			}
@@ -804,7 +853,7 @@ func (lc learningContext) summary() *LearnedCounts {
 // was unreachable) is one the re-suggest loop may revisit. Bump it when the
 // prompt or context change enough that every waiting suggestion deserves
 // another look.
-const EngineVersion = 6
+const EngineVersion = 7
 
 // engineVersionFor is the version to record for a decision: the current one
 // when the model made it — or looked and declined, or it is a deterministic

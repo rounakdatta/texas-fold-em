@@ -209,3 +209,8 @@ func rupees(p int64) string {
 	}
 	return out
 }
+
+// rupeesShort is a rupee amount the way a range reads: "₹38", "₹1,250.50".
+func rupeesShort(p int64) string {
+	return strings.TrimSuffix(rupees(p), ".00")
+}
