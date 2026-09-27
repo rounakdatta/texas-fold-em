@@ -66,18 +66,27 @@ func TestPlacesAreAskedWithWhereYouWere(t *testing.T) {
 // At most three, each once, the unlikely dropped, cleaned — and one that is
 // already a payee comes back as exactly that payee.
 func TestPlaceSuggestionsAreCleanedAndMatchedToPayees(t *testing.T) {
-	c, _ := placesWorld(t)
-	res, err := c.SuggestPlaces(context.Background(), "qr", "sunrise ti")
-	if err != nil {
-		t.Fatal(err)
-	}
+	expense := []AccountRef{{ID: 63, Name: "Tea Trail Express, Koramangala"}, {ID: 61, Name: "Lantern Books, Lakeview"}}
+	out := `{"suggestions":[
+		{"name":"sunrise tiffins, lakeview.","what":"South Indian tiffin café.","confidence":0.8},
+		{"name":"tea trail  express, koramangala","what":"","confidence":0.4},
+		{"name":"Sunrise Tiffins, Lakeview","what":"dup","confidence":0.7},
+		{"name":"Sunrise Snacks Corner","what":"a guess","confidence":0.1},
+		{"name":"Lantern Books, Lakeview","what":"","confidence":0.3},
+		{"name":"One Too Many","what":"","confidence":0.9}]}`
 	var got []string
-	for _, s := range res.Suggestions {
+	for _, s := range parsePlaces(out, expense) {
 		got = append(got, s.Name+"|"+s.What+"|"+map[bool]string{true: "existing", false: "new"}[s.Existing])
 	}
 	want := []string{"sunrise tiffins, lakeview|South Indian tiffin café|new", "Tea Trail Express, Koramangala||existing", "Lantern Books, Lakeview||existing"}
 	if strings.Join(got, " / ") != strings.Join(want, " / ") {
 		t.Errorf("suggestions = %q\nwant          %q", got, want)
+	}
+	// end to end, only what fits the typed text reaches the picker
+	c, _ := placesWorld(t)
+	res, err := c.SuggestPlaces(context.Background(), "qr", "sunrise ti")
+	if err != nil || len(res.Suggestions) != 1 || res.Suggestions[0].Name != "sunrise tiffins, lakeview" {
+		t.Errorf("SuggestPlaces = %+v, %v; want only the fitting name", res.Suggestions, err)
 	}
 }
 
@@ -143,5 +152,49 @@ func TestPlacesWaitOutARestingModel(t *testing.T) {
 	res, err := c.SuggestPlaces(context.Background(), "qr", "sunrise ti")
 	if err != nil || !res.Resting || len(res.Suggestions) != 0 || hits.Load() != 1 {
 		t.Errorf("while resting: %+v, %v, %d requests; want resting, empty, no new request", res, err, hits.Load())
+	}
+}
+
+// A suggestion is what was typed, completed or corrected — never a
+// different name the model reached for.
+func TestOnlySuggestionsThatFitWhatWasTypedReachThePicker(t *testing.T) {
+	list := []PlaceSuggestion{{Name: "Sunrise Tiffins, Lakeview"}, {Name: "Shankar's, Spice Market"}, {Name: "Starbucks, Lakeview"}, {Name: "Sunshine Tea House"}}
+	for typed, want := range map[string]string{
+		"sunrise ti":  "Sunrise Tiffins, Lakeview",
+		"su":          "Sunrise Tiffins, Lakeview|Sunshine Tea House",
+		"starbuks":    "Starbucks, Lakeview",       // a slip in a longer word
+		"sn ti":       "",                          // not what either says
+		"sunrise lak": "Sunrise Tiffins, Lakeview", // an area typed too
+		"tea sun":     "Sunshine Tea House",        // words in any order
+		"stbx":        "",
+	} {
+		var got []string
+		for _, s := range fitting(list, typed) {
+			got = append(got, s.Name)
+		}
+		if strings.Join(got, "|") != want {
+			t.Errorf("fitting(%q) = %q, want %q", typed, got, want)
+		}
+	}
+}
+
+// Choosing the fast model on evidence: each model answers each case, fresh,
+// with how long it took.
+func TestModelsCanBeComparedOnThePickersQuestion(t *testing.T) {
+	c, fake := placesWorld(t)
+	runs, err := c.ComparePlaces(context.Background(), []PlacesCase{{UUID: "qr", Typed: "sunrise ti"}}, []string{"claude-haiku-4-5", "claude-sonnet-5"})
+	if err != nil || len(runs) != 2 || runs[0].Model != "claude-haiku-4-5" || runs[1].Model != "claude-sonnet-5" {
+		t.Fatalf("runs = %+v, %v", runs, err)
+	}
+	for _, r := range runs {
+		if r.Error != "" || len(r.Suggestions) != 1 {
+			t.Errorf("run %+v", r)
+		}
+	}
+	if len(fake.prompts) != 2 {
+		t.Errorf("asked %d times; a comparison bypasses the cache", len(fake.prompts))
+	}
+	if _, err := c.ComparePlaces(context.Background(), make([]PlacesCase, 7), []string{"a", "b"}); err == nil {
+		t.Error("14 runs were accepted; at most 12")
 	}
 }
