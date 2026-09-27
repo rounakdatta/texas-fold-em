@@ -245,9 +245,9 @@ func (c *Client) SetMaxTokens(n int) {
 	}
 }
 
-// SetReasoningEffort asks the host to think before answering ("", "none",
-// "low", "medium", "high"). The request then carries no temperature:
-// extended thinking accepts none but the default.
+// SetReasoningEffort asks the host to think before answering: "" leaves it
+// to the host, "none" asks for no thinking, "low"/"medium"/"high" for that
+// much (and then no temperature: extended thinking accepts only its own).
 func (c *Client) SetReasoningEffort(e string) { c.reasoningEffort = strings.TrimSpace(e) }
 
 // ReasoningEffort is the configured effort, for the engine's status.
@@ -340,11 +340,21 @@ func (c *Client) GenerateJSON(ctx context.Context, systemPrompt, userPrompt stri
 	c.mu.Lock()
 	noTemp := c.noTemperature
 	c.mu.Unlock()
-	if e := c.reasoningEffort; e != "" && e != "none" {
+	// "" leaves thinking to the host's default; "none" asks for none — a
+	// Claude 5 model otherwise thinks (unseen, redacted), spending seconds
+	// and the reply's token budget on a one-line answer; anything else is
+	// the effort to think with, and takes no temperature.
+	switch e := c.reasoningEffort; e {
+	case "", "none":
+		if e == "none" {
+			body.ReasoningEffort = "none"
+		}
+		if !noTemp {
+			zero := 0.0
+			body.Temperature = &zero // deterministic when not reasoning
+		}
+	default:
 		body.ReasoningEffort = e
-	} else if !noTemp {
-		zero := 0.0
-		body.Temperature = &zero // deterministic when not reasoning
 	}
 	if systemPrompt != "" {
 		body.Messages = append(body.Messages, chatMessage{Role: "system", Content: systemPrompt})

@@ -53,10 +53,15 @@ func TestReasoningRequestsCarryTheEffortAndNoTemperature(t *testing.T) {
 	if _, has := low["temperature"]; has {
 		t.Errorf("reasoning request carried a temperature (%v); a thinking model rejects it", low["temperature"])
 	}
+	// no effort leaves thinking to the host; "none" asks for none, in so
+	// many words — a Claude 5 model otherwise thinks unseen
+	if _, has := plain["reasoning_effort"]; has {
+		t.Errorf("no effort: sent reasoning_effort=%v", plain["reasoning_effort"])
+	}
+	if none["reasoning_effort"] != "none" {
+		t.Errorf(`"none": reasoning_effort = %v, want "none" sent`, none["reasoning_effort"])
+	}
 	for name, body := range map[string]map[string]any{"no effort": plain, `"none"`: none} {
-		if _, has := body["reasoning_effort"]; has {
-			t.Errorf("%s: sent reasoning_effort=%v", name, body["reasoning_effort"])
-		}
 		if temp, ok := body["temperature"].(float64); !ok || temp != 0 {
 			t.Errorf("%s: temperature = %v, want an explicit 0", name, body["temperature"])
 		}
