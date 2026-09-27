@@ -126,7 +126,7 @@ func TestBudgetHabitsFollowRecentPractice(t *testing.T) {
 	add(6, now.AddDate(0, -7, 0), 40, "Lantern Books, Indiranagar", "Books", "")                     // nothing recent: the year's
 	add(2, now.AddDate(0, -9, 0), 40, "Lantern Books, Indiranagar", "Subscriptions", "")             // too few either way
 	got := budgetHabits(context.Background(), db, "withdrawal", now)
-	want := []string{`Books → no budget (6 of 6, last year)`, `Eating out → "Eating outside" (4 of 4, last 4 months)`}
+	want := []string{`Books → no budget in 6 of 6 (100%), last year`, `Eating out → "Eating outside" in 4 of 4 (100%), last 4 months`}
 	if strings.Join(got, " | ") != strings.Join(want, " | ") {
 		t.Errorf("budget habits = %q, want %q", got, want)
 	}

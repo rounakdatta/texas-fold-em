@@ -69,7 +69,7 @@ TITLE (description_suggestion) — the most visible thing you write:
 
 TAGS group transactions the owner wants to find together: a trip, a reimbursable expense, an event. Add one only when this transaction is in that situation — within the trip's dates and currency (TRIP CONTEXT), a work meal on a working day for a reimbursement tag — or when the owner's RECENT transactions of exactly this kind all carry it. Never tag a meal, a category or a merchant's name. Use the existing vocabulary. When unsure, no tag: a missing tag costs one tap, a wrong one misleads.
 
-BUDGET: follow the owner's habit for the category you chose (YOUR BUDGETS BY CATEGORY): when that category nearly always goes to one budget, use it; when it mostly has none, null.
+BUDGET follows the payee first: the budget (or "none") this payee's own past rows carry — in THIS HANDLE / DESCRIPTOR, the historical examples, the corrections — decides it; one merchant's meals can go to a budget while a café's coffees go to none. Only for a payee with no history, use the category's budget when YOUR BUDGETS BY CATEGORY shows at least 80% of it there; otherwise null.
 
 HOLDS: a card alert reporting an amount "credited back to your card" with no merchant is usually a released authorisation hold, not money received — and its original charge, the same amount a few days earlier, was usually never billed either. Say so in hold_suggestion; the owner decides.
 
@@ -606,7 +606,7 @@ func budgetHabits(ctx context.Context, db *sql.DB, txnType string, now time.Time
 		if e.h.top != "" {
 			to = fmt.Sprintf("%q", e.h.top)
 		}
-		out = append(out, fmt.Sprintf("%s → %s (%d of %d, %s)", e.cat, to, e.h.topN, e.h.n, e.h.inWindow))
+		out = append(out, fmt.Sprintf("%s → %s in %d of %d (%d%%), %s", e.cat, to, e.h.topN, e.h.n, 100*e.h.topN/e.h.n, e.h.inWindow))
 	}
 	return out
 }
@@ -820,6 +820,8 @@ func buildTier3Prompt(staged StagedRow, in tier3Inputs) string {
 			b.WriteString(fmt.Sprintf("    category=%q (id=%s)\n", h.CategoryName, formatNullID(h.CategoryID)))
 			if h.BudgetName != "" {
 				b.WriteString(fmt.Sprintf("    budget=%q (id=%s)\n", h.BudgetName, formatNullID(h.BudgetID)))
+			} else {
+				b.WriteString("    budget=none\n")
 			}
 			b.WriteString(fmt.Sprintf("    description=%q\n", h.Description))
 			if h.TagsJSON != "" && h.TagsJSON != "[]" {
