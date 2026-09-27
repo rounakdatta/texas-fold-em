@@ -333,3 +333,35 @@ func TestAHostThatRefusesATemperatureGetsNone(t *testing.T) {
 		t.Errorf("the copy sent a temperature again (%d refusals), %v", withTemp.Load(), err)
 	}
 }
+
+// Claude Opus 5.5 always thinks: asked to stop ("none"), it answers 400
+// "thinking.type.disabled is not supported". The client asks again leaving
+// thinking to it, and doesn't ask to turn it off again.
+func TestAModelThatMustThinkIsLeftToThink(t *testing.T) {
+	var refused, served atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body["reasoning_effort"] == "none" {
+			refused.Add(1)
+			http.Error(w, `{"error":{"message":"\"thinking.type.disabled\" is not supported for this model.","type":"invalid_request_error"}}`, http.StatusBadRequest)
+			return
+		}
+		served.Add(1)
+		okReply(w, `{"ok":true}`, 1)
+	}))
+	t.Cleanup(srv.Close)
+	c := NewClient("k", "claude-opus-5-5", srv.URL, srv.Client())
+	c.SetReasoningEffort("none")
+	for i := range 3 {
+		if _, err := c.GenerateJSON(context.Background(), "s", "u"); err != nil {
+			t.Fatalf("call %d: %v", i, err)
+		}
+	}
+	if refused.Load() != 1 || served.Load() != 3 {
+		t.Errorf("asked to stop thinking %d times (want once), served %d (want 3)", refused.Load(), served.Load())
+	}
+	if h := c.Health(); !h.Available || h.FailStreak != 0 {
+		t.Errorf("health = %+v; a refusal learnt from is not a failure", h)
+	}
+}

@@ -117,6 +117,10 @@ type Client struct {
 	// the same client works against a host that wants one and one that
 	// rejects it.
 	noTemperature bool
+	// thinkingRequired: the model refused to have its thinking turned off
+	// (Claude Opus 5.5: "thinking.type.disabled is not supported"), so an
+	// effort of "none" is sent as nothing — the host's default — from then on.
+	thinkingRequired bool
 }
 
 // ErrUnavailable is returned, without a request, while the client rests.
@@ -266,6 +270,7 @@ func (c *Client) WithOverrides(model, reasoningEffort string) *Client {
 	n.timeout, n.maxTokens, n.reasoningEffort = c.timeout, c.maxTokens, c.reasoningEffort
 	c.mu.Lock()
 	n.noTemperature = c.noTemperature && n.model == c.model // what this model refuses, if it's the same model
+	n.thinkingRequired = c.thinkingRequired && n.model == c.model
 	c.mu.Unlock()
 	if e := strings.TrimSpace(reasoningEffort); e != "" {
 		n.reasoningEffort = e
@@ -338,7 +343,7 @@ func (c *Client) GenerateJSON(ctx context.Context, systemPrompt, userPrompt stri
 		ResponseFormat: &responseFormat{Type: "json_object"},
 	}
 	c.mu.Lock()
-	noTemp := c.noTemperature
+	noTemp, mustThink := c.noTemperature, c.thinkingRequired
 	c.mu.Unlock()
 	// "" leaves thinking to the host's default; "none" asks for none — a
 	// Claude 5 model otherwise thinks (unseen, redacted), spending seconds
@@ -346,7 +351,7 @@ func (c *Client) GenerateJSON(ctx context.Context, systemPrompt, userPrompt stri
 	// the effort to think with, and takes no temperature.
 	switch e := c.reasoningEffort; e {
 	case "", "none":
-		if e == "none" {
+		if e == "none" && !mustThink {
 			body.ReasoningEffort = "none"
 		}
 		if !noTemp {
@@ -389,6 +394,22 @@ func (c *Client) GenerateJSON(ctx context.Context, systemPrompt, userPrompt stri
 			return out, nil
 		}
 		lastErr = err
+		// A model that won't stop thinking gets the same request with its
+		// thinking left to it, now and from now on.
+		if body.ReasoningEffort == "none" && refusesNoThinking(err) {
+			c.mu.Lock()
+			c.thinkingRequired = true
+			c.mu.Unlock()
+			if c.log != nil {
+				c.log.Warn("llm: the model won't have its thinking turned off; leaving it to the model", "model", c.model)
+			}
+			body.ReasoningEffort = ""
+			if buf, err = json.Marshal(body); err != nil {
+				return "", fmt.Errorf("llm: marshal request: %w", err)
+			}
+			attempt--
+			continue
+		}
 		// A host that refuses the temperature gets the same request
 		// without one, now and from now on.
 		if body.Temperature != nil && refusesTemperature(err) {
@@ -530,6 +551,13 @@ type transportError struct{ err error }
 
 func (e *transportError) Error() string { return "llm transport: " + e.err.Error() }
 func (e *transportError) Unwrap() error { return e.err }
+
+// refusesNoThinking: a 400 refusing a request to turn thinking off.
+func refusesNoThinking(err error) bool {
+	var apiErr *Error
+	return errors.As(err, &apiErr) && apiErr.Status == http.StatusBadRequest &&
+		strings.Contains(strings.ToLower(apiErr.Body), "thinking") && strings.Contains(strings.ToLower(apiErr.Body), "disabled")
+}
 
 // refusesTemperature: a 400 that complains about the temperature.
 func refusesTemperature(err error) bool {
