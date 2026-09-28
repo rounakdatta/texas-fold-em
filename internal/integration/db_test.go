@@ -27,6 +27,7 @@ func TestOpen_FreshFileMigratesAllExpectedTables(t *testing.T) {
 		"merchant_lookup",
 		"firefly_categories",
 		"review_feedback",
+		"place_lookups",
 	}
 	for _, tbl := range wantTables {
 		var name string
@@ -59,8 +60,8 @@ func TestOpen_FreshFileMigratesAllExpectedTables(t *testing.T) {
 		`SELECT COUNT(*) FROM goose_db_version WHERE version_id > 0`).Scan(&applied); err != nil {
 		t.Fatalf("goose ledger: %v", err)
 	}
-	if applied != 17 {
-		t.Errorf("expected 17 migrations applied, got %d", applied)
+	if applied != 18 {
+		t.Errorf("expected 18 migrations applied, got %d", applied)
 	}
 }
 
@@ -90,8 +91,8 @@ func TestOpen_IsIdempotent(t *testing.T) {
 		`SELECT COUNT(*) FROM goose_db_version WHERE version_id > 0`).Scan(&applied); err != nil {
 		t.Fatalf("goose ledger: %v", err)
 	}
-	if applied != 17 {
-		t.Errorf("expected 17 migrations after re-open, got %d", applied)
+	if applied != 18 {
+		t.Errorf("expected 18 migrations after re-open, got %d", applied)
 	}
 }
 

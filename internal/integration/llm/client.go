@@ -119,8 +119,12 @@ type Client struct {
 	noTemperature bool
 	// thinkingRequired: the model refused to have its thinking turned off
 	// (Claude Opus 5.5: "thinking.type.disabled is not supported"), so an
-	// effort of "none" is sent as nothing — the host's default — from then on.
+	// effort of "none" is sent as thinkingFallback from then on.
 	thinkingRequired bool
+	// thinkingFallback is the effort asked of a model that must think: ""
+	// leaves it to the host's default, "low" asks for the least there is —
+	// what a picker answering while someone types wants.
+	thinkingFallback string
 }
 
 // ErrUnavailable is returned, without a request, while the client rests.
@@ -257,6 +261,18 @@ func (c *Client) SetReasoningEffort(e string) { c.reasoningEffort = strings.Trim
 // ReasoningEffort is the configured effort, for the engine's status.
 func (c *Client) ReasoningEffort() string { return c.reasoningEffort }
 
+// SetThinkingFallback is the effort asked of a model that refuses to have
+// its thinking turned off ("" leaves it to the host).
+func (c *Client) SetThinkingFallback(e string) { c.thinkingFallback = strings.TrimSpace(e) }
+
+// Adapted reports what this model has refused so far: a temperature, and
+// having its thinking turned off.
+func (c *Client) Adapted() (noTemperature, thinkingRequired bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.noTemperature, c.thinkingRequired
+}
+
 // WithOverrides is a client like c — same key, endpoint, HTTP client and
 // tunables — with another model or reasoning effort ("" keeps c's), and
 // stats and a breaker of its own. The shadow evaluation uses it to compare
@@ -267,7 +283,7 @@ func (c *Client) WithOverrides(model, reasoningEffort string) *Client {
 		n.model = m
 	}
 	n.log, n.backoffFunc = c.log, c.backoffFunc
-	n.timeout, n.maxTokens, n.reasoningEffort = c.timeout, c.maxTokens, c.reasoningEffort
+	n.timeout, n.maxTokens, n.reasoningEffort, n.thinkingFallback = c.timeout, c.maxTokens, c.reasoningEffort, c.thinkingFallback
 	c.mu.Lock()
 	n.noTemperature = c.noTemperature && n.model == c.model // what this model refuses, if it's the same model
 	n.thinkingRequired = c.thinkingRequired && n.model == c.model
@@ -349,8 +365,10 @@ func (c *Client) GenerateJSON(ctx context.Context, systemPrompt, userPrompt stri
 	// Claude 5 model otherwise thinks (unseen, redacted), spending seconds
 	// and the reply's token budget on a one-line answer; anything else is
 	// the effort to think with, and takes no temperature.
-	switch e := c.reasoningEffort; e {
-	case "", "none":
+	switch e := c.reasoningEffort; {
+	case e == "none" && mustThink && c.thinkingFallback != "":
+		body.ReasoningEffort = c.thinkingFallback // the least it will think
+	case e == "" || e == "none":
 		if e == "none" && !mustThink {
 			body.ReasoningEffort = "none"
 		}
@@ -403,7 +421,10 @@ func (c *Client) GenerateJSON(ctx context.Context, systemPrompt, userPrompt stri
 			if c.log != nil {
 				c.log.Warn("llm: the model won't have its thinking turned off; leaving it to the model", "model", c.model)
 			}
-			body.ReasoningEffort = ""
+			body.ReasoningEffort = c.thinkingFallback // "": the host's default
+			if body.ReasoningEffort != "" {
+				body.Temperature = nil // (thinking takes no temperature)
+			}
 			if buf, err = json.Marshal(body); err != nil {
 				return "", fmt.Errorf("llm: marshal request: %w", err)
 			}

@@ -1183,7 +1183,8 @@
     // real payees (nothing on screen moves when they arrive), are marked
     // apart, and are only ever picked, never assumed. Asked for once typing
     // pauses; a question overtaken by more typing is cancelled.
-    const places = { items: [], forQ: '', loading: false, since: 0, timer: 0, slow: 0, ctrl: null, seen: new Map() };
+    const places = { items: [], forQ: '', loading: false, since: 0, timer: 0, slow: 0, ctrl: null, seen: new Map(),
+      lctrl: null, lookingUp: false, lookingSince: 0, lslow: 0, drawnNames: [] };
     const wantPlaces = q => q.length >= 3 && q !== current;
     const sugg = incoming
       ? { heading: 'Suggested names', icon: 'person', label: 'Suggested name: ', mine: 'your payer', fresh: 'new payer', whose: 'One of your payers.', neu: 'A new payer.' }
@@ -1193,27 +1194,62 @@
     // its words — or a run of them written together ("jp" for "J.P. Nagar")
     const starts = name => { const w = words(name), out = w.slice(); w.forEach((_, i) => { let j = w[i]; for (let k = i + 1; k < w.length && k < i + 4; k++) { j += w[k]; out.push(j); } }); return out; };
     const stillFits = (name, q) => { const s = starts(name); return words(q).every(t => s.some(x => x.startsWith(t))); };
+    const stopLookup = () => { if (places.lctrl) places.lctrl.abort(); places.lctrl = null; places.lookingUp = false; };
+    // The second question, when the first answer says fold is looking the
+    // place up online (a branch it couldn't place): the same answer once the
+    // search is in, its branches added below. Loud — "Looking it up online…"
+    // — only when there was nothing to place it by; a check on a place
+    // already placed adds a branch it didn't know without a word.
+    const askLookup = (q, loud) => {
+      stopLookup();
+      const ctrl = new AbortController();
+      Object.assign(places, { lctrl: ctrl, lookingUp: loud, lookingSince: Date.now() });
+      clearTimeout(places.lslow);
+      if (loud) places.lslow = setTimeout(() => { if (places.lctrl === ctrl) updatePlaces(); }, 500);
+      fetch('/api/rows/' + c.uuid + '/places/lookup?q=' + encodeURIComponent(q), { headers: { Accept: 'application/json' }, signal: ctrl.signal })
+        .then(r => (r.ok ? r.json() : { suggestions: [] }))
+        .then(d => {
+          if (places.lctrl !== ctrl) return;
+          places.lctrl = null; places.lookingUp = false;
+          const have = new Set(places.items.map(s => words(s.name).join(' ')));
+          const merged = places.items.concat((d.suggestions || []).filter(s => !have.has(words(s.name).join(' '))));
+          places.seen.set(q, { items: merged, lookup: '' });
+          if (places.forQ === q) places.items = merged;
+          updatePlaces();
+        })
+        .catch(() => { if (places.lctrl === ctrl) { places.lctrl = null; places.lookingUp = false; updatePlaces(); } });
+    };
     const askPlaces = q => {
       if (places.ctrl) places.ctrl.abort();
+      stopLookup();
       if (!sheet.open || !input.isConnected) return; // closed, or another sheet since
       const ctrl = new AbortController();
       Object.assign(places, { ctrl, loading: true, since: Date.now() });
       clearTimeout(places.slow);
-      places.slow = setTimeout(() => { if (places.ctrl === ctrl && places.loading) paint(); }, 500); // "looking" only when it is slow
+      places.slow = setTimeout(() => { if (places.ctrl === ctrl && places.loading) updatePlaces(); }, 500); // "looking" only when it is slow
       fetch('/api/rows/' + c.uuid + '/places?q=' + encodeURIComponent(q), { headers: { Accept: 'application/json' }, signal: ctrl.signal })
         .then(r => (r.ok ? r.json() : { suggestions: [] }))
-        .then(d => { places.seen.set(q, d.suggestions || []); if (places.ctrl !== ctrl) return; Object.assign(places, { items: d.suggestions || [], forQ: q, loading: false }); paint(); })
-        .catch(() => { if (places.ctrl === ctrl) { places.loading = false; paint(); } });
+        .then(d => {
+          places.seen.set(q, { items: d.suggestions || [], lookup: d.lookup || '' });
+          if (places.ctrl !== ctrl) return;
+          Object.assign(places, { items: d.suggestions || [], forQ: q, loading: false });
+          if (d.lookup) askLookup(q, d.lookup === 'pending');
+          updatePlaces();
+        })
+        .catch(() => { if (places.ctrl === ctrl) { places.loading = false; updatePlaces(); } });
     };
     const schedulePlaces = () => {
       clearTimeout(places.timer);
       const q = input.value.trim();
-      if (!wantPlaces(q)) { if (places.ctrl) places.ctrl.abort(); places.ctrl = null; places.loading = false; return; }
+      if (!wantPlaces(q)) { if (places.ctrl) places.ctrl.abort(); places.ctrl = null; places.loading = false; stopLookup(); return; }
       if (q === places.forQ && !places.loading) return;
-      // answered before in this picker (typed on, then back): at once
+      // answered before in this picker (typed on, then back): at once — and
+      // a lookup it was waiting on, waited on again
       if (places.seen.has(q)) {
         if (places.ctrl) places.ctrl.abort();
-        Object.assign(places, { ctrl: null, items: places.seen.get(q), forQ: q, loading: false });
+        const seen = places.seen.get(q);
+        Object.assign(places, { ctrl: null, items: seen.items, forQ: q, loading: false });
+        if (seen.lookup) askLookup(q, seen.lookup === 'pending'); else stopLookup();
         return paint();
       }
       // each question is a model call: ask once the typing pauses
@@ -1231,7 +1267,7 @@
     const markListed = (s, fresh) => {
       const key = words(s.name).join(' ');
       const b = [...list.querySelectorAll('.pick:not(.pick-place)')].find(b => words(b.querySelector('.pick-main').textContent).join(' ') === key);
-      if (!b) return;
+      if (!b || b.classList.contains('is-suggested')) return;
       const old = b.querySelector('.pick-hint');
       const word = [old && old.textContent, 'suggested'].filter(Boolean).join(' · ');
       const hint = h('span', { class: 'pick-hint' + (fresh ? ' arrives' : ''), title: [word, s.what].filter(Boolean).join(' · ') },
@@ -1240,28 +1276,88 @@
       b.classList.add('is-suggested');
       b.setAttribute('aria-label', sugg.label + s.name + (s.what ? ', ' + s.what : '') + '. ' + sugg.whose);
     };
-    const paintPlaces = (q, onScreen) => {
-      if (!wantPlaces(q)) return;
+    // What the block shows for q: the suggestions (what was typed is offered
+    // already, as typed; the same name tidied — its capitals, what it is —
+    // is a suggestion of its own), the ones the list shows already (marked
+    // there), and its line while fold looks.
+    const placesView = (q, hits) => {
       const key = n => words(n).join(' ');
-      const shown = new Set(onScreen.map(key));
+      const shown = new Set(hits.map(key));
       const fit = places.items.filter(s => places.forQ === q || stillFits(s.name, q));
-      const items = fit.filter(s => !shown.has(key(s.name)));
-      const listed = fit.filter(s => shown.has(key(s.name)));
+      const items = fit.filter(s => !shown.has(key(s.name)) && s.name !== q);
+      const looking = places.loading && Date.now() - places.since >= 450;
+      const lookingUp = places.lookingUp && places.forQ === q && Date.now() - places.lookingSince >= 450;
+      return {
+        items, listed: fit.filter(s => shown.has(key(s.name))),
+        line: lookingUp ? 'Looking it up online…' : !items.length && looking ? (incoming ? 'Looking up names…' : 'Looking up places…') : '',
+      };
+    };
+    const markAll = listed => {
       const marks = places.forQ + '|' + listed.map(s => s.name).join('|');
       const freshMarks = marks !== places.marked; // (it fades in once per answer)
       places.marked = marks;
       for (const s of listed) markListed(s, freshMarks);
-      const looking = places.loading && Date.now() - places.since >= 450;
-      if (!items.length && !looking) return;
-      // fade in once per answer, not on every keystroke that redraws the list
-      const answer = places.forQ + '|' + items.map(s => s.name).join('|');
-      const fresh = answer !== places.drawn;
-      places.drawn = answer;
-      const box = h('div', { class: 'pick-places' + (fresh ? ' is-fresh' : ''), role: 'group', 'aria-label': sugg.heading },
-        h('div', { class: 'pick-group' }, icon(sugg.icon), h('span', { text: sugg.heading })));
-      for (const s of items) box.append(placeButton(s));
-      if (!items.length) box.append(h('p', { class: 'places-looking', role: 'status', text: incoming ? 'Looking up names…' : 'Looking up places…' }));
+    };
+    const placesBox = fresh => h('div', { class: 'pick-places' + (fresh ? ' is-fresh' : ''), role: 'group', 'aria-label': sugg.heading },
+      h('div', { class: 'pick-group' }, icon(sugg.icon), h('span', { text: sugg.heading })));
+    const lookingLine = text => h('p', { class: 'places-looking', role: 'status', text });
+    const paintPlaces = (q, hits) => {
+      if (!wantPlaces(q)) return;
+      const v = placesView(q, hits);
+      markAll(v.listed);
+      if (!v.items.length && !v.line) { places.drawnNames = []; return; }
+      // The block comes in with a new answer; a name added to one already
+      // there comes in alone; a keystroke that redraws the same answer
+      // moves nothing at all.
+      const names = v.items.map(s => s.name);
+      const before = places.drawnNames;
+      const fresh = !names.some(n => before.includes(n));
+      places.drawnNames = names;
+      const box = placesBox(fresh);
+      for (const s of v.items) {
+        const b = placeButton(s);
+        if (!fresh && !before.includes(s.name)) b.classList.add('arrives');
+        box.append(b);
+      }
+      if (v.line) box.append(lookingLine(v.line));
       list.append(box);
+    };
+    // An answer that only adds to what is on screen — a suggestion, the
+    // branches a lookup found, its line — is added where it goes, below;
+    // nothing is redrawn, so the row under a finger about to tap it stays.
+    // Anything else (a new answer, another text) redraws the list.
+    const updatePlaces = () => {
+      const q = input.value.trim();
+      if (!q || q === current || !wantPlaces(q)) return paint();
+      const v = placesView(q, hitsFor(q.toLowerCase()));
+      const names = v.items.map(s => s.name), before = places.drawnNames;
+      if (before.some((n, i) => names[i] !== n)) return paint();
+      let box = list.querySelector('.pick-places');
+      if (!box && before.length) return paint();
+      markAll(v.listed);
+      if (!names.length && !v.line) { if (box) box.remove(); places.drawnNames = []; return; } // nothing left to show: no empty block
+      const created = !box;
+      if (created) list.append(box = placesBox(true));
+      const line = box.querySelector('.places-looking');
+      for (const s of v.items.slice(before.length)) {
+        const b = placeButton(s);
+        if (!created) b.classList.add('arrives');
+        box.insertBefore(b, line);
+      }
+      places.drawnNames = names;
+      if (!v.line) { if (line) line.remove(); }
+      else if (line) line.textContent = v.line;
+      else box.append(lookingLine(v.line));
+    };
+    // the payees that start with (or have) what is typed, those that start first
+    const hitsFor = ql => {
+      const starts = [], has = [];
+      for (const p of names) {
+        const pl = p.toLowerCase();
+        if (pl.startsWith(ql)) starts.push(p); else if (pl.includes(ql)) has.push(p);
+        if (starts.length > 30) break;
+      }
+      return starts.concat(has).slice(0, 30);
     };
     // who went under this bank name before (money out; a payer's bank line
     // names them already), below what is on the alert
@@ -1299,19 +1395,13 @@
         list.append(h('p', { class: 'hint', text: exactOwn.short + ' is the account this is on.' }));
       }
       if (exactOwn) transfers();
-      const starts = [], has = [];
-      for (const p of names) {
-        const pl = p.toLowerCase();
-        if (pl.startsWith(ql)) starts.push(p); else if (pl.includes(ql)) has.push(p);
-        if (starts.length > 30) break;
-      }
-      const hits = starts.concat(has).slice(0, 30);
+      const hits = hitsFor(ql);
       const exact = hits.some(p => p.toLowerCase() === ql);
       if (!exact && !exactOwn) list.append(pickButton('Use “' + q + '”', incoming ? 'new payer' : 'new payee', () => choose(q)));
       if (hits.length && exactOwn && ownHits.length) list.append(h('div', { class: 'pick-group', text: incoming ? 'Payers' : 'Payees' }));
       for (const p of hits) list.append(pickButton(p, newHint(p, ''), () => choose(p)));
       if (!exactOwn) transfers();
-      paintPlaces(q, hits.concat([q]));
+      paintPlaces(q, hits);
     };
     input.addEventListener('input', () => { paint(); schedulePlaces(); });
     input.addEventListener('keydown', e => { if (e.key === 'Enter') { const b = list.querySelector('.pick'); if (b) { e.preventDefault(); b.click(); } } });

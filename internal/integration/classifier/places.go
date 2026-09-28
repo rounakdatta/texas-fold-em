@@ -43,8 +43,13 @@ type PlacesResult struct {
 	// Resting: the model is resting (a limit, a refused key, failures);
 	// the picker shows only the real payees meanwhile.
 	Resting bool `json:"resting,omitempty"`
+	// Lookup: "pending" while fold looks the place up on the web (the picker
+	// says so, then asks SuggestPlacesLooked for what it found); "checking"
+	// when it looks up a place the model placed already, unannounced.
+	Lookup string `json:"lookup,omitempty"`
 
-	raw []string // what the model offered, before the fit guard
+	raw  []string    // what the model offered, before the fit guard
+	plan *lookupPlan // the lookup this answer calls for, if any
 }
 
 // Typed text shorter than this names nothing yet; longer is a sentence.
@@ -72,16 +77,38 @@ func (c *Classifier) placesModel() *llm.Client {
 // card and text for a quarter of an hour; a request abandoned mid-way (the
 // person typed on) is cancelled with its context.
 func (c *Classifier) SuggestPlaces(ctx context.Context, uuid, typed string) (PlacesResult, error) {
-	return c.suggestPlacesWith(ctx, c.placesModel(), uuid, typed, true)
+	res, err := c.suggestPlacesWith(ctx, c.placesModel(), uuid, typed, true)
+	if err != nil {
+		return res, err
+	}
+	return c.withLookup(ctx, uuid, cleanTyped(typed), res, false), nil
+}
+
+// SuggestPlacesLooked is SuggestPlaces once the place's web lookup is in: it
+// waits for one under way (at most lookupTimeout, or until the picker gives
+// up) and adds the branches it found.
+func (c *Classifier) SuggestPlacesLooked(ctx context.Context, uuid, typed string) (PlacesResult, error) {
+	res, err := c.suggestPlacesWith(ctx, c.placesModel(), uuid, typed, true)
+	if err != nil {
+		return res, err
+	}
+	return c.withLookup(ctx, uuid, cleanTyped(typed), res, true), nil
+}
+
+// cleanTyped: the typed text as compared — single spaces, at most
+// placesMaxTyped letters.
+func cleanTyped(typed string) string {
+	typed = strings.Join(strings.Fields(typed), " ")
+	if r := []rune(typed); len(r) > placesMaxTyped {
+		typed = string(r[:placesMaxTyped])
+	}
+	return typed
 }
 
 func (c *Classifier) suggestPlacesWith(ctx context.Context, model *llm.Client, uuid, typed string, cached bool) (PlacesResult, error) {
-	typed = strings.Join(strings.Fields(typed), " ")
+	typed = cleanTyped(typed)
 	if model == nil || len([]rune(typed)) < placesMinTyped {
 		return PlacesResult{}, ErrNoPlaces
-	}
-	if r := []rune(typed); len(r) > placesMaxTyped {
-		typed = string(r[:placesMaxTyped])
 	}
 	key := uuid + "|" + strings.ToLower(typed)
 	if res, ok := c.places.get(key); ok && cached {
@@ -132,6 +159,7 @@ func (c *Classifier) suggestPlacesWith(ctx context.Context, model *llm.Client, u
 	parsed := parsePlaces(out, inventory)
 	res := PlacesResult{Suggestions: fitting(parsed, typed)}
 	if cached {
+		res.plan = c.planLookup(ctx, staged, typed, res.Suggestions, inventory)
 		c.places.put(key, res)
 	} else {
 		for _, s := range parsed {
@@ -155,8 +183,12 @@ type PlacesRun struct {
 	DurationMS  int64             `json:"durationMs"`
 	Suggestions []PlaceSuggestion `json:"suggestions"`
 	// Raw: what the model offered before the fit guard (a comparison only).
-	Raw   []string `json:"raw,omitempty"`
-	Error string   `json:"error,omitempty"`
+	Raw []string `json:"raw,omitempty"`
+	// What the model has refused so far: having its thinking turned off
+	// (so it thinks, a little), and a temperature.
+	Thinks        bool   `json:"thinks,omitempty"`
+	NoTemperature bool   `json:"noTemperature,omitempty"`
+	Error         string `json:"error,omitempty"`
 }
 
 // ComparePlaces asks each model the picker's question for each case — fresh,
@@ -175,21 +207,17 @@ func (c *Classifier) ComparePlaces(ctx context.Context, cases []PlacesCase, mode
 			runs = append(runs, PlacesRun{Model: m, UUID: cs.UUID, Typed: cs.Typed})
 		}
 	}
-	clients := map[string]*llm.Client{}
-	for _, m := range models {
-		cl := c.llm.WithOverrides(m, "none")
-		cl.SetMaxTokens(600)
-		clients[m] = cl
-	}
 	var wg sync.WaitGroup
 	for i := range runs {
 		wg.Add(1)
 		go func(r *PlacesRun) {
 			defer wg.Done()
+			cl := c.compareClient(r.Model)
 			start := time.Now()
-			res, err := c.suggestPlacesWith(ctx, clients[r.Model], r.UUID, r.Typed, false)
+			res, err := c.suggestPlacesWith(ctx, cl, r.UUID, r.Typed, false)
 			r.DurationMS = time.Since(start).Milliseconds()
 			r.Suggestions, r.Raw = res.Suggestions, res.raw
+			r.NoTemperature, r.Thinks = cl.Adapted()
 			if err != nil {
 				r.Error = err.Error()
 			}
@@ -197,6 +225,34 @@ func (c *Classifier) ComparePlaces(ctx context.Context, cases []PlacesCase, mode
 	}
 	wg.Wait()
 	return runs, nil
+}
+
+// compareClient is the comparisons' client for a model. It is kept, so what
+// the model refuses — a temperature, having its thinking turned off — is
+// learnt once: a fresh client per comparison paid a refused request each
+// time, and timed it as the model's. A model that must think thinks as
+// little as it can, as the picker's does.
+func (c *Classifier) compareClient(model string) *llm.Client {
+	c.compare.mu.Lock()
+	defer c.compare.mu.Unlock()
+	if cl, ok := c.compare.clients[model]; ok {
+		return cl
+	}
+	base := c.llm
+	for _, x := range []*llm.Client{c.fast, c.lookup} {
+		if x != nil && x.Model() == model {
+			base = x // what it has learnt about this model already
+		}
+	}
+	cl := base.WithOverrides(model, "none")
+	cl.SetMaxTokens(600)
+	cl.SetTimeout(45 * time.Second)
+	cl.SetThinkingFallback("low")
+	if c.compare.clients == nil {
+		c.compare.clients = map[string]*llm.Client{}
+	}
+	c.compare.clients[model] = cl
+	return cl
 }
 
 const placesSystemPrompt = `You help someone name who they paid, in their personal-finance ledger, while they type the name. From what they have typed and what is known about the payment, suggest up to 3 names for the place or business they mean. The typed text itself is already offered to them as it is; offer only what improves on it.
