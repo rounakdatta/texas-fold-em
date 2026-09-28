@@ -351,5 +351,12 @@ button.acct { background: none; border: 0; padding: 0; font: inherit; cursor: po
 .pick.pick-place .pick-hint { flex: none; text-align: left; overflow: hidden; text-overflow: ellipsis; }
 .pick-place:hover, .pick-place:focus-visible { background: color-mix(in srgb, var(--accent) 13%, transparent); }
 .places-looking { margin: 2px 12px 6px; font-size: 13.5px; color: var(--fg-3); }
+/* one of your payees the model named too, marked where it is listed. Short
+   of room it gives way in whole pieces, never a cut word: what it is goes
+   first (wrapped onto a hidden second line), then the word, then the pin */
+.pick.is-suggested .pick-hint { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center;
+  height: 18px; line-height: 18px; color: var(--accent-2); font-weight: 600; }
+.pick.is-suggested .pick-hint svg { flex: none; width: 13px; height: 13px; margin-right: 4px; }
+.pick.is-suggested .hint-what { margin-left: 4px; }
 @keyframes places-in { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
 @media (prefers-reduced-motion: reduce) { .pick-places, .pick-list .arrives { animation: none; } }

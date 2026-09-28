@@ -1225,10 +1225,32 @@
         'aria-label': sugg.label + s.name + (s.what ? ', ' + s.what : '') + '. ' + (s.existing ? sugg.whose : sugg.neu) },
         icon(sugg.icon), h('span', { class: 'place-text' }, h('span', { class: 'pick-main', text: s.name }), h('span', { class: 'pick-hint', text: hint, title: hint })));
     };
+    // One the list already shows is marked where it is, not repeated below:
+    // the model's pick among three branches of one café is worth seeing, and
+    // marking it moves nothing.
+    const markListed = (s, fresh) => {
+      const key = words(s.name).join(' ');
+      const b = [...list.querySelectorAll('.pick:not(.pick-place)')].find(b => words(b.querySelector('.pick-main').textContent).join(' ') === key);
+      if (!b) return;
+      const old = b.querySelector('.pick-hint');
+      const word = [old && old.textContent, 'suggested'].filter(Boolean).join(' · ');
+      const hint = h('span', { class: 'pick-hint' + (fresh ? ' arrives' : ''), title: [word, s.what].filter(Boolean).join(' · ') },
+        icon(sugg.icon), h('span', { text: word }), s.what ? h('span', { class: 'hint-what', text: '· ' + s.what }) : null);
+      if (old) old.replaceWith(hint); else b.append(hint);
+      b.classList.add('is-suggested');
+      b.setAttribute('aria-label', sugg.label + s.name + (s.what ? ', ' + s.what : '') + '. ' + sugg.whose);
+    };
     const paintPlaces = (q, onScreen) => {
       if (!wantPlaces(q)) return;
-      const shown = new Set(onScreen.map(n => words(n).join(' ')));
-      const items = places.items.filter(s => !shown.has(words(s.name).join(' ')) && (places.forQ === q || stillFits(s.name, q)));
+      const key = n => words(n).join(' ');
+      const shown = new Set(onScreen.map(key));
+      const fit = places.items.filter(s => places.forQ === q || stillFits(s.name, q));
+      const items = fit.filter(s => !shown.has(key(s.name)));
+      const listed = fit.filter(s => shown.has(key(s.name)));
+      const marks = places.forQ + '|' + listed.map(s => s.name).join('|');
+      const freshMarks = marks !== places.marked; // (it fades in once per answer)
+      places.marked = marks;
+      for (const s of listed) markListed(s, freshMarks);
       const looking = places.loading && Date.now() - places.since >= 450;
       if (!items.length && !looking) return;
       // fade in once per answer, not on every keystroke that redraws the list
