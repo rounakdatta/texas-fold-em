@@ -106,11 +106,10 @@ func TestPlaceSuggestionsAreRemembered(t *testing.T) {
 	}
 }
 
-// Nothing to ask about: too few letters, money in, or no model at all.
+// Nothing to ask about: too few letters, no such card, or no model at all.
 func TestNoPlacesWhenThereIsNothingToAsk(t *testing.T) {
 	c, fake := placesWorld(t)
-	stagedAt(t, c.db, "in", "INCOMING", "NEFT/ACME PAYROLL", "acme", 100, time.Now(), "needs_review")
-	for _, tc := range []struct{ uuid, q string }{{"qr", "su"}, {"qr", "   "}, {"in", "acme payroll"}, {"nope", "sunrise ti"}} {
+	for _, tc := range []struct{ uuid, q string }{{"qr", "su"}, {"qr", "   "}, {"nope", "sunrise ti"}} {
 		if _, err := c.SuggestPlaces(context.Background(), tc.uuid, tc.q); !errors.Is(err, ErrNoPlaces) {
 			t.Errorf("SuggestPlaces(%q, %q) = %v, want ErrNoPlaces", tc.uuid, tc.q, err)
 		}
@@ -200,5 +199,35 @@ func TestModelsCanBeComparedOnThePickersQuestion(t *testing.T) {
 	}
 	if _, err := c.ComparePlaces(context.Background(), make([]PlacesCase, 7), []string{"a", "b"}); err == nil {
 		t.Error("14 runs were accepted; at most 12")
+	}
+}
+
+// Money in: who paid. The bank line usually names them, and the model is
+// asked with that name, the owner's payers and how they write them — and a
+// name that is one of their payers comes back as that payer.
+func TestSendersAreSuggestedFromTheBankLine(t *testing.T) {
+	db := learnDB(t)
+	mustExec(t, db, `INSERT INTO firefly_accounts (firefly_id, name, type, active, raw_payload) VALUES
+		(70, 'Asha Menon', 'revenue', 1, '{}'), (71, 'Acme Payroll', 'revenue', 1, '{}'), (72, 'Ravi Kumar', 'revenue', 1, '{}')`)
+	stagedAt(t, db, "in", "INCOMING", "UPI-ASHA MENON-ASHA.M-1@OKICICI-ICIC0001234-612345678901-DINNER SPLIT", "", 45000, time.Date(2026, 9, 27, 15, 0, 0, 0, time.UTC), "needs_review")
+	fake := newCapturingLLM(t, `{"suggestions":[{"name":"Asha Menon","what":"","confidence":0.9},{"name":"Asha M","what":"","confidence":0.4}]}`)
+	c := New(db, slog.Default(), DefaultConfidenceThreshold, 10)
+	c.SetLLM(llm.NewClient("k", "m", fake.URL, fake.Client()))
+	res, err := c.SuggestPlaces(context.Background(), "in", "asha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := fake.last()
+	for _, want := range []string{`TYPED: "asha"`, "THE PAYMENT: money in", `the name on the bank line: "ASHA MENON"`,
+		`the note on the payment (the sender's words): "DINNER SPLIT"`, `YOUR PAYERS THAT SHARE A WORD: "Asha Menon"`, "YOUR STYLE (your payers"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("the senders prompt lacks %q:\n%s", want, p)
+		}
+	}
+	if strings.Contains(p, "YOUR AREAS") || strings.Contains(p, "a QR code payment") {
+		t.Error("a sender's prompt talks about places")
+	}
+	if len(res.Suggestions) != 2 || !res.Suggestions[0].Existing || res.Suggestions[0].Name != "Asha Menon" || res.Suggestions[1].Existing {
+		t.Errorf("suggestions = %+v; want the payer marked as one, the other new", res.Suggestions)
 	}
 }
