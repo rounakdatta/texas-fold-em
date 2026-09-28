@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/rounakdatta/texas-fold-em/internal/integration/whereabouts"
 )
 
 // FoldAccountRef carries the human-readable details of a fold-side
@@ -468,6 +470,38 @@ func mealContext(txnTimestamp, foreignCurrency string) string {
 		local.Format("2006-01-02 15:04"), local.Format("MST"), local.Format("Mon"),
 		foreignCurrency, region, approxNote,
 		homeLine,
+	)
+}
+
+// mealContextFor is mealContext, told where the owner was: a payment made
+// on a trip fold has placed reads at its own zone's time, stated plainly;
+// any other foreign charge keeps mealContext's currency guess and its
+// caveats (it may have been paid online, from home).
+func (c *Classifier) mealContextFor(ctx context.Context, staged StagedRow) string {
+	cur := foreignCurrencyOf(staged.RawPayload)
+	if cur != "" {
+		if l, ok := c.Whereabouts(ctx).For(staged.FoldUUID); ok {
+			return mealContextAt(staged.TxnTimestamp, l)
+		}
+	}
+	return mealContext(staged.TxnTimestamp, cur)
+}
+
+// mealContextAt: when, where the owner was — the local time first, then home.
+func mealContextAt(txnTimestamp string, where whereabouts.Local) string {
+	t, ok := parseTxnTimestamp(txnTimestamp)
+	if !ok {
+		return ""
+	}
+	home := t.In(istLocation())
+	local := t.In(where.Zone)
+	return fmt.Sprintf(
+		"local: %s %s — %s time, where you were (on a trip) — %s — %s\n"+
+			"  home (IST):   %s IST %s\n"+
+			"  For meal/occasion use the LOCAL time and local dining norms.",
+		local.Format("2006-01-02 15:04"), local.Format("Mon"), where.Place,
+		mealBucket(local.Hour(), local.Minute()), weekdayCategory(local.Weekday()),
+		home.Format("2006-01-02 15:04"), home.Format("Mon"),
 	)
 }
 

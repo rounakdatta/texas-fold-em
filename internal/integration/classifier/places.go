@@ -172,6 +172,20 @@ func (c *Classifier) suggestPlacesWith(ctx context.Context, model *llm.Client, u
 	return res, nil
 }
 
+// spokenWhen is a payment's moment as the prompts say it: at home, "Sun 27
+// Sept 2026 at 9:55 am IST"; made on a trip, where it was — "Sat 5 Sept
+// 2026 at 3:39 pm Singapore time (1:09 pm IST)".
+func (c *Classifier) spokenWhen(ctx context.Context, uuid string, t time.Time) string {
+	say := func(t time.Time) string {
+		return strings.Replace(t.Format("Mon 2 Jan 2006 at 3:04 pm"), " Sep ", " Sept ", 1)
+	}
+	ist := t.In(istLocation())
+	if l, ok := c.Whereabouts(ctx).For(uuid); ok {
+		return say(t.In(l.Zone)) + " " + l.Place + " time (" + ist.Format("3:04 pm") + " IST)"
+	}
+	return say(ist) + " IST"
+}
+
 // placesEvidence is what one card's picker question draws on — the payees,
 // how much each is used, the owner's payments around it — gathered once per
 // question: the prompt, the lookup's plan and what the lookup offers all
@@ -335,8 +349,7 @@ func (c *Classifier) payersPrompt(ctx context.Context, staged StagedRow, typed s
 		b.WriteString(", " + rupees(staged.AmountPaise))
 	}
 	if t, ok := parseTxnTime(staged.TxnTimestamp); ok {
-		ist := t.In(istLocation())
-		b.WriteString(" on " + strings.Replace(ist.Format("Mon 2 Jan 2006 at 3:04 pm"), " Sep ", " Sept ", 1) + " IST")
+		b.WriteString(" on " + c.spokenWhen(ctx, staged.FoldUUID, t))
 	}
 	b.WriteString("\n")
 	fmt.Fprintf(&b, "  the bank's words: %s\n", shortNarration(staged.Narration))
@@ -426,8 +439,7 @@ func (c *Classifier) placesPrompt(ctx context.Context, staged StagedRow, typed s
 		b.WriteString(", " + rupees(staged.AmountPaise))
 	}
 	if t, ok := parseTxnTime(staged.TxnTimestamp); ok {
-		ist := t.In(istLocation())
-		b.WriteString(" on " + strings.Replace(ist.Format("Mon 2 Jan 2006 at 3:04 pm"), " Sep ", " Sept ", 1) + " IST")
+		b.WriteString(" on " + c.spokenWhen(ctx, staged.FoldUUID, t))
 	}
 	b.WriteString("\n")
 	fmt.Fprintf(&b, "  the bank's words: %s\n", shortNarration(staged.Narration))

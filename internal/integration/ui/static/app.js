@@ -4,28 +4,31 @@
   'use strict';
 
   // <time datetime="RFC3339"> — dates the way people say them, in IST
-  // (every statement is in IST, and so is the editor's date field).
-  const tz = 'Asia/Kolkata';
+  // (every statement is in IST, and so is the editor's date field) — or,
+  // for a payment made on a trip (data-tz), where it was made: "3:39 pm
+  // Singapore time", IST in the title.
+  const home = 'Asia/Kolkata';
   const now = new Date();
-  const dayKey = d => new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
-  const today = dayKey(now);
-  const yesterday = dayKey(new Date(now.getTime() - 864e5));
-  const yearOf = d => new Intl.DateTimeFormat('en', { timeZone: tz, year: 'numeric' }).format(d);
+  const dayKey = (d, tz) => new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
+  const yearOf = (d, tz) => new Intl.DateTimeFormat('en', { timeZone: tz, year: 'numeric' }).format(d);
+  const spokenDay = (d, tz) => {
+    const k = dayKey(d, tz);
+    if (k === dayKey(now, tz)) return 'Today';
+    if (k === dayKey(new Date(now.getTime() - 864e5), tz)) return 'Yesterday';
+    const opts = { timeZone: tz, weekday: 'short', day: 'numeric', month: 'short' };
+    if (yearOf(d, tz) !== yearOf(now, tz)) opts.year = 'numeric';
+    return new Intl.DateTimeFormat('en-GB', opts).format(d).replace(',', '').replace(' Sep ', ' Sept ');
+  };
+  const clockOf = (d, tz) => new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit' }).format(d).toLowerCase();
   for (const el of document.querySelectorAll('time[datetime]:not([data-ago])')) {
     const d = new Date(el.getAttribute('datetime'));
     if (isNaN(d)) continue;
-    const k = dayKey(d);
-    let day;
-    if (k === today) day = 'Today';
-    else if (k === yesterday) day = 'Yesterday';
-    else {
-      const opts = { timeZone: tz, weekday: 'short', day: 'numeric', month: 'short' };
-      if (yearOf(d) !== yearOf(now)) opts.year = 'numeric';
-      day = new Intl.DateTimeFormat('en-GB', opts).format(d).replace(',', '');
-    }
-    const clock = new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit' }).format(d).toLowerCase();
-    el.textContent = el.hasAttribute('data-day-only') ? day : day + ' · ' + clock;
-    el.title = d.toLocaleString('en-IN', { timeZone: tz }) + ' IST';
+    let tz = el.dataset.tz || home;
+    try { clockOf(d, tz); } catch (_) { tz = home; } // a zone this browser doesn't know
+    const place = tz === home ? '' : el.dataset.place;
+    const day = spokenDay(d, tz);
+    el.textContent = el.hasAttribute('data-day-only') ? day : day + ' · ' + clockOf(d, tz) + (place ? ' ' + place + ' time' : '');
+    el.title = (place ? day + ', ' + clockOf(d, tz) + ' ' + place + ' time — ' : '') + d.toLocaleString('en-IN', { timeZone: home }) + ' IST';
   }
 
   // Tag suggestions on the editor: tap to add.

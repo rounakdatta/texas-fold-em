@@ -183,7 +183,21 @@
 
   function spoken(c) {
     const other = otherOf(c).name || (c.type === 'transfer' ? 'another account' : 'someone');
-    return `${TYPE_LABEL[c.type] || ''}: ${c.amount} ${c.direction === 'in' ? 'from' : 'to'} ${other}, ${c.day} ${c.clock}`;
+    return `${TYPE_LABEL[c.type] || ''}: ${c.amount} ${c.direction === 'in' ? 'from' : 'to'} ${other}, ${c.day} ${c.clock}` +
+      (c.local ? ` ${c.local.place} time (${homeWhen(c)} in India)` : '');
+  }
+  // the same moment at home, for a card read where it was made: the day
+  // only when it isn't the same day
+  function homeWhen(c) {
+    const l = c.local;
+    return (l.homeDay !== c.day ? l.homeDay + ', ' : '') + l.homeClock;
+  }
+  // when it was: "Sat 5 Sept · 3:39 pm", and, made on a trip, whose time
+  // that is ("Singapore time") — IST in the title
+  function whenOf(c) {
+    if (!c.local) return h('span', { class: 'when' }, c.day, ' · ', c.clock);
+    return h('span', { class: 'when is-local', title: `${c.day}, ${c.clock} ${c.local.place} time · ${homeWhen(c)} IST` },
+      h('span', { class: 'when-at' }, c.day, ' · ', c.clock), h('span', { class: 'when-place', text: ' ' + c.local.place + ' time' }));
   }
 
   // The type control: the two kinds this card can be, the one push will
@@ -219,7 +233,7 @@
       ? h('button', { type: 'button', class: 'acct is-missing', 'data-act': 'account' }, icon('bank'), h('span', { text: 'Which account?' }))
       : h('span', { class: 'acct', title: mine.full || mine.name || '' },
           icon(/card$/i.test(mine.name || '') ? 'card' : 'bank'), h('span', { text: mine.name }));
-    scroll.append(h('header', { class: 'card-top' }, acct, h('span', { class: 'when' }, c.day, ' · ', c.clock)));
+    scroll.append(h('header', { class: 'card-top' }, acct, whenOf(c)));
 
     // The money and who it went to.
     const hero = h('div', { class: 'hero' });
