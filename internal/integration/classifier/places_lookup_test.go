@@ -423,3 +423,23 @@ func TestAWordOnTheWayIsNotLookedUp(t *testing.T) {
 		t.Errorf("lookup %q for a whole name on a card", res.Lookup)
 	}
 }
+
+// The payments around a card — dozens of queries — are gathered once per
+// picker question: the prompt, the lookup's plan and the branches it offers
+// all read that one gathering, and a kept answer gathers nothing.
+func TestAPickerQuestionGathersTheDayOnce(t *testing.T) {
+	c, _ := lookupWorld(t, unplaced, found(branches))
+	var mu sync.Mutex
+	n := 0
+	neighboursHook = func() { mu.Lock(); n++; mu.Unlock() }
+	t.Cleanup(func() { neighboursHook = nil })
+	ctx := context.Background()
+	c.SuggestPlaces(ctx, "qr", "sunrise tiffins")
+	c.SuggestPlacesLooked(ctx, "qr", "sunrise tiffins")
+	c.SuggestPlaces(ctx, "qr", "sunrise tiffins")
+	mu.Lock()
+	defer mu.Unlock()
+	if n != 1 {
+		t.Errorf("the day was gathered %d times for one question, want 1", n)
+	}
+}
