@@ -133,6 +133,27 @@ func TestDollarsArePlacedByTheirCities(t *testing.T) {
 	}
 }
 
+// Where the places around a payment disagree — the day between two cities —
+// the one within the hour of it decides: a snack at the airport minutes
+// before the train into town is the town's. Further from both, it stays at
+// home time.
+func TestWithinTheHourOfAPlaceIsThatPlacesTime(t *testing.T) {
+	tl := Locate(context.Background(), []Row{
+		row("ny", 0, "USD", "Corner Bagels, New York"),
+		row("ny2", 2, "USD", "Pier Pizza, Manhattan"),
+		row("away", 8, "USD", "Sky Snacks"),          // six hours from either: on the way
+		row("gate", 13.9, "USD", "Airport Kiosk"),    // six minutes before Chicago's
+		row("chi", 14, "USD", "Train Fare, Chicago"), // the train into town
+		row("chi2", 20, "USD", "Deep Dish House, Chicago"),
+		row("ny-late", 2.5, "USD", "Late Cab"), // half an hour after New York's
+	}, nil)
+	for u, w := range map[string]string{"away": "home", "gate": "America/Chicago (Chicago)", "ny-late": "America/New_York (New York)"} {
+		if got := local(tl, u); got != w {
+			t.Errorf("%s: %s, want %s", u, got, w)
+		}
+	}
+}
+
 // A name that is a town in more than one region is the Resolver's to place,
 // and it is shown the trip's places in order to tell which.
 func TestANameInTwoRegionsIsPlacedByTheTripAroundIt(t *testing.T) {
