@@ -62,9 +62,9 @@
           <div class="txn-title"><a href="/transactions/{{.FoldUUID}}?back={{filterURL $.Filters $.PerPage $.Page | urlquery}}">{{if .Description}}{{blanks .Description}}{{else if .DestinationName}}{{.DestinationName}}{{else}}Untitled{{end}}</a></div>
           <div class="txn-sub">{{if .Description}}{{.DestinationName}}{{end}}{{if and .Description .CategoryName}} · {{end}}{{.CategoryName}}</div>
         </div>
-        <div class="txn-when txn-when-wide"><time datetime="{{.TxnTimestampUTC}}">{{.TxnTimestamp}}</time><div class="muted">{{.SourceShort}}</div></div>
+        <div class="txn-when txn-when-wide"><time datetime="{{.TxnTimestampUTC}}"{{if .LocalZone}} data-tz="{{.LocalZone}}" data-place="{{.LocalPlace}}"{{end}}>{{.TxnTimestamp}}</time><div class="muted">{{.SourceShort}}</div></div>
         <div class="txn-meta">
-          <span class="txn-when-narrow"><time datetime="{{.TxnTimestampUTC}}">{{.TxnTimestamp}}</time>{{if .SourceShort}} · {{.SourceShort}}{{end}}</span>
+          <span class="txn-when-narrow"><time datetime="{{.TxnTimestampUTC}}"{{if .LocalZone}} data-tz="{{.LocalZone}}" data-place="{{.LocalPlace}}"{{end}}>{{.TxnTimestamp}}</time>{{if .SourceShort}} · {{.SourceShort}}{{end}}</span>
           {{if eq $.Status "all"}}<span class="pill{{if eq .Status "pushed"}} pill-in{{else if eq .Status "skipped"}} pill-danger{{else if eq .Status "needs_review"}} pill-todo{{end}}">{{statusLabel .Status}}</span>{{end}}
           {{if .Hold}}<span class="pill pill-attn" title="{{.Hold}}">on hold</span>{{end}}
           {{if .Later}}<span class="pill" title="swiped left in review">later</span>{{end}}

@@ -86,20 +86,23 @@ type reviewCard struct {
 	TypeChosen bool `json:"typeChosen,omitempty"`
 	// Problem is what doesn't fit between the type and the accounts (an
 	// integration.Problem* code), and ProblemText says so in words.
-	Problem     string   `json:"problem,omitempty"`
-	ProblemText string   `json:"problemText,omitempty"`
-	AmountPaise int64    `json:"amountPaise"`
-	Amount      string   `json:"amount"`
-	FoldAmount  string   `json:"foldAmount,omitempty"` // the alert's amount, when the statement corrected it
-	Foreign     string   `json:"foreign,omitempty"`    // "AED 25", for a charge abroad
-	When        string   `json:"when"`                 // RFC3339, UTC
-	Day         string   `json:"day"`                  // "Today", "Tue 30 Dec", "Tue 30 Dec 2025"
-	Clock       string   `json:"clock"`                // "1:21 pm" (IST, like every statement)
-	From        party    `json:"from"`
-	To          party    `json:"to"`
-	Title       string   `json:"title"`
-	Category    string   `json:"category"`
-	Tags        []string `json:"tags,omitempty"`
+	Problem     string `json:"problem,omitempty"`
+	ProblemText string `json:"problemText,omitempty"`
+	AmountPaise int64  `json:"amountPaise"`
+	Amount      string `json:"amount"`
+	FoldAmount  string `json:"foldAmount,omitempty"` // the alert's amount, when the statement corrected it
+	Foreign     string `json:"foreign,omitempty"`    // "AED 25", for a charge abroad
+	When        string `json:"when"`                 // RFC3339, UTC
+	Day         string `json:"day"`                  // "Today", "Tue 30 Dec", "Tue 30 Dec 2025"
+	Clock       string `json:"clock"`                // "1:21 pm" (IST, like every statement — or see Local)
+	// Local: made on a trip, Day and Clock are where it was made, and this
+	// says where — and when that was at home.
+	Local    *cardLocal `json:"local,omitempty"`
+	From     party      `json:"from"`
+	To       party      `json:"to"`
+	Title    string     `json:"title"`
+	Category string     `json:"category"`
+	Tags     []string   `json:"tags,omitempty"`
 	// Note is the human's own note from fold.money, or a reconciliation hint
 	// on a row added from a statement line — context in their own words.
 	Note string `json:"note,omitempty"`
@@ -119,6 +122,16 @@ type reviewCard struct {
 	// Why: what the engine can add about its own suggestion, when it has
 	// something worth a line.
 	Why *cardWhy `json:"why,omitempty"`
+}
+
+// cardLocal: a payment made on a trip reads at the time it was where it
+// was made ("3:39 pm Singapore time"); the same moment at home is kept for
+// the small print.
+type cardLocal struct {
+	Place     string `json:"place"` // "Singapore": the card's Day and Clock are its time
+	Zone      string `json:"zone"`  // "Asia/Singapore"
+	HomeDay   string `json:"homeDay"`
+	HomeClock string `json:"homeClock"` // IST
 }
 
 // cardWhy is the engine's word on a card, each part present only when it
@@ -253,6 +266,10 @@ func (h *Handler) buildCard(ctx context.Context, r cardRow) reviewCard {
 	if t, ok := parseDBTime(r.tsStr); ok {
 		c.When = t.UTC().Format(time.RFC3339)
 		c.Day, c.Clock = spokenDay(t, time.Now()), spokenClock(t)
+		if l, ok := h.whereabouts(ctx).For(r.uuid); ok {
+			c.Local = &cardLocal{Place: l.Place, Zone: l.Zone.String(), HomeDay: c.Day, HomeClock: c.Clock}
+			c.Day, c.Clock = spokenDayIn(t, time.Now(), l.Zone), spokenClockIn(t, l.Zone)
+		}
 	}
 	if r.category.Valid {
 		c.Category = r.category.String
@@ -715,12 +732,15 @@ func groupWestern(n int64) string {
 
 // spokenDay is a date the way a person says it, in IST: "Today",
 // "Yesterday", "Tue 30 Dec", and the year only when it isn't this year.
-func spokenDay(t, now time.Time) string {
-	t, now = t.In(ist), now.In(ist)
+func spokenDay(t, now time.Time) string { return spokenDayIn(t, now, ist) }
+
+// spokenDayIn is spokenDay where the moment was: a trip's day is its own.
+func spokenDayIn(t, now time.Time, loc *time.Location) string {
+	t, now = t.In(loc), now.In(loc)
 	ty, tm, td := t.Date()
 	ny, nm, nd := now.Date()
-	today := time.Date(ny, nm, nd, 0, 0, 0, 0, ist)
-	day := time.Date(ty, tm, td, 0, 0, 0, 0, ist)
+	today := time.Date(ny, nm, nd, 0, 0, 0, 0, loc)
+	day := time.Date(ty, tm, td, 0, 0, 0, 0, loc)
 	switch {
 	case day.Equal(today):
 		return "Today"
@@ -736,8 +756,11 @@ func spokenDay(t, now time.Time) string {
 }
 
 // spokenClock: "1:21 pm", IST.
-func spokenClock(t time.Time) string {
-	return strings.ToLower(t.In(ist).Format("3:04 pm"))
+func spokenClock(t time.Time) string { return spokenClockIn(t, ist) }
+
+// spokenClockIn: "3:39 pm", where the moment was.
+func spokenClockIn(t time.Time, loc *time.Location) string {
+	return strings.ToLower(t.In(loc).Format("3:04 pm"))
 }
 
 // ---- deck ------------------------------------------------------------------

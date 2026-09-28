@@ -35,11 +35,13 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rounakdatta/texas-fold-em/internal/integration"
 	"github.com/rounakdatta/texas-fold-em/internal/integration/classifier"
 	"github.com/rounakdatta/texas-fold-em/internal/integration/llm"
+	"github.com/rounakdatta/texas-fold-em/internal/integration/whereabouts"
 )
 
 //go:embed templates/*.html
@@ -91,6 +93,30 @@ type Handler struct {
 	// refreshes the firefly_accounts mirror on demand so an account the user
 	// just created in firefly is immediately selectable. Optional.
 	fireflyAccounts *integration.FireflyAccountsSyncer
+	// where is the last reading of the owner's trips, without a classifier
+	// (with one, the classifier's: it can place towns).
+	whereMu sync.Mutex
+	where   *whereabouts.Timeline
+	whereAt time.Time
+}
+
+// whereabouts is where the owner was for each foreign payment (review.go
+// reads a trip's payments at their own time).
+func (h *Handler) whereabouts(ctx context.Context) *whereabouts.Timeline {
+	if h.cls != nil {
+		return h.cls.Whereabouts(ctx)
+	}
+	h.whereMu.Lock()
+	defer h.whereMu.Unlock()
+	if h.where != nil && time.Since(h.whereAt) < time.Minute {
+		return h.where
+	}
+	tl, err := whereabouts.Build(ctx, h.db, nil)
+	if err != nil {
+		return &whereabouts.Timeline{}
+	}
+	h.where, h.whereAt = tl, time.Now()
+	return tl
 }
 
 // SetFireflyPublicURL sets the user-facing firefly base used to link
@@ -266,9 +292,13 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 // rendering. TxnTimestamp keeps a server-side fallback for clients
 // without JS (still UTC, but readable).
 type indexRow struct {
-	FoldUUID          string
-	TxnTimestamp      string
-	TxnTimestampUTC   string
+	FoldUUID        string
+	TxnTimestamp    string
+	TxnTimestampUTC string
+	// LocalZone and LocalPlace: made on a trip, the list reads it at the
+	// time it was there ("Asia/Singapore", "Singapore").
+	LocalZone         string
+	LocalPlace        string
 	AmountDisplay     string
 	Currency          string
 	ForeignDisplay    string // e.g. "AED 25.00"; empty for domestic
@@ -738,6 +768,9 @@ func (h *Handler) listRows(ctx context.Context, f listFilters, limit, offset int
 		ORDER BY s.txn_timestamp DESC
 		LIMIT ? OFFSET ?`
 	args = append(args, limit, offset)
+	// where each trip's payment was made — read before the rows: the one
+	// connection is theirs until the last is read
+	trips := h.whereabouts(ctx)
 	rows, err := h.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
@@ -793,6 +826,9 @@ func (h *Handler) listRows(ctx context.Context, f listFilters, limit, offset int
 		if t, ok := parseDBTime(tsStr); ok {
 			r.TxnTimestamp = t.Format("Jan 02 15:04 UTC")
 			r.TxnTimestampUTC = t.UTC().Format(time.RFC3339)
+			if l, ok := trips.For(r.FoldUUID); ok {
+				r.LocalZone, r.LocalPlace = l.Zone.String(), l.Place
+			}
 		} else {
 			r.TxnTimestamp = tsStr
 		}

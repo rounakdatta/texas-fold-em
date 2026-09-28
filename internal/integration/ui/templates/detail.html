@@ -11,7 +11,7 @@
           {{else if eq .Card.Type "deposit"}}<span class="muted" style="font-weight:500">from</span> {{if .Card.From.Name}}{{.Card.From.Name}}{{else}}someone{{end}}
           {{else}}<span class="muted" style="font-weight:500">to</span> {{if .Card.To.Name}}{{.Card.To.Name}}{{if .Card.To.Place}} <span class="muted" style="font-weight:500">· {{.Card.To.Place}}</span>{{end}}{{else}}<span style="color:var(--accent-2)">nobody yet</span>{{end}}{{end}}
         </div>
-        <div class="when">{{.Card.Day}} · {{.Card.Clock}}{{if eq .Card.Type "deposit"}}{{if .Card.To.Name}} · into {{.Card.To.Name}}{{end}}{{else if eq .Card.Type "withdrawal"}}{{if .Card.From.Name}} · {{.Card.From.Name}}{{end}}{{end}}</div>
+        <div class="when">{{.Card.Day}} · {{.Card.Clock}}{{with .Card.Local}} {{.Place}} time <span class="when-home">({{if ne .HomeDay $.Card.Day}}{{.HomeDay}}, {{end}}{{.HomeClock}} IST)</span>{{end}}{{if eq .Card.Type "deposit"}}{{if .Card.To.Name}} · into {{.Card.To.Name}}{{end}}{{else if eq .Card.Type "withdrawal"}}{{if .Card.From.Name}} · {{.Card.From.Name}}{{end}}{{end}}</div>
         <div class="meta-row" style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
           <span class="pill{{if eq .Row.Status "pushed"}} pill-in{{else if eq .Row.Status "skipped"}} pill-danger{{else if eq .Row.Status "needs_review"}} pill-todo{{end}}">{{statusLabel .Row.Status}}</span>
           {{if .Row.Manual}}<span class="pill" title="added by hand from a statement line fold never received">manual</span>{{end}}

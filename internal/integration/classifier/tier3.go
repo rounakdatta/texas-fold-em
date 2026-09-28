@@ -434,7 +434,7 @@ func (c *Classifier) gatherTier3Inputs(ctx context.Context, staged StagedRow, ti
 		tier1:           tier1,
 		tier2:           tier2,
 		foldAccount:     foldAcc,
-		mealCtx:         mealContext(staged.TxnTimestamp, foreignCurrencyOf(staged.RawPayload)),
+		mealCtx:         c.mealContextFor(ctx, staged),
 		styleSamples:    samples,
 		learn:           c.gatherLearning(ctx, staged, payeeHint, ex),
 		expenseUsage:    accountUsage(ctx, c.db, "destination", time.Now().AddDate(-1, 0, 0)),

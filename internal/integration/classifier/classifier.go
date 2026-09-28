@@ -198,6 +198,9 @@ type Classifier struct {
 		mu     sync.Mutex
 		bySide map[string]usageEntry
 	}
+	// where is the latest reading of the owner's trips (zones.go).
+	whereMu sync.Mutex
+	where   whereState
 	// concurrency bounds how many rows classifyMatching processes in
 	// parallel. <=1 (the default) is strictly sequential. The Tier-3 LLM
 	// call dominates per-row latency and holds no DB connection, so a
