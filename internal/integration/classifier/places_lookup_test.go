@@ -443,3 +443,24 @@ func TestAPickerQuestionGathersTheDayOnce(t *testing.T) {
 		t.Errorf("the day was gathered %d times for one question, want 1", n)
 	}
 }
+
+// Another name in brackets is not part of the place's name: one place, one row.
+func TestAPlaceKeepsItsOwnName(t *testing.T) {
+	for in, want := range map[string]string{
+		"Sunrise Tiffins (ST)":  "Sunrise Tiffins",
+		"ST (Sunrise Tiffins)":  "ST",
+		"Sunrise Tiffins":       "Sunrise Tiffins",
+		"(ST)":                  "(ST)",
+		"Sunrise (Old) Tiffins": "Sunrise (Old) Tiffins", // not at the end
+	} {
+		if got := stripAlias(in); got != want {
+			t.Errorf("stripAlias(%q) = %q, want %q", in, got, want)
+		}
+	}
+	c, _ := lookupWorld(t, `{"suggestions":[{"name":"Sunrise Tiffins, Lakeview","what":"tiffin café","confidence":0.8}]}`,
+		found(`{"found":true,"name":"Sunrise Tiffins (ST)","branches":[{"area":"Lakeview"}]}`))
+	res, _ := c.SuggestPlacesLooked(context.Background(), "qr", "sunrise tiffins")
+	if got := names(res.Suggestions); got != "Sunrise Tiffins, Lakeview" {
+		t.Errorf("suggestions = %q, want one row", got)
+	}
+}

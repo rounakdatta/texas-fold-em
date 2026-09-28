@@ -62,7 +62,7 @@ const (
 	groundedMax      = 3
 	// lookupVersion is part of what a lookup is kept under, with the model
 	// that searched: a better prompt or model looks a place up afresh.
-	lookupVersion = 2
+	lookupVersion = 3
 )
 
 // lookupStore keeps what searches found, and the ones under way.
@@ -139,7 +139,8 @@ func (c *Classifier) whereFor(ctx context.Context, staged StagedRow, ev placesEv
 	}
 	text := "at home"
 	if len(top) > 0 {
-		text += ", in the city whose neighbourhoods include " + strings.Join(top, ", ")
+		text += ", in the city whose neighbourhoods include " + strings.Join(top, ", ") +
+			" (they only say which city: the place may be anywhere in it)"
 	}
 	return placeWhere{key: "home", text: text, home: true}
 }
@@ -393,10 +394,10 @@ func (c *Classifier) awaitLookup(ctx context.Context, key string) (PlaceFacts, b
 	return c.knownLookup(ctx, key)
 }
 
-const lookupSystemPrompt = `You look up a place someone paid at, so their ledger can name the right branch. Search the web for the place named below, where it says, and report only what the results show.
+const lookupSystemPrompt = `You look up a place someone paid at, so their ledger can name the right branch. Search the web for the place named below in the whole city it says — not only near any neighbourhood named — and report only what the results show.
 
 - "found": false when nothing by that name turns up there.
-- "name": the place's usual name, as its signboard and listings write it — no legal suffix (Pvt Ltd, LLP), and no branch or area in it.
+- "name": the place's usual name, as its signboard writes it — no legal suffix (Pvt Ltd, LLP), no other name in brackets, and no branch or area in it.
 - "what": 2–6 words on what it is ("South Indian breakfast restaurant").
 - "branches": each of its branches there, by the one neighbourhood locals name it by ("Lakeview" — not "Lakeview 3rd Block", "12th Cross" or "Market Street / Lakeview"), with its city. At most 6.
 - "many": true when it is a chain with more branches there than you listed.
@@ -418,6 +419,16 @@ func (c *Classifier) searchPlace(ctx context.Context, model *llm.Client, name st
 	return facts, ans.Searches, nil
 }
 
+// stripAlias drops another name in brackets after a place's own: "Sunrise
+// Tiffins (ST)" is Sunrise Tiffins — and one row, not two.
+func stripAlias(name string) string {
+	name = strings.TrimSpace(name)
+	if i := strings.LastIndex(name, " ("); i > 0 && strings.HasSuffix(name, ")") {
+		return name[:i]
+	}
+	return name
+}
+
 // parseFacts reads a lookup's answer, cleaned: names trimmed, each branch
 // once, at most six.
 func parseFacts(out string) (PlaceFacts, bool) {
@@ -426,7 +437,7 @@ func parseFacts(out string) (PlaceFacts, bool) {
 		return PlaceFacts{}, false
 	}
 	clean := func(s string) string { return strings.Trim(strings.Join(strings.Fields(s), " "), " .,;") }
-	f.Name, f.What = clean(f.Name), clean(f.What)
+	f.Name, f.What = clean(stripAlias(f.Name)), clean(f.What)
 	if r := []rune(f.What); len(r) > 48 {
 		f.What = string(r[:47]) + "…"
 	}
