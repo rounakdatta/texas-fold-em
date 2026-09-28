@@ -337,3 +337,89 @@ func TestComparisonsLearnARefusalOnce(t *testing.T) {
 		t.Errorf("%d requests for two runs, want 3 (one refusal, learnt)", requests)
 	}
 }
+
+// A branch is named by its one neighbourhood, the way the owner names areas:
+// a block or stage of it is still it, and of two names the one that is
+// theirs wins.
+func TestABranchGoesByItsNeighbourhood(t *testing.T) {
+	owner := map[string]int{"Lakeview": 4, "Q.P. Nagar": 2, "Harbortown": 1}
+	for in, want := range map[string]string{
+		"Lakeview 5th Block":       "Lakeview",
+		"QP Nagar 7th Phase":       "Q.P. Nagar",
+		"Harbourtown Sector 2":     "Harbortown",
+		"Market Street / Lakeview": "Lakeview",
+		"Old Quay / Market Street": "Old Quay", // neither is theirs: the first
+		"Lakeview East":            "Lakeview",
+		"Phase 2":                  "Phase 2", // nothing but a subdivision: kept
+		"South End":                "South End",
+		"Riverside 2nd Stage":      "Riverside",
+		"Westgate Extension":       "Westgate Extension", // part of the name
+		"Lakeview Ph II":           "Lakeview Ph II",     // a bare numeral may be too
+	} {
+		if got := ownerSpelling(neighbourhood(in, owner), owner); got != want {
+			t.Errorf("%q → %q, want %q", in, got, want)
+		}
+	}
+}
+
+// A found area is one name: past a comma is an address, not an area.
+func TestAFoundAreaIsOneName(t *testing.T) {
+	f, ok := parseFacts(`{"found":true,"name":"Sunrise Tiffins","branches":[{"area":"Lakeview, 3rd Cross"},{"area":"Lake View"}]}`)
+	if !ok || len(f.Branches) != 1 || f.Branches[0].Area != "Lakeview" {
+		t.Errorf("branches = %+v (the same area twice is one)", f.Branches)
+	}
+}
+
+// Two ways of writing one branch are one suggestion.
+func TestABlockOfABranchIsNotAnotherBranch(t *testing.T) {
+	c, _ := lookupWorld(t, unplaced, found(`{"found":true,"name":"Sunrise Tiffins","what":"tiffin café","branches":[{"area":"Lake View"},{"area":"Lakeview 5th Block"}]}`))
+	res, _ := c.SuggestPlacesLooked(context.Background(), "qr", "sunrise tiffins")
+	if got := names(res.Suggestions); got != "Sunrise Tiffins / Sunrise Tiffins, Lakeview" {
+		t.Errorf("suggestions = %q", got)
+	}
+}
+
+// What the search found the place is corrects the model's guess, on the
+// name it gave — the row stays, its small print changes.
+func TestTheLookupCorrectsWhatThePlaceIs(t *testing.T) {
+	c, _ := lookupWorld(t, `{"suggestions":[{"name":"Sunrise Tiffins","what":"grocery store","confidence":0.8}]}`, found(branches))
+	res, _ := c.SuggestPlacesLooked(context.Background(), "qr", "sunrise tiffins")
+	if len(res.Suggestions) == 0 || res.Suggestions[0].Name != "Sunrise Tiffins" || res.Suggestions[0].What != "South Indian breakfast" {
+		t.Errorf("first = %+v, want the name kept and what it is corrected", res.Suggestions)
+	}
+}
+
+// A lookup is kept per model: one a better model makes is made afresh, not
+// served from what an earlier one found.
+func TestALookupIsKeptPerModel(t *testing.T) {
+	c, g := lookupWorld(t, unplaced, found(branches))
+	ctx := context.Background()
+	c.SuggestPlacesLooked(ctx, "qr", "sunrise tiffins")
+	c.SetLookupLLM(llm.NewClient("k", "claude-fable-5-1", g.URL, g.Client()))
+	c.places = placesCache{} // (the picker's own answers are kept a quarter of an hour)
+	if res, _ := c.SuggestPlaces(ctx, "qr", "sunrise tiffins"); res.Lookup != "pending" {
+		t.Errorf("lookup %q with a new model, want a fresh search", res.Lookup)
+	}
+	c.SuggestPlacesLooked(ctx, "qr", "sunrise tiffins")
+	if n := len(g.searches()); n != 2 {
+		t.Errorf("%d searches, want 2", n)
+	}
+}
+
+// A word on the way to a name isn't looked up: a pause after "sunrise" is
+// not a place called Sunrise, and the model couldn't say what it is.
+func TestAWordOnTheWayIsNotLookedUp(t *testing.T) {
+	c, g := lookupWorld(t, `{"suggestions":[{"name":"Sunrise, Lakeview","what":"","confidence":0.5},{"name":"Sunrise","what":"","confidence":0.4}]}`, found(branches))
+	for _, q := range []string{"sunrise", "sunrise t", "sunrise tif"} {
+		if res, _ := c.SuggestPlaces(context.Background(), "qr", q); res.Lookup != "" {
+			t.Errorf("lookup %q for %q, a name on its way", res.Lookup, q)
+		}
+	}
+	// typed whole, on a card, it is — though the model couldn't say what it is
+	g.mu.Lock()
+	g.fast = `{"suggestions":[{"name":"Sunrise Tiffins","what":"","confidence":0.6}]}`
+	g.mu.Unlock()
+	if res, _ := c.SuggestPlaces(context.Background(), "qr", "sunrise tiffins"); res.Lookup != "pending" {
+		t.Errorf("lookup %q for a whole name on a card", res.Lookup)
+	}
+}

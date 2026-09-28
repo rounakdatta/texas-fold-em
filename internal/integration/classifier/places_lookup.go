@@ -60,6 +60,9 @@ const (
 	lookupRefusedFor = 6 * time.Hour // a host without search is asked again after
 	lookupBranches   = 6
 	groundedMax      = 3
+	// lookupVersion is part of what a lookup is kept under, with the model
+	// that searched: a better prompt or model looks a place up afresh.
+	lookupVersion = 2
 )
 
 // lookupStore keeps what searches found, and the ones under way.
@@ -150,28 +153,30 @@ type lookupPlan struct {
 }
 
 // planLookup: the first new business the answer names, by its name without
-// an area. A name that may be a person's is never searched — the model must
-// have said what the business is, or the payment must have gone to one (a
-// card, a shop's QR code). Nothing is looked up when the answer is one of the
-// owner's payees, or on money in.
+// an area. A name that may be a person's is never searched, nor a word on
+// the way to a name: the model must have said what the business is — or the
+// payment went to one (a card, a shop's QR code) and a whole name was typed.
+// Nothing is looked up when the answer is one of the owner's payees, or on
+// money in.
 func (c *Classifier) planLookup(ctx context.Context, staged StagedRow, typed string, sugg []PlaceSuggestion, expense []AccountRef) *lookupPlan {
 	if c.lookup == nil || staged.Type != "OUTGOING" {
 		return nil
 	}
-	business := paidABusiness(staged)
+	business, whole := paidABusiness(staged), wholeName(typed)
 	name, placed := "", false
 	for _, s := range sugg {
 		if s.Existing {
 			return nil
 		}
-		if s.What == "" && !business {
+		base, _, cut := strings.Cut(s.Name, ",")
+		base = strings.TrimSpace(base)
+		if s.What == "" && !(business && whole && len(nameWords(base)) >= 2) {
 			continue
 		}
-		base, _, cut := strings.Cut(s.Name, ",")
-		name, placed = strings.TrimSpace(base), cut
+		name, placed = base, cut
 		break
 	}
-	if name == "" && len(sugg) == 0 && business && len(nameWords(typed)) >= 2 {
+	if name == "" && len(sugg) == 0 && business && whole {
 		name = tidyName(typed) // nothing named: what they typed, read as a whole name
 	}
 	if len([]rune(name)) < placesMinTyped {
@@ -179,7 +184,15 @@ func (c *Classifier) planLookup(ctx context.Context, staged StagedRow, typed str
 	}
 	usage := accountUsage(ctx, c.db, "destination", time.Now().AddDate(-2, 0, 0))
 	where := c.whereFor(ctx, staged, expense, usage)
-	return &lookupPlan{key: placeKey(name) + "|" + where.key, name: name, where: where, quiet: placed}
+	key := fmt.Sprintf("%s|%s|v%d|%s", placeKey(name), where.key, lookupVersion, c.lookup.Model())
+	return &lookupPlan{key: key, name: name, where: where, quiet: placed}
+}
+
+// wholeName: typed as a name, not a word on the way to one — two words or
+// more, the last of four letters or more ("sunrise t" is on its way).
+func wholeName(typed string) bool {
+	w := nameWords(typed)
+	return len(w) >= 2 && len(w[len(w)-1]) >= 4
 }
 
 // paidABusiness: a card payment, or a UPI payment to a shop's QR code.
@@ -239,9 +252,26 @@ func (c *Classifier) withLookup(ctx context.Context, uuid, typed string, res Pla
 	expense, _ := listExpenseAccounts(ctx, c.db)
 	usage := accountUsage(ctx, c.db, "destination", time.Now().AddDate(-2, 0, 0))
 	grounded := c.groundedSuggestions(ctx, rows[0], typed, facts, p.where, expense, usage)
-	res.Suggestions = mergeSuggestions(res.Suggestions, grounded)
+	res.Suggestions = mergeSuggestions(correctWhat(res.Suggestions, facts), grounded)
 	res.Lookup = ""
 	return res
+}
+
+// correctWhat: what the search found the place is replaces what the model
+// guessed, on its name without an area ("a grocery store", for a famous
+// idli room, was the fast model's). The row stays where it is; only its
+// small print changes.
+func correctWhat(list []PlaceSuggestion, facts PlaceFacts) []PlaceSuggestion {
+	if !facts.Found || facts.What == "" {
+		return list
+	}
+	out := append([]PlaceSuggestion(nil), list...)
+	for i, s := range out {
+		if !s.Existing && !strings.Contains(s.Name, ",") && placeKey(s.Name) == placeKey(facts.Name) {
+			out[i].What = facts.What
+		}
+	}
+	return out
 }
 
 // knownLookup is what is kept about a place: from memory, else the table.
@@ -357,7 +387,7 @@ const lookupSystemPrompt = `You look up a place someone paid at, so their ledger
 - "found": false when nothing by that name turns up there.
 - "name": the place's usual name, as its signboard and listings write it — no legal suffix (Pvt Ltd, LLP), and no branch or area in it.
 - "what": 2–6 words on what it is ("South Indian breakfast restaurant").
-- "branches": each of its branches there, by the neighbourhood locals name it ("Lakeview", not "3rd Block, 12th Cross"), with its city. At most 6.
+- "branches": each of its branches there, by the one neighbourhood locals name it by ("Lakeview" — not "Lakeview 3rd Block", "12th Cross" or "Market Street / Lakeview"), with its city. At most 6.
 - "many": true when it is a chain with more branches there than you listed.
 
 Reply with the JSON object only: {"found":true,"name":"…","what":"…","branches":[{"area":"…","city":"…"}],"many":false}`
@@ -395,11 +425,12 @@ func parseFacts(out string) (PlaceFacts, bool) {
 	var branches []PlaceBranch
 	seen := map[string]bool{}
 	for _, b := range f.Branches {
+		b.Area, _, _ = strings.Cut(b.Area, ",") // one name: "Place, Area" has room for no more
 		b.Area, b.City = clean(b.Area), clean(b.City)
-		if b.Area == "" || len([]rune(b.Area)) > 40 || seen[placeKey(b.Area)] {
+		if b.Area == "" || len([]rune(b.Area)) > 40 || seen[areaKey(b.Area)] {
 			continue
 		}
-		seen[placeKey(b.Area)] = true
+		seen[areaKey(b.Area)] = true
 		branches = append(branches, b)
 		if len(branches) == lookupBranches {
 			break
@@ -441,7 +472,7 @@ func (c *Classifier) groundedSuggestions(ctx context.Context, staged StagedRow, 
 	var cands []cand
 	seen := map[string]bool{}
 	for i, br := range facts.Branches {
-		area := ownerSpelling(br.Area, owner)
+		area := ownerSpelling(neighbourhood(br.Area, owner), owner)
 		name := facts.Name + ", " + area
 		if !where.home {
 			city := br.City
@@ -529,6 +560,57 @@ func ownerSpelling(area string, owner map[string]int) string {
 		return best
 	}
 	return area
+}
+
+// subdivisionWords are the parts of an address below a neighbourhood: the
+// "5th Block" of "Lakeview 5th Block", the "2nd Stage", the "7th Phase".
+var subdivisionWords = map[string]bool{"block": true, "stage": true, "phase": true, "sector": true, "cross": true, "main": true,
+	"east": true, "west": true, "north": true, "south": true}
+
+// neighbourhood is the one name a branch's area goes by, the way the owner
+// names areas: of "Market Street / Lakeview" the part that is one of their
+// areas (else the first); of "Lakeview 5th Block", "Lakeview".
+func neighbourhood(area string, owner map[string]int) string {
+	parts := strings.Split(area, "/")
+	pick := strings.TrimSpace(parts[0])
+	if len(parts) > 1 {
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			if _, ok := owner[ownerSpelling(p, owner)]; ok {
+				pick = p
+				break
+			}
+		}
+	}
+	// a trailing run of ordinals and subdivision words, with at least one
+	// such word ("5th Block", "East"; a bare "II" may be part of the name)
+	w := strings.Fields(pick)
+	end, named := len(w), false
+	for end > 0 { // (all subdivisions — "Phase 2" — is kept whole below)
+		t := strings.ToLower(strings.Trim(w[end-1], ".,"))
+		if subdivisionWords[t] {
+			named = true
+		} else if !isOrdinal(t) {
+			break
+		}
+		end--
+	}
+	if !named || end == 0 {
+		return pick
+	}
+	return strings.Join(w[:end], " ")
+}
+
+// isOrdinal: "5", "5th", "2nd", "ii".
+func isOrdinal(t string) bool {
+	t = strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(t, "st"), "nd"), "rd"), "th")
+	if t == "" {
+		return false
+	}
+	if strings.Trim(t, "0123456789") == "" {
+		return true
+	}
+	return strings.Trim(t, "ivx") == "" && len(t) <= 4
 }
 
 // mergeSuggestions keeps the first answer as it is and adds the others'
