@@ -94,6 +94,7 @@
     out: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17 17 7M9 7h8v8" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>',
     in: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 7 7 17M15 17H7V9" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>',
     close: '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>',
+    person: '<svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="6.8" r="3.1" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M4 17c.6-3.4 3-5.3 6-5.3s5.4 1.9 6 5.3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>',
     pin: '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 17.5s5.5-5.1 5.5-9.3A5.5 5.5 0 0 0 4.5 8.2c0 4.2 5.5 9.3 5.5 9.3z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><circle cx="10" cy="8.2" r="1.9" fill="currentColor"/></svg>',
     sync: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.4 13.5a7.5 7.5 0 0 1-13.1 3.6M4.6 10.5a7.5 7.5 0 0 1 13.1-3.6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M18.4 3.2v4.2h-4.2M5.6 20.8v-4.2h4.2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   };
@@ -1170,14 +1171,18 @@
     const isAcct = (a, q) => a.name.toLowerCase() === q || a.short.toLowerCase() === q;
     const isOwn = v => accts.some(a => isAcct(a, (v || '').trim().toLowerCase()));
 
-    // Suggested places. As a new name is typed, a fast model offers what the
-    // place probably is — the name made proper, in your style, placed where
-    // you were that day — with a word on what it is. They sit below the real
-    // payees (nothing on screen moves when they arrive), are marked apart,
-    // and are only ever picked, never assumed. Asked for once typing pauses;
-    // a question overtaken by more typing is cancelled.
+    // Suggested places (money out) or names (money in). As a new name is
+    // typed, a fast model offers what it probably is — a place made proper,
+    // in your style, placed where you were that day; a sender named the way
+    // the bank line has them — with a word on what it is. They sit below the
+    // real payees (nothing on screen moves when they arrive), are marked
+    // apart, and are only ever picked, never assumed. Asked for once typing
+    // pauses; a question overtaken by more typing is cancelled.
     const places = { items: [], forQ: '', loading: false, since: 0, timer: 0, slow: 0, ctrl: null, seen: new Map() };
-    const wantPlaces = q => !incoming && q.length >= 3 && q !== current;
+    const wantPlaces = q => q.length >= 3 && q !== current;
+    const sugg = incoming
+      ? { heading: 'Suggested names', icon: 'person', label: 'Suggested name: ', mine: 'your payer', fresh: 'new payer', whose: 'One of your payers.', neu: 'A new payer.' }
+      : { heading: 'Suggested places', icon: 'pin', label: 'Suggested place: ', mine: 'your payee', fresh: 'new payee', whose: 'One of your payees.', neu: 'A new payee.' };
     const words = s => (s || '').toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
     // an answer for fewer letters still fits while every typed word starts one of
     // its words — or a run of them written together ("jp" for "J.P. Nagar")
@@ -1209,10 +1214,10 @@
       places.timer = setTimeout(() => askPlaces(q), 420);
     };
     const placeButton = s => {
-      const hint = [s.existing ? 'your payee' : 'new payee', s.what].filter(Boolean).join(' · ');
+      const hint = [s.existing ? sugg.mine : sugg.fresh, s.what].filter(Boolean).join(' · ');
       return h('button', { type: 'button', class: 'pick pick-place', role: 'option', onclick: () => choose(s.name),
-        'aria-label': 'Suggested place: ' + s.name + (s.what ? ', ' + s.what : '') + (s.existing ? '. One of your payees.' : '. A new payee.') },
-        icon('pin'), h('span', { class: 'place-text' }, h('span', { class: 'pick-main', text: s.name }), h('span', { class: 'pick-hint', text: hint, title: hint })));
+        'aria-label': sugg.label + s.name + (s.what ? ', ' + s.what : '') + '. ' + (s.existing ? sugg.whose : sugg.neu) },
+        icon(sugg.icon), h('span', { class: 'place-text' }, h('span', { class: 'pick-main', text: s.name }), h('span', { class: 'pick-hint', text: hint, title: hint })));
     };
     const paintPlaces = (q, onScreen) => {
       if (!wantPlaces(q)) return;
@@ -1224,10 +1229,10 @@
       const answer = places.forQ + '|' + items.map(s => s.name).join('|');
       const fresh = answer !== places.drawn;
       places.drawn = answer;
-      const box = h('div', { class: 'pick-places' + (fresh ? ' is-fresh' : ''), role: 'group', 'aria-label': 'Suggested places' },
-        h('div', { class: 'pick-group' }, icon('pin'), h('span', { text: 'Suggested places' })));
+      const box = h('div', { class: 'pick-places' + (fresh ? ' is-fresh' : ''), role: 'group', 'aria-label': sugg.heading },
+        h('div', { class: 'pick-group' }, icon(sugg.icon), h('span', { text: sugg.heading })));
       for (const s of items) box.append(placeButton(s));
-      if (!items.length) box.append(h('p', { class: 'places-looking', role: 'status', text: 'Looking up places…' }));
+      if (!items.length) box.append(h('p', { class: 'places-looking', role: 'status', text: incoming ? 'Looking up names…' : 'Looking up places…' }));
       list.append(box);
     };
     const paint = () => {

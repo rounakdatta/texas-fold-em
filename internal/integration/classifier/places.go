@@ -53,7 +53,7 @@ const (
 	placesMaxTyped = 80
 )
 
-// ErrNoPlaces: nothing to suggest for (no model, not money out, too short).
+// ErrNoPlaces: nothing to suggest for (no model, too short, a transfer).
 var ErrNoPlaces = errors.New("no place suggestions for this")
 
 // SetFastLLM attaches the model used while someone types — quicker than the
@@ -95,11 +95,20 @@ func (c *Classifier) suggestPlacesWith(ctx context.Context, model *llm.Client, u
 		return PlacesResult{}, ErrNoPlaces
 	}
 	staged := rows[0]
-	if staged.Type != "OUTGOING" {
+	// Money out names who was paid — a place, mostly; money in names who
+	// paid — a person or a business, whose name the bank line usually has.
+	var inventory []AccountRef
+	var system, prompt string
+	switch staged.Type {
+	case "OUTGOING":
+		inventory, _ = listExpenseAccounts(ctx, c.db)
+		system, prompt = placesSystemPrompt, c.placesPrompt(ctx, staged, typed, inventory)
+	case "INCOMING":
+		inventory, _ = listRevenueAccounts(ctx, c.db)
+		system, prompt = payersSystemPrompt, c.payersPrompt(ctx, staged, typed, inventory)
+	default:
 		return PlacesResult{}, ErrNoPlaces
 	}
-	expense, _ := listExpenseAccounts(ctx, c.db)
-	prompt := c.placesPrompt(ctx, staged, typed, expense)
 
 	// At most a few at once: someone typing fast fires several, and the
 	// browser cancels the stale ones. (A comparison runs outside the limit.)
@@ -113,14 +122,14 @@ func (c *Classifier) suggestPlacesWith(ctx context.Context, model *llm.Client, u
 	}
 	callCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	out, err := model.GenerateJSON(callCtx, placesSystemPrompt, prompt)
+	out, err := model.GenerateJSON(callCtx, system, prompt)
 	if err != nil {
 		if errors.Is(err, llm.ErrUnavailable) {
 			return PlacesResult{Resting: true, Suggestions: []PlaceSuggestion{}}, nil
 		}
 		return PlacesResult{}, err
 	}
-	parsed := parsePlaces(out, expense)
+	parsed := parsePlaces(out, inventory)
 	res := PlacesResult{Suggestions: fitting(parsed, typed)}
 	if cached {
 		c.places.put(key, res)
@@ -201,6 +210,109 @@ const placesSystemPrompt = `You help someone name who they paid, in their person
 - "confidence" is 0..1 that this is the place they mean. Fewer and right beats more and wrong.
 
 Reply with the JSON object only: {"suggestions":[{"name":"…","what":"…","confidence":0.8}]}`
+
+const payersSystemPrompt = `You help someone name who paid them, in their personal-finance ledger, while they type the name. From what they have typed and what is known about the payment, suggest up to 3 names for the person or business that paid. The typed text itself is already offered to them as it is; offer only what improves on it.
+
+- Every suggestion is what they typed, completed or corrected — its words start the way the typed words do. Nothing else.
+- The bank line usually names who sent the money (a UPI, NEFT or IMPS credit carries the sender's name, often cut short). When what they typed starts that name, offer it the way a person or a business is written — "ASHA MENON" → "Asha Menon", "ACME TECHNOLOGIES PVT LTD" → "Acme Technologies" — not as the bank abbreviates it.
+- A payer they already have (YOUR PAYERS THAT SHARE A WORD) comes first, in its exact name — but only when it is the one they typed: a different person with the same first name is a different payer.
+- Their style (YOUR STYLE): people by their name, businesses by their usual name; no legal suffixes (Pvt Ltd, LLP), reference numbers, handles or account numbers.
+- Never invent a surname or a company the evidence doesn't give. When the typed text is all there is, tidy it (capitals, spacing) or suggest nothing.
+- "what" is 2–5 words on who it is, only when certain ("stockbroker", "bank interest", "employer's payroll"); "" otherwise.
+- "confidence" is 0..1 that this is who they mean. Fewer and right beats more and wrong.
+
+Reply with the JSON object only: {"suggestions":[{"name":"…","what":"…","confidence":0.8}]}`
+
+// upiSenderRe: the sender's name on an HDFC-style UPI credit, "UPI-<name>-…".
+var upiSenderRe = regexp.MustCompile(`(?i)^UPI-([A-Z][A-Z .]{1,60}?)-`)
+
+// payersPrompt is placesPrompt's counterpart for money in: the bank line and
+// the name on it, the owner's payers and how they write them.
+func (c *Classifier) payersPrompt(ctx context.Context, staged StagedRow, typed string, revenue []AccountRef) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "TYPED: %q\n\n", typed)
+	b.WriteString("THE PAYMENT: money in")
+	if staged.AmountPaise > 0 {
+		b.WriteString(", " + rupees(staged.AmountPaise))
+	}
+	if t, ok := parseTxnTime(staged.TxnTimestamp); ok {
+		ist := t.In(istLocation())
+		b.WriteString(" on " + strings.Replace(ist.Format("Mon 2 Jan 2006 at 3:04 pm"), " Sep ", " Sept ", 1) + " IST")
+	}
+	b.WriteString("\n")
+	fmt.Fprintf(&b, "  the bank's words: %s\n", shortNarration(staged.Narration))
+	if m := upiSenderRe.FindStringSubmatch(strings.TrimSpace(staged.Narration)); m != nil {
+		fmt.Fprintf(&b, "  the name on the bank line: %q\n", strings.TrimSpace(m[1]))
+	}
+	var p struct {
+		Merchant struct {
+			Name string `json:"name"`
+		} `json:"merchant"`
+		Notes string `json:"notes"`
+	}
+	_ = json.Unmarshal([]byte(staged.RawPayload), &p)
+	if m := strings.TrimSpace(p.Merchant.Name); m != "" {
+		fmt.Fprintf(&b, "  fold.money's guess at who it is (often wrong): %q\n", m)
+	}
+	if note := upiNote(staged.Narration); note != "" {
+		fmt.Fprintf(&b, "  the note on the payment (the sender's words): %q\n", note)
+	}
+	if n := strings.TrimSpace(p.Notes); n != "" && n != "{}" {
+		fmt.Fprintf(&b, "  their note: %q\n", shortNarration(n))
+	}
+
+	// Their titles around it can name the people they were with ("Dinner
+	// with Asha"), who might be paying their share back.
+	var around []string
+	for _, n := range c.neighbours(ctx, staged, exclusion{}) {
+		if !n.owner || strings.TrimSpace(n.title) == "" {
+			continue
+		}
+		line := "  " + n.at.In(istLocation()).Format("Mon 2 Jan 3:04 pm") + fmt.Sprintf("  %q", n.title)
+		if n.payee != "" {
+			line += " → " + n.payee
+		}
+		around = append(around, line)
+		if len(around) >= 8 {
+			break
+		}
+	}
+	if len(around) > 0 {
+		b.WriteString("\nYOUR OTHER PAYMENTS AROUND IT (as you named them):\n" + strings.Join(around, "\n") + "\n")
+	}
+
+	usage := accountUsage(ctx, c.db, "source", time.Now().AddDate(-2, 0, 0))
+	words := map[string]bool{}
+	for _, w := range nameWords(typed) {
+		if len(w) >= 3 {
+			words[w] = true
+		}
+	}
+	var related []string
+	for _, a := range rankedAccounts(revenue, usage, words, 8) {
+		if sharesWord(a.Name, words) {
+			related = append(related, fmt.Sprintf("%q", a.Name))
+		}
+	}
+	if len(related) > 0 {
+		b.WriteString("\nYOUR PAYERS THAT SHARE A WORD: " + strings.Join(related, ", ") + "\n")
+	}
+	style := make([]AccountRef, len(revenue))
+	copy(style, revenue)
+	sort.SliceStable(style, func(i, j int) bool { return usage[style[i].ID] > usage[style[j].ID] })
+	var names []string
+	for i, a := range style {
+		if i >= 8 {
+			break
+		}
+		names = append(names, fmt.Sprintf("%q", a.Name))
+	}
+	if len(names) > 0 {
+		b.WriteString("YOUR STYLE (your payers, most used first): " + strings.Join(names, " · ") + "\n")
+	}
+	b.WriteString("\nReturn the JSON object now.")
+	return b.String()
+}
 
 // qrHandleRe: a UPI QR code's handle names the payment app, not the shop.
 var qrHandleRe = regexp.MustCompile(`(?i)(bharatpe|paytmqr|vyapar|@ptys|@fbpe|@ptybl|^q\d{6,}@ybl|/q\d{6,}@ybl)`)
