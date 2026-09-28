@@ -1211,8 +1211,13 @@
         .then(d => {
           if (places.lctrl !== ctrl) return;
           places.lctrl = null; places.lookingUp = false;
-          const have = new Set(places.items.map(s => words(s.name).join(' ')));
-          const merged = places.items.concat((d.suggestions || []).filter(s => !have.has(words(s.name).join(' '))));
+          // the rows it has keep their places, in the server's words (a
+          // lookup corrects what a place is); what's new comes below
+          const key = n => words(n).join(' ');
+          const fromServer = new Map((d.suggestions || []).map(s => [key(s.name), s]));
+          const have = new Set(places.items.map(s => key(s.name)));
+          const merged = places.items.map(s => fromServer.get(key(s.name)) || s)
+            .concat((d.suggestions || []).filter(s => !have.has(key(s.name))));
           places.seen.set(q, { items: merged, lookup: '' });
           if (places.forQ === q) places.items = merged;
           updatePlaces();
@@ -1257,7 +1262,7 @@
     };
     const placeButton = s => {
       const hint = [s.existing ? sugg.mine : sugg.fresh, s.what].filter(Boolean).join(' · ');
-      return h('button', { type: 'button', class: 'pick pick-place', role: 'option', onclick: () => choose(s.name),
+      return h('button', { type: 'button', class: 'pick pick-place', role: 'option', onclick: () => choose(s.name), dataset: { what: s.what || '' },
         'aria-label': sugg.label + s.name + (s.what ? ', ' + s.what : '') + '. ' + (s.existing ? sugg.whose : sugg.neu) },
         icon(sugg.icon), h('span', { class: 'place-text' }, h('span', { class: 'pick-main', text: s.name }), h('span', { class: 'pick-hint', text: hint, title: hint })));
     };
@@ -1338,6 +1343,18 @@
       if (!names.length && !v.line) { if (box) box.remove(); places.drawnNames = []; return; } // nothing left to show: no empty block
       const created = !box;
       if (created) list.append(box = placesBox(true));
+      // what a lookup found a place is replaces the guess in a row's small
+      // print; the row itself stays where it is
+      const rows = box.querySelectorAll('.pick-place');
+      v.items.slice(0, before.length).forEach((s, i) => {
+        const b = rows[i];
+        if (!b || b.dataset.what === (s.what || '')) return;
+        const hint = [s.existing ? sugg.mine : sugg.fresh, s.what].filter(Boolean).join(' · ');
+        const el = b.querySelector('.pick-hint');
+        if (el) { el.textContent = hint; el.title = hint; }
+        b.dataset.what = s.what || '';
+        b.setAttribute('aria-label', sugg.label + s.name + (s.what ? ', ' + s.what : '') + '. ' + (s.existing ? sugg.whose : sugg.neu));
+      });
       const line = box.querySelector('.places-looking');
       for (const s of v.items.slice(before.length)) {
         const b = placeButton(s);
