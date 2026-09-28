@@ -125,14 +125,17 @@ func (c *Classifier) suggestPlacesWith(ctx context.Context, model *llm.Client, u
 	// Money out names who was paid — a place, mostly; money in names who
 	// paid — a person or a business, whose name the bank line usually has.
 	var inventory []AccountRef
+	var ev placesEvidence
 	var system, prompt string
 	switch staged.Type {
 	case "OUTGOING":
 		inventory, _ = listExpenseAccounts(ctx, c.db)
-		system, prompt = placesSystemPrompt, c.placesPrompt(ctx, staged, typed, inventory)
+		ev = c.placesEvidenceFor(ctx, staged, inventory, "destination")
+		system, prompt = placesSystemPrompt, c.placesPrompt(ctx, staged, typed, ev)
 	case "INCOMING":
 		inventory, _ = listRevenueAccounts(ctx, c.db)
-		system, prompt = payersSystemPrompt, c.payersPrompt(ctx, staged, typed, inventory)
+		ev = c.placesEvidenceFor(ctx, staged, inventory, "source")
+		system, prompt = payersSystemPrompt, c.payersPrompt(ctx, staged, typed, ev)
 	default:
 		return PlacesResult{}, ErrNoPlaces
 	}
@@ -159,7 +162,7 @@ func (c *Classifier) suggestPlacesWith(ctx context.Context, model *llm.Client, u
 	parsed := parsePlaces(out, inventory)
 	res := PlacesResult{Suggestions: fitting(parsed, typed)}
 	if cached {
-		res.plan = c.planLookup(ctx, staged, typed, res.Suggestions, inventory)
+		res.plan = c.planLookup(ctx, staged, typed, res.Suggestions, ev)
 		c.places.put(key, res)
 	} else {
 		for _, s := range parsed {
@@ -167,6 +170,45 @@ func (c *Classifier) suggestPlacesWith(ctx context.Context, model *llm.Client, u
 		}
 	}
 	return res, nil
+}
+
+// placesEvidence is what one card's picker question draws on — the payees,
+// how much each is used, the owner's payments around it — gathered once per
+// question: the prompt, the lookup's plan and what the lookup offers all
+// read it, and the payments around a card are dozens of queries (three
+// gatherings made the picker's answer seconds slower).
+type placesEvidence struct {
+	accounts   []AccountRef // expense accounts for money out, revenue for money in
+	usage      map[int64]int
+	neighbours []neighbour
+}
+
+func (c *Classifier) placesEvidenceFor(ctx context.Context, staged StagedRow, accounts []AccountRef, side string) placesEvidence {
+	return placesEvidence{accounts: accounts, usage: c.usageOf(ctx, side), neighbours: c.neighbours(ctx, staged, exclusion{})}
+}
+
+// usageOf is accountUsage over the last two years, kept two minutes: every
+// card's question counts the same ledger.
+func (c *Classifier) usageOf(ctx context.Context, side string) map[int64]int {
+	c.usage.mu.Lock()
+	e, ok := c.usage.bySide[side]
+	c.usage.mu.Unlock()
+	if ok && time.Since(e.at) < 2*time.Minute {
+		return e.usage
+	}
+	u := accountUsage(ctx, c.db, side, time.Now().AddDate(-2, 0, 0))
+	c.usage.mu.Lock()
+	if c.usage.bySide == nil {
+		c.usage.bySide = map[string]usageEntry{}
+	}
+	c.usage.bySide[side] = usageEntry{usage: u, at: time.Now()}
+	c.usage.mu.Unlock()
+	return u
+}
+
+type usageEntry struct {
+	usage map[int64]int
+	at    time.Time
 }
 
 // PlacesCase is one typed name on one card, for comparing models.
@@ -284,7 +326,8 @@ var upiSenderRe = regexp.MustCompile(`(?i)^UPI-([A-Z][A-Z .]{1,60}?)-`)
 
 // payersPrompt is placesPrompt's counterpart for money in: the bank line and
 // the name on it, the owner's payers and how they write them.
-func (c *Classifier) payersPrompt(ctx context.Context, staged StagedRow, typed string, revenue []AccountRef) string {
+func (c *Classifier) payersPrompt(ctx context.Context, staged StagedRow, typed string, ev placesEvidence) string {
+	revenue := ev.accounts
 	var b strings.Builder
 	fmt.Fprintf(&b, "TYPED: %q\n\n", typed)
 	b.WriteString("THE PAYMENT: money in")
@@ -320,7 +363,7 @@ func (c *Classifier) payersPrompt(ctx context.Context, staged StagedRow, typed s
 	// Their titles around it can name the people they were with ("Dinner
 	// with Asha"), who might be paying their share back.
 	var around []string
-	for _, n := range c.neighbours(ctx, staged, exclusion{}) {
+	for _, n := range ev.neighbours {
 		if !n.owner || strings.TrimSpace(n.title) == "" {
 			continue
 		}
@@ -337,7 +380,7 @@ func (c *Classifier) payersPrompt(ctx context.Context, staged StagedRow, typed s
 		b.WriteString("\nYOUR OTHER PAYMENTS AROUND IT (as you named them):\n" + strings.Join(around, "\n") + "\n")
 	}
 
-	usage := accountUsage(ctx, c.db, "source", time.Now().AddDate(-2, 0, 0))
+	usage := ev.usage
 	words := map[string]bool{}
 	for _, w := range nameWords(typed) {
 		if len(w) >= 3 {
@@ -373,7 +416,8 @@ func (c *Classifier) payersPrompt(ctx context.Context, staged StagedRow, typed s
 // qrHandleRe: a UPI QR code's handle names the payment app, not the shop.
 var qrHandleRe = regexp.MustCompile(`(?i)(bharatpe|paytmqr|vyapar|@ptys|@fbpe|@ptybl|^q\d{6,}@ybl|/q\d{6,}@ybl)`)
 
-func (c *Classifier) placesPrompt(ctx context.Context, staged StagedRow, typed string, expense []AccountRef) string {
+func (c *Classifier) placesPrompt(ctx context.Context, staged StagedRow, typed string, ev placesEvidence) string {
+	expense := ev.accounts
 	var b strings.Builder
 	fmt.Fprintf(&b, "TYPED: %q\n\n", typed)
 
@@ -421,7 +465,7 @@ func (c *Classifier) placesPrompt(ctx context.Context, staged StagedRow, typed s
 
 	// Where they were: the payees of their other payments that day.
 	var around []string
-	for _, n := range c.neighbours(ctx, staged, exclusion{}) {
+	for _, n := range ev.neighbours {
 		if !n.owner || strings.TrimSpace(n.payee) == "" {
 			continue
 		}
@@ -441,7 +485,7 @@ func (c *Classifier) placesPrompt(ctx context.Context, staged StagedRow, typed s
 		b.WriteString("\nA TRIP IN PROGRESS: " + trip + "\n")
 	}
 
-	usage := accountUsage(ctx, c.db, "destination", time.Now().AddDate(-2, 0, 0))
+	usage := ev.usage
 	words := map[string]bool{}
 	for _, w := range nameWords(typed) {
 		if len(w) >= 3 {

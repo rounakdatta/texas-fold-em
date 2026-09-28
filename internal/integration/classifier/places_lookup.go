@@ -102,9 +102,9 @@ type placeWhere struct {
 // owner's payees around it name ("…, Area, City"); else at home — which the
 // model tells from the areas the owner's payees name. (fold never names the
 // home city itself.)
-func (c *Classifier) whereFor(ctx context.Context, staged StagedRow, expense []AccountRef, usage map[int64]int) placeWhere {
+func (c *Classifier) whereFor(ctx context.Context, staged StagedRow, ev placesEvidence) placeWhere {
 	cities := map[string]int{}
-	for _, n := range c.neighbours(ctx, staged, exclusion{}) {
+	for _, n := range ev.neighbours {
 		if !n.owner {
 			continue
 		}
@@ -131,7 +131,7 @@ func (c *Classifier) whereFor(ctx context.Context, staged StagedRow, expense []A
 		return placeWhere{key: "city:" + placeKey(city), text: "in " + city, city: city}
 	}
 	var top []string
-	for _, a := range rankedCounts(ownerAreas(expense, usage)) {
+	for _, a := range rankedCounts(ownerAreas(ev.accounts, ev.usage)) {
 		if len(top) == 6 {
 			break
 		}
@@ -144,12 +144,16 @@ func (c *Classifier) whereFor(ctx context.Context, staged StagedRow, expense []A
 	return placeWhere{key: "home", text: text, home: true}
 }
 
-// lookupPlan is the lookup a picker's answer calls for.
+// lookupPlan is the lookup a picker's answer calls for, with what naming
+// the branches it finds needs: how the owner names areas, and the areas
+// they were in that day.
 type lookupPlan struct {
 	key   string
 	name  string
 	where placeWhere
 	quiet bool // the model placed it already: a branch found is added, unannounced
+	owner map[string]int
+	day   map[string]bool
 }
 
 // planLookup: the first new business the answer names, by its name without
@@ -158,7 +162,7 @@ type lookupPlan struct {
 // payment went to one (a card, a shop's QR code) and a whole name was typed.
 // Nothing is looked up when the answer is one of the owner's payees, or on
 // money in.
-func (c *Classifier) planLookup(ctx context.Context, staged StagedRow, typed string, sugg []PlaceSuggestion, expense []AccountRef) *lookupPlan {
+func (c *Classifier) planLookup(ctx context.Context, staged StagedRow, typed string, sugg []PlaceSuggestion, ev placesEvidence) *lookupPlan {
 	if c.lookup == nil || staged.Type != "OUTGOING" {
 		return nil
 	}
@@ -182,10 +186,22 @@ func (c *Classifier) planLookup(ctx context.Context, staged StagedRow, typed str
 	if len([]rune(name)) < placesMinTyped {
 		return nil
 	}
-	usage := accountUsage(ctx, c.db, "destination", time.Now().AddDate(-2, 0, 0))
-	where := c.whereFor(ctx, staged, expense, usage)
+	where := c.whereFor(ctx, staged, ev)
 	key := fmt.Sprintf("%s|%s|v%d|%s", placeKey(name), where.key, lookupVersion, c.lookup.Model())
-	return &lookupPlan{key: key, name: name, where: where, quiet: placed}
+	return &lookupPlan{key: key, name: name, where: where, quiet: placed, owner: ownerAreas(ev.accounts, ev.usage), day: dayAreas(ev.neighbours)}
+}
+
+// dayAreas: the areas of the owner's payments around a card.
+func dayAreas(ns []neighbour) map[string]bool {
+	day := map[string]bool{}
+	for _, n := range ns {
+		if n.owner {
+			if parts := strings.Split(n.payee, ", "); len(parts) >= 2 {
+				day[areaKey(parts[1])] = true
+			}
+		}
+	}
+	return day
 }
 
 // wholeName: typed as a name, not a word on the way to one — two words or
@@ -245,13 +261,8 @@ func (c *Classifier) withLookup(ctx context.Context, uuid, typed string, res Pla
 			return res
 		}
 	}
-	rows, err := c.fetchStagedForClassify(ctx, `fold_uuid = ?`, uuid)
-	if err != nil || len(rows) != 1 {
-		return res
-	}
-	expense, _ := listExpenseAccounts(ctx, c.db)
-	usage := accountUsage(ctx, c.db, "destination", time.Now().AddDate(-2, 0, 0))
-	grounded := c.groundedSuggestions(ctx, rows[0], typed, facts, p.where, expense, usage)
+	expense, _ := listExpenseAccounts(ctx, c.db) // (a branch that is one of their payees is that payee)
+	grounded := groundedSuggestions(typed, facts, p.where, p.owner, p.day, expense)
 	res.Suggestions = mergeSuggestions(correctWhat(res.Suggestions, facts), grounded)
 	res.Lookup = ""
 	return res
@@ -446,18 +457,9 @@ func parseFacts(out string) (PlaceFacts, bool) {
 // then the ones they are most often in. A chain with more branches than it
 // lists offers only a branch in an area they were in that day — otherwise
 // which one it was can't be told.
-func (c *Classifier) groundedSuggestions(ctx context.Context, staged StagedRow, typed string, facts PlaceFacts, where placeWhere, expense []AccountRef, usage map[int64]int) []PlaceSuggestion {
+func groundedSuggestions(typed string, facts PlaceFacts, where placeWhere, owner map[string]int, day map[string]bool, expense []AccountRef) []PlaceSuggestion {
 	if !facts.Found || facts.Name == "" || len(facts.Branches) == 0 {
 		return nil
-	}
-	owner := ownerAreas(expense, usage)
-	day := map[string]bool{}
-	for _, n := range c.neighbours(ctx, staged, exclusion{}) {
-		if n.owner {
-			if parts := strings.Split(n.payee, ", "); len(parts) >= 2 {
-				day[areaKey(parts[1])] = true
-			}
-		}
 	}
 	byName := map[string]string{}
 	for _, a := range expense {
@@ -675,8 +677,9 @@ func (c *Classifier) CompareLookups(ctx context.Context, uuid string, names, mod
 	}
 	staged := rows[0]
 	expense, _ := listExpenseAccounts(ctx, c.db)
-	usage := accountUsage(ctx, c.db, "destination", time.Now().AddDate(-2, 0, 0))
-	where := c.whereFor(ctx, staged, expense, usage)
+	ev := c.placesEvidenceFor(ctx, staged, expense, "destination")
+	where := c.whereFor(ctx, staged, ev)
+	owner, day := ownerAreas(ev.accounts, ev.usage), dayAreas(ev.neighbours)
 	var runs []LookupRun
 	for _, m := range models {
 		for _, n := range names {
@@ -695,7 +698,7 @@ func (c *Classifier) CompareLookups(ctx context.Context, uuid string, names, mod
 				r.Error = err.Error()
 				return
 			}
-			r.Offered = c.groundedSuggestions(ctx, staged, r.Name, facts, where, expense, usage)
+			r.Offered = groundedSuggestions(r.Name, facts, where, owner, day, expense)
 		}(&runs[i])
 	}
 	wg.Wait()

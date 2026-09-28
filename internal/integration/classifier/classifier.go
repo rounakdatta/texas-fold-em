@@ -193,6 +193,11 @@ type Classifier struct {
 		mu      sync.Mutex
 		clients map[string]*llm.Client
 	}
+	// usage keeps accountUsage for the picker's questions a moment (places.go).
+	usage struct {
+		mu     sync.Mutex
+		bySide map[string]usageEntry
+	}
 	// concurrency bounds how many rows classifyMatching processes in
 	// parallel. <=1 (the default) is strictly sequential. The Tier-3 LLM
 	// call dominates per-row latency and holds no DB connection, so a

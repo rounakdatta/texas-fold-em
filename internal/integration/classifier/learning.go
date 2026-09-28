@@ -399,7 +399,14 @@ func (c *Classifier) handleHistory(ctx context.Context, staged StagedRow, ex exc
 
 // ---- around this time -----------------------------------------------------
 
+// neighboursHook, when set (tests only), is called on every gathering of a
+// card's neighbours: dozens of queries, which a question must not repeat.
+var neighboursHook func()
+
 func (c *Classifier) neighbours(ctx context.Context, staged StagedRow, ex exclusion) []neighbour {
+	if neighboursHook != nil {
+		neighboursHook()
+	}
 	at, ok := parseTxnTime(staged.TxnTimestamp)
 	if !ok {
 		return nil
