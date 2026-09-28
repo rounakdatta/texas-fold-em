@@ -32,6 +32,7 @@ const (
 	tripGap    = 72 * time.Hour // payments further apart are separate trips
 	tripMargin = 12 * time.Hour // before a trip's first place or after its last is not the trip
 	edgeReach  = 24 * time.Hour // a payment at a trip's edge takes the zone of a place this near
+	nearReach  = time.Hour      // nobody pays in two zones within the hour: not even a flight is that quick
 	minPlaced  = 2              // places a trip must name: one could be a coincidence
 	maxContext = 60             // places shown to a Resolver for context
 )
@@ -247,8 +248,10 @@ func locateTrip(ctx context.Context, tl *Timeline, cur string, trip []Row, r Res
 
 // fillFromAround gives a payment that names no place (or one nobody could
 // place) the zone of the placed payments around it, when those agree — a
-// payment between New York's and Chicago's was made on the way, in either.
-// At a trip's edge, the one placed payment beside it, when it is near.
+// payment between New York's and Chicago's was made on the way, in either —
+// or, when they don't, of the one within the hour of it: a snack at the
+// airport minutes before the train into town is the town's. At a trip's
+// edge, the one placed payment beside it, when it is near.
 func fillFromAround(trip []Row, zones []*time.Location, anchored []bool) {
 	for i := range trip {
 		if zones[i] != nil {
@@ -269,8 +272,14 @@ func fillFromAround(trip []Row, zones []*time.Location, anchored []bool) {
 		}
 		switch {
 		case before >= 0 && after >= 0:
-			if zones[before].String() == zones[after].String() {
+			sinceBefore, untilAfter := trip[i].At.Sub(trip[before].At), trip[after].At.Sub(trip[i].At)
+			switch {
+			case zones[before].String() == zones[after].String():
 				zones[i] = zones[before]
+			case sinceBefore <= nearReach && untilAfter > nearReach:
+				zones[i] = zones[before]
+			case untilAfter <= nearReach && sinceBefore > nearReach:
+				zones[i] = zones[after]
 			}
 		case before >= 0:
 			if trip[i].At.Sub(trip[before].At) <= edgeReach {
