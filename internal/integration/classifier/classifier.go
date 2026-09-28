@@ -183,6 +183,16 @@ type Classifier struct {
 	fast        *llm.Client
 	places      placesCache
 	placesSlots chan struct{}
+	// lookup searches the web for a place the picker's model couldn't place
+	// (places_lookup.go); lookups keeps what it found.
+	lookup  *llm.Client
+	lookups lookupStore
+	// compare keeps one client per model for comparisons, so each model's
+	// refusals are learnt once.
+	compare struct {
+		mu      sync.Mutex
+		clients map[string]*llm.Client
+	}
 	// concurrency bounds how many rows classifyMatching processes in
 	// parallel. <=1 (the default) is strictly sequential. The Tier-3 LLM
 	// call dominates per-row latency and holds no DB connection, so a

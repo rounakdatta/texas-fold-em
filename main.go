@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -178,8 +179,18 @@ func run() error {
 			fast := llmClient.WithOverrides(cfg.LLMFastModel, "none")
 			fast.SetMaxTokens(600)
 			fast.SetTimeout(15 * time.Second)
+			fast.SetThinkingFallback("low") // a model that must think: as little as it can
 			fast.SetLogger(intLog.With("component", "llm-fast"))
 			cls.SetFastLLM(fast)
+			// A place it can't place is looked up on the web: slower (a
+			// search is seconds), so asked seldom and kept a month.
+			if cfg.PlacesLookup {
+				look := llmClient.WithOverrides(firstNonEmpty(cfg.LLMLookupModel, fast.Model()), "none")
+				look.SetTimeout(40 * time.Second)
+				look.SetThinkingFallback("low")
+				look.SetLogger(intLog.With("component", "llm-lookup"))
+				cls.SetLookupLLM(look)
+			}
 			llmEnabled = true
 		}
 		srv.SetClassifier(cls)
@@ -354,4 +365,14 @@ func newLogger(level string) *slog.Logger {
 		},
 	})
 	return slog.New(h)
+}
+
+// firstNonEmpty is the first of its arguments that isn't blank.
+func firstNonEmpty(s ...string) string {
+	for _, x := range s {
+		if strings.TrimSpace(x) != "" {
+			return x
+		}
+	}
+	return ""
 }

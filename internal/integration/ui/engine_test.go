@@ -2,6 +2,7 @@ package ui
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -246,5 +247,65 @@ func TestPlaces_ThePickerGetsSuggestionsOrNothing(t *testing.T) {
 		if code := rh.getJSON(t, "/api/rows/p/places?q="+q, &empty); code != http.StatusOK || empty.Suggestions == nil || len(empty.Suggestions) != 0 {
 			t.Errorf("q=%q: %d %+v; want 200 and an empty list", q, code, empty)
 		}
+	}
+}
+
+// withLookupEngine is withEngine with a gateway that also searches the web
+// (auth2api's /v1/messages), for the picker's second question.
+func (rh *reviewHarness) withLookupEngine(t *testing.T, reply, lookup string) *classifier.Classifier {
+	t.Helper()
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/messages") {
+			_ = json.NewEncoder(w).Encode(map[string]any{"content": []map[string]any{
+				{"type": "server_tool_use", "id": "s1", "name": "web_search", "input": map[string]any{"query": "q"}},
+				{"type": "web_search_tool_result", "tool_use_id": "s1", "content": []any{}},
+				{"type": "text", "text": lookup}}, "stop_reason": "end_turn"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []map[string]any{{"message": map[string]any{"content": reply}, "finish_reason": "stop"}}})
+	}))
+	t.Cleanup(fake.Close)
+	cls := classifier.New(rh.db.DB, slog.New(slog.NewTextHandler(io.Discard, nil)), classifier.DefaultConfidenceThreshold, 10)
+	main := llm.NewClient("k", "claude-opus-5-5", fake.URL+"/v1", fake.Client())
+	cls.SetLLM(main)
+	cls.SetLookupLLM(main.WithOverrides("claude-sonnet-5", "none"))
+	rh.h.SetClassifier(cls)
+	return cls
+}
+
+// A place the model couldn't place: the first answer says a lookup is under
+// way (and is not the browser's to keep, or asking again would bring the
+// wait back); the second waits for it and brings the branches — one of them
+// a payee the owner has already.
+func TestPlaces_ALookupIsWaitedForAndOnlyItsAnswerKept(t *testing.T) {
+	rh := newReviewHarness(t)
+	rh.withLookupEngine(t, `{"suggestions":[{"name":"Chai Corner","what":"tea stall","confidence":0.9}]}`,
+		`{"found":true,"name":"Chai Corner","what":"tea stall","branches":[{"area":"Market Road"},{"area":"Station Road"}]}`)
+	rh.stage(t, "p", "needs_review", "Masala chai", 20000, "2026-09-20T09:00:00Z")
+	get := func(path string) (classifier.PlacesResult, string) {
+		t.Helper()
+		resp, err := http.Get(rh.srv.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var res classifier.PlacesResult
+		if resp.StatusCode != http.StatusOK || json.NewDecoder(resp.Body).Decode(&res) != nil {
+			t.Fatalf("%s: %d", path, resp.StatusCode)
+		}
+		return res, resp.Header.Get("Cache-Control")
+	}
+	first, cc := get("/api/rows/p/places?q=chai+corner")
+	if first.Lookup != "pending" || cc != "no-store" || len(first.Suggestions) != 1 {
+		t.Fatalf("first answer = %+v, Cache-Control %q", first, cc)
+	}
+	looked, cc := get("/api/rows/p/places/lookup?q=chai+corner")
+	var got []string
+	for _, s := range looked.Suggestions {
+		got = append(got, fmt.Sprintf("%s|%v", s.Name, s.Existing))
+	}
+	if strings.Join(got, " / ") != "Chai Corner|false / Chai Corner, Market Road|true / Chai Corner, Station Road|false" || looked.Lookup != "" || cc != "private, max-age=600" {
+		t.Errorf("after the lookup = %q (lookup %q), Cache-Control %q", got, looked.Lookup, cc)
 	}
 }

@@ -120,6 +120,12 @@ type Config struct {
 	// the same host and key. "" uses the classifying model.
 	LLMFastModel string // TEXAS_FOLDEM_LLM_FAST_MODEL        default ""
 
+	// PlacesLookup lets the picker look a place up on the web when its model
+	// can't place it (which branch, which area); LLMLookupModel searches
+	// ("" = the fast model). Only the place's name and where leave fold.
+	PlacesLookup   bool   // TEXAS_FOLDEM_PLACES_LOOKUP          default true
+	LLMLookupModel string // TEXAS_FOLDEM_LLM_LOOKUP_MODEL       default ""
+
 	// ResuggestEvery is how often waiting cards are revisited — the ones a
 	// newer correction or a newer engine could suggest better
 	// (classifier/resuggest.go). 0 disables it. ResuggestLimit caps how
@@ -164,6 +170,8 @@ func LoadConfig() (Config, error) {
 		LLMTimeout:          envDur("TEXAS_FOLDEM_LLM_TIMEOUT", 0),
 		LLMMaxTokens:        envInt("TEXAS_FOLDEM_LLM_MAX_TOKENS", 0),
 		LLMFastModel:        envStr("TEXAS_FOLDEM_LLM_FAST_MODEL", ""),
+		PlacesLookup:        envBool("TEXAS_FOLDEM_PLACES_LOOKUP", true),
+		LLMLookupModel:      envStr("TEXAS_FOLDEM_LLM_LOOKUP_MODEL", ""),
 		ResuggestEvery:      envDur("TEXAS_FOLDEM_RESUGGEST_EVERY", 0),
 		ResuggestLimit:      envInt("TEXAS_FOLDEM_RESUGGEST_LIMIT", 8),
 	}
