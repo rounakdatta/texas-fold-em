@@ -1158,7 +1158,12 @@
     setTimeout(() => input.select(), 40); // typing replaces the current name
     let repaint = null;
     sheetRepaint = () => repaint && repaint();
-    const [o, s] = await Promise.all([options(), suggestions(c)]);
+    // The names are all a typed search needs, and they stay loaded after the
+    // first picker. What went under this bank name before takes the server a
+    // moment longer to look up, so it follows when it comes: a name typed the
+    // moment the sheet opens is searched, and asked about, at once.
+    const o = await options();
+    let s = {};
     let names = incoming ? (o.payers || []) : (o.payees || []);
     const ownFull = fullName(own).toLowerCase();
     let accts = o.accounts || [];
@@ -1190,6 +1195,7 @@
     const stillFits = (name, q) => { const s = starts(name); return words(q).every(t => s.some(x => x.startsWith(t))); };
     const askPlaces = q => {
       if (places.ctrl) places.ctrl.abort();
+      if (!sheet.open || !input.isConnected) return; // closed, or another sheet since
       const ctrl = new AbortController();
       Object.assign(places, { ctrl, loading: true, since: Date.now() });
       clearTimeout(places.slow);
@@ -1235,21 +1241,27 @@
       if (!items.length) box.append(h('p', { class: 'places-looking', role: 'status', text: incoming ? 'Looking up names…' : 'Looking up places…' }));
       list.append(box);
     };
+    // who went under this bank name before (money out; a payer's bank line
+    // names them already), below what is on the alert
+    const paintPast = late => {
+      const past = (s.payees || []).filter(x => x.value !== guess && !isOwn(x.value));
+      if (!past.length) return;
+      const els = [h('div', { class: 'pick-group', text: 'Before, for ' + (c.bankSaid || 'this bank name') })]
+        .concat(past.map(x => pickButton(x.value, x.hint, () => choose(x.value), x.value === current)));
+      if (late) els.forEach(el => el.classList.add('arrives'));
+      list.append(...els);
+    };
     const paint = () => {
       const q = input.value.trim();
       const ql = q.toLowerCase();
       list.replaceChildren();
       if (!ql || q === current) {
-        const past = incoming ? [] : (s.payees || []).filter(x => x.value !== guess && !isOwn(x.value));
         if (guess && !isOwn(guess)) {
           list.append(h('div', { class: 'pick-group', text: incoming ? 'On the bank line' : 'On the alert' }));
           const known = names.find(p => p.toLowerCase() === guess.toLowerCase());
           list.append(pickButton(known || guess, known ? '' : incoming ? 'new payer' : 'new payee', () => choose(known || guess)));
         }
-        if (past.length) {
-          list.append(h('div', { class: 'pick-group', text: 'Before, for ' + (c.bankSaid || 'this bank name') }));
-          for (const x of past) list.append(pickButton(x.value, x.hint, () => choose(x.value), x.value === current));
-        }
+        paintPast();
         return;
       }
       // your own accounts are never a payee: typing one offers the transfer
@@ -1281,7 +1293,16 @@
     };
     input.addEventListener('input', () => { paint(); schedulePlaces(); });
     input.addEventListener('keydown', e => { if (e.key === 'Enter') { const b = list.querySelector('.pick'); if (b) { e.preventDefault(); b.click(); } } });
+    // anything typed while the names loaded: listed, and asked about
     paint();
+    schedulePlaces();
+    // added below the rows already there — a redraw could take the row
+    // under a finger or the keyboard's focus away
+    if (!incoming) suggestions(c).then(d => {
+      s = d || {};
+      const q = input.value.trim();
+      if (!q || q === current) paintPast(true);
+    });
   }
 
   // The purchases a refund could be for (not the "none of these" choice).
