@@ -98,6 +98,8 @@ type Handler struct {
 	whereMu sync.Mutex
 	where   *whereabouts.Timeline
 	whereAt time.Time
+	// sure keeps each waiting card's place in Surest first (sureness.go).
+	sure sureMemo
 }
 
 // whereabouts is where the owner was for each foreign payment (review.go

@@ -122,6 +122,9 @@ type reviewCard struct {
 	// Why: what the engine can add about its own suggestion, when it has
 	// something worth a line.
 	Why *cardWhy `json:"why,omitempty"`
+	// Sure: how sure fold is that it can go as it stands — what Surest
+	// first orders by (sureness.go).
+	Sure cardSure `json:"sure"`
 }
 
 // cardLocal: a payment made on a trip reads at the time it was where it
@@ -196,7 +199,15 @@ var cardSelect = `
 	       COALESCE(s.confirmed_txn_type, ''), COALESCE(s.proposed_txn_type, ''),
 	       COALESCE(s.hold_by, ''), COALESCE(s.resuggest_reason, ''), s.resuggest_changed,
 	       COALESCE(s.classifier_evidence_json, ''), NULLIF(TRIM(s.confirmed_description), '') IS NULL,
-	       ` + humanTouchedSQL + `
+	       ` + humanTouchedSQL + `,
+	       -- how sure fold is (sureness.go): the engine's confidence, and both
+	       -- sides as saved and as suggested, to tell a person's pick of who
+	       -- from a suggestion kept
+	       s.classifier_confidence,
+	       s.confirmed_source_account_id, COALESCE(s.confirmed_source_account_name, ''),
+	       s.proposed_source_account_id, COALESCE(s.proposed_source_account_name, ''),
+	       s.confirmed_destination_account_id, COALESCE(s.confirmed_destination_account_name, ''),
+	       s.proposed_destination_account_id, COALESCE(s.proposed_destination_account_name, '')
 	FROM staged_fold_txns s`
 
 // humanTouchedSQL: a person chose something on this row.
@@ -236,6 +247,9 @@ type cardRow struct {
 	resuggestChanged                   bool
 	evidenceJSON                       string
 	titleIsEngines, touched            bool
+	score                              sql.NullFloat64
+	savedSrc, suggestedSrc             storedSide
+	savedDst, suggestedDst             storedSide
 }
 
 func scanCardRow(rows interface{ Scan(...any) error }) (cardRow, error) {
@@ -243,7 +257,9 @@ func scanCardRow(rows interface{ Scan(...any) error }) (cardRow, error) {
 	err := rows.Scan(&r.uuid, &r.status, &r.typ, &r.mode, &r.narration, &r.tsStr, &r.amountPaise, &r.foldPaise,
 		&r.fxPaise, &r.fxCur, &r.title, &r.category, &r.tagsJSON, &r.srcID, &r.srcName, &r.dstID, &r.dstName,
 		&r.merchant, &r.notes, &r.dup, &r.hold, &r.later, &r.isRefund, &r.refundRef, &r.confType, &r.propType,
-		&r.holdBy, &r.resuggestReason, &r.resuggestChanged, &r.evidenceJSON, &r.titleIsEngines, &r.touched)
+		&r.holdBy, &r.resuggestReason, &r.resuggestChanged, &r.evidenceJSON, &r.titleIsEngines, &r.touched,
+		&r.score, &r.savedSrc.id, &r.savedSrc.name, &r.suggestedSrc.id, &r.suggestedSrc.name,
+		&r.savedDst.id, &r.savedDst.name, &r.suggestedDst.id, &r.suggestedDst.name)
 	return r, err
 }
 
@@ -353,6 +369,7 @@ func (h *Handler) buildCard(ctx context.Context, r cardRow) reviewCard {
 	}
 	c.EditURL = txnPath(c.UUID) + "?back=" + url.QueryEscape(pathDeck)
 	c.Why = engineWhy(r, c)
+	c.Sure = sureness(c, r.score, !c.Manual && h.choseOther(ctx, r))
 	return c
 }
 
@@ -778,6 +795,10 @@ type deckResponse struct {
 		// the account picker.
 		All       *int           `json:"all,omitempty"`
 		ByAccount map[string]int `json:"byAccount,omitempty"`
+		// On the first page of Surest first only: how many cards in this
+		// pile, under the account filter, can go with a swipe and are ones
+		// fold is sure of.
+		Sure *int `json:"sure,omitempty"`
 	} `json:"counts"`
 	// Next is the cursor for the following page; empty on the last one.
 	Next string `json:"next,omitempty"`
@@ -785,13 +806,23 @@ type deckResponse struct {
 
 const deckPageSize = 40
 
+// The deck's orders: by time either way, or Surest first (sureness.go).
+const (
+	orderNewest = "newest"
+	orderOldest = "oldest"
+	orderSurest = "surest"
+)
+
 func (h *Handler) handleDeck(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	pile := q.Get("pile")
 	if pile != "later" {
 		pile = "review"
 	}
-	oldest := q.Get("order") == "oldest"
+	order := q.Get("order")
+	if order != orderOldest && order != orderSurest {
+		order = orderNewest
+	}
 	limit := parsePositiveInt(q.Get("limit"), deckPageSize)
 	if limit > 200 {
 		limit = 200
@@ -810,51 +841,20 @@ func (h *Handler) handleDeck(w http.ResponseWriter, r *http.Request) {
 	}
 	accountWhere, accountArgs := where[2:], append([]any(nil), args...)
 
-	// Keyset cursor "<timestamp>|<uuid>": cards leave the pile as they are
-	// decided, so an offset would skip some.
-	order := "DESC"
-	cmp := "<"
-	if oldest {
-		order, cmp = "ASC", ">"
-	}
-	if ts, id, ok := strings.Cut(q.Get("after"), "|"); ok {
-		where = append(where, "(COALESCE(s.confirmed_txn_timestamp, s.txn_timestamp) "+cmp+" ? OR "+
-			"(COALESCE(s.confirmed_txn_timestamp, s.txn_timestamp) = ? AND s.fold_uuid "+cmp+" ?))")
-		args = append(args, ts, ts, id)
-	}
-
-	rows, err := h.db.QueryContext(r.Context(), cardSelect+
-		" WHERE "+strings.Join(where, " AND ")+
-		" ORDER BY COALESCE(s.confirmed_txn_timestamp, s.txn_timestamp) "+order+", s.fold_uuid "+order+
-		" LIMIT ?", append(args, limit+1)...)
-	if err != nil {
-		h.apiError(w, http.StatusInternalServerError, "could not read the deck: "+err.Error())
-		return
-	}
-	var raw []cardRow
-	for rows.Next() {
-		cr, err := scanCardRow(rows)
-		if err != nil {
-			rows.Close()
-			h.apiError(w, http.StatusInternalServerError, "could not read a card: "+err.Error())
-			return
+	var resp deckResponse
+	var err error
+	if order == orderSurest {
+		var sure int
+		resp.Cards, resp.Next, sure, err = h.surestPage(r.Context(), where, args, q.Get("after"), limit)
+		if q.Get("after") == "" {
+			resp.Counts.Sure = &sure
 		}
-		raw = append(raw, cr)
+	} else {
+		resp.Cards, resp.Next, err = h.timelinePage(r.Context(), where, args, q.Get("after"), limit, order == orderOldest)
 	}
-	err = rows.Err()
-	rows.Close()
 	if err != nil {
 		h.apiError(w, http.StatusInternalServerError, err.Error())
 		return
-	}
-	var resp deckResponse
-	for _, cr := range raw {
-		resp.Cards = append(resp.Cards, h.buildCard(r.Context(), cr))
-	}
-	if len(resp.Cards) > limit {
-		resp.Cards = resp.Cards[:limit]
-		last := resp.Cards[limit-1]
-		resp.Next = h.cursorFor(r.Context(), last.UUID)
 	}
 	for i := range resp.Cards {
 		h.fillRefundOptions(r.Context(), &resp.Cards[i])
@@ -901,6 +901,59 @@ func (h *Handler) pileCounts(ctx context.Context, pileClause string) (int, map[s
 		}
 	}
 	return all, by
+}
+
+// timelinePage is one page of the deck in time order, newest first or oldest
+// first, after the keyset cursor "<timestamp>|<uuid>": cards leave the pile as
+// they are decided, so an offset would skip some.
+func (h *Handler) timelinePage(ctx context.Context, where []string, args []any, after string, limit int, oldest bool) ([]reviewCard, string, error) {
+	where, args = append([]string(nil), where...), append([]any(nil), args...)
+	order := "DESC"
+	cmp := "<"
+	if oldest {
+		order, cmp = "ASC", ">"
+	}
+	if ts, id, ok := strings.Cut(after, "|"); ok {
+		where = append(where, "(COALESCE(s.confirmed_txn_timestamp, s.txn_timestamp) "+cmp+" ? OR "+
+			"(COALESCE(s.confirmed_txn_timestamp, s.txn_timestamp) = ? AND s.fold_uuid "+cmp+" ?))")
+		args = append(args, ts, ts, id)
+	}
+	raw, err := h.readCardRows(ctx, " WHERE "+strings.Join(where, " AND ")+
+		" ORDER BY COALESCE(s.confirmed_txn_timestamp, s.txn_timestamp) "+order+", s.fold_uuid "+order+
+		" LIMIT ?", append(args, limit+1)...)
+	if err != nil {
+		return nil, "", err
+	}
+	var cards []reviewCard
+	for _, cr := range raw {
+		cards = append(cards, h.buildCard(ctx, cr))
+	}
+	var next string
+	if len(cards) > limit {
+		cards = cards[:limit]
+		next = h.cursorFor(ctx, cards[limit-1].UUID)
+	}
+	return cards, next, nil
+}
+
+// readCardRows reads the cards a query selects (cardSelect plus tail), every
+// row read and the cursor closed before anything else asks the database: the
+// pool has a single connection (see cardRow).
+func (h *Handler) readCardRows(ctx context.Context, tail string, args ...any) ([]cardRow, error) {
+	rows, err := h.db.QueryContext(ctx, cardSelect+tail, args...)
+	if err != nil {
+		return nil, fmt.Errorf("could not read the deck: %w", err)
+	}
+	defer rows.Close()
+	var raw []cardRow
+	for rows.Next() {
+		cr, err := scanCardRow(rows)
+		if err != nil {
+			return nil, fmt.Errorf("could not read a card: %w", err)
+		}
+		raw = append(raw, cr)
+	}
+	return raw, rows.Err()
 }
 
 // cursorFor is the keyset cursor after a card: its stored timestamp (as the

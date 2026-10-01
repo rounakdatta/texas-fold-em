@@ -138,7 +138,17 @@ keyboard:
 - **Hold** a row that must never be sent, with a reason; its next step
   becomes *Skip it*. Skips can be undone, and restored from the list.
 - **Work one account at a time**, with a count of what waits on each, newest
-  or oldest first (the order a statement runs in).
+  or oldest first (the order a statement runs in) — or surest first.
+- **Surest first clears a backlog at the pace of a swipe.** The cards that go
+  with one swipe and that fold is sure of come first, then the ones it is
+  fairly sure of, then its guesses; then the cards waiting on a word from you,
+  surest first again; then what is on hold. Within each band the deck keeps to
+  time, newest first, so a day's payments stay together. Sure means the
+  classifier would have accepted it unasked (confidence 0.85 or more), you
+  chose who was paid, or you added the row from a statement; a possible
+  duplicate, a refund with a purchase to pick or fold's own case for a hold is
+  never sure. Past the sure ones each card says how sure fold is — *Fairly
+  sure*, *Not sure* — and the send that takes the last sure one says so.
 
 `/transactions` lists every transaction by status, with the editor behind each
 row: account, category, budget and tag fields are name autocompletes backed by
