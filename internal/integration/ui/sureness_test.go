@@ -374,3 +374,50 @@ func TestSurest_AnAccountChangedInFireflyIsNoticed(t *testing.T) {
 		t.Errorf("after = %s, want the card that can't go after the one that can", got)
 	}
 }
+
+// A choice of who is what a person did, not what the row's columns say: they
+// move without one.
+func TestSurest_OnlyAPersonsEditIsAChoiceOfWho(t *testing.T) {
+	rh := newReviewHarness(t)
+	rh.stage(t, "kept", "needs_review", "Masala chai", 1000, "2025-12-25T07:00:00Z", conf("0.5"))
+	rh.stage(t, "swapped", "needs_review", "Masala chai", 1000, "2025-12-24T07:00:00Z", conf("0.5"))
+	rh.post(t, "rows/kept/edit", `{"title":"Masala chai and bun"}`)
+	// a reclassify rewrites the suggestion under the kept save
+	mustExec(t, rh.db, `UPDATE staged_fold_txns SET proposed_destination_account_id = 421 WHERE fold_uuid = 'kept'`)
+	// the repair stores a backwards row the right way round, without a person
+	mustExec(t, rh.db, `UPDATE staged_fold_txns SET confirmed_source_account_id = 979, confirmed_destination_account_id = 476 WHERE fold_uuid = 'swapped'`)
+	for _, c := range rh.deck(t, "").Cards {
+		if c.Sure.Why == sureChosen || c.Sure.Band == sureYes {
+			t.Errorf("%s = %+v: nobody chose who", c.UUID, c.Sure)
+		}
+	}
+}
+
+// Firefly finds or makes the account a move needs by name and kind: a payee
+// you have only ever paid has no account to pay you back from yet.
+func TestSurest_AMerchantsFirstRefundMakesItsPayer(t *testing.T) {
+	rh := newReviewHarness(t)
+	rh.stage(t, "refund", "ready_to_push", "Refund for Masala chai", 20000, "2025-12-25T07:00:00Z", conf("0.95"),
+		`UPDATE staged_fold_txns SET type = 'INCOMING', classifier_tier = 5, proposed_refund_of = 'none',
+		     proposed_source_account_id = NULL, proposed_source_account_name = 'Chai Corner, Market Road',
+		     proposed_destination_account_id = 476 WHERE fold_uuid = ?`)
+	c := rh.deck(t, "").Cards[0]
+	if c.Type != "deposit" || len(c.Blockers) != 0 || c.Sure.Band != sureFairly || c.Sure.Why != sureNewPayee {
+		t.Errorf("first refund = %s %v %+v, want fairly sure: sending it makes the payer", c.Type, c.Blockers, c.Sure)
+	}
+	if d := rh.deck(t, "order=surest&limit=1"); d.Counts.Sure == nil || *d.Counts.Sure != 0 {
+		t.Errorf("counts.sure = %v, want 0", d.Counts.Sure)
+	}
+}
+
+// Picking who was paid says nothing about the account that paid.
+func TestSurest_APickOfWhoDoesNotVouchForANewAccountOfYours(t *testing.T) {
+	rh := newReviewHarness(t)
+	rh.stage(t, "new-card", "needs_review", "Masala chai", 1000, "2025-12-25T07:00:00Z", conf("0.95"),
+		`UPDATE staged_fold_txns SET proposed_source_account_id = NULL, proposed_source_account_name = 'Kestrel Travel Credit Card' WHERE fold_uuid = ?`)
+	rh.post(t, "rows/new-card/edit", `{"payee":"Daily Mart, Market Road"}`)
+	c := rh.deck(t, "").Cards[0]
+	if c.Sure.Band != sureFairly || c.Sure.Why != sureNewAccount {
+		t.Errorf("after picking who = %+v, want fairly sure: the paying account is still new", c.Sure)
+	}
+}

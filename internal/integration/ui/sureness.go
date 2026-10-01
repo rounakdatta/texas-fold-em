@@ -42,6 +42,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rounakdatta/texas-fold-em/internal/integration"
 	"github.com/rounakdatta/texas-fold-em/internal/integration/classifier"
 )
 
@@ -94,7 +95,7 @@ type sureFacts struct {
 
 // sureness says how sure fold is of a card, from what the card says and how
 // it came to say it. A doubt the card raises comes first: whatever the score,
-// it needs a decision fold can't make. Then a person's choice; then the
+// it needs a decision fold can't make. Then what a person decided; then the
 // classifier's own rules for what it may accept unasked; then its
 // confidence, in bands.
 func sureness(c reviewCard, f sureFacts) cardSure {
@@ -118,6 +119,8 @@ func sureness(c reviewCard, f sureFacts) cardSure {
 		}
 		return b
 	}
+	// it declined: the model's confidence was in what it could say, not who
+	unsettled := s.Score == nil || (f.tier.Valid && f.tier.Int64 == int64(classifier.TierHumanReview))
 	switch {
 	case c.Duplicate:
 		s.Band, s.Why = sureNot, sureDuplicate
@@ -127,46 +130,83 @@ func sureness(c reviewCard, f sureFacts) cardSure {
 		s.Band, s.Why = sureNot, sureHold
 	case c.Manual:
 		s.Band, s.Why = sureYes, sureManual
+	case f.newOwn:
+		// picking who was paid says nothing about your own account
+		switch {
+		case f.chosen:
+			s.Band = sureFairly
+		case unsettled:
+			s.Band = sureNot
+		default:
+			s.Band = atMostFairly(band)
+		}
+		s.Why = sureNewAccount
 	case f.chosen:
 		s.Band, s.Why = sureYes, sureChosen
-	case s.Score == nil || (f.tier.Valid && f.tier.Int64 == int64(classifier.TierHumanReview)):
-		// a declined card keeps the model's confidence in what it could say,
-		// which is not who
+	case unsettled:
 		s.Band, s.Why = sureNot, sureUnsettled
 	case f.newOther:
 		s.Band, s.Why = atMostFairly(band), sureNewPayee
-	case f.newOwn:
-		s.Band, s.Why = atMostFairly(band), sureNewAccount
 	default:
 		s.Band = band
 	}
 	return s
 }
 
+// choseWhoSQL: a person's last edit of the card put someone other than fold's
+// suggestion on the other side of the move — who was paid, who paid, a
+// transfer's other account. NULL when nobody has edited it.
+//
+// From the edit, not from the row's columns: every save writes each side
+// whole, by name, so a suggestion kept while fixing the title lands in the
+// confirmed columns too, sometimes as a same-named twin (a card bill's payee
+// that shares the card's name saves as the card itself); and the columns move
+// without a person (a reclassify rewrites the suggestion under a kept save,
+// the repair swaps a backwards row). Each edit records, by name, what fold
+// suggested and what the person left (feedback.RecordEdit; edits before the
+// log began were backfilled from the rows).
+const choseWhoSQL = `(SELECT LOWER(TRIM(COALESCE(json_extract(f.chosen_json, '$.payee'), '')))
+	      <> LOWER(TRIM(COALESCE(json_extract(f.suggested_json, '$.payee'), '')))
+	  FROM review_feedback f WHERE f.fold_uuid = s.fold_uuid AND f.action = 'edit'
+	  ORDER BY f.at DESC, f.id DESC LIMIT 1)`
+
 // sureFacts reads what sureness needs from a row, beyond the card built from it.
 func (h *Handler) sureFacts(ctx context.Context, r cardRow, c reviewCard) sureFacts {
-	f := sureFacts{score: r.score, tier: r.tier}
+	f := sureFacts{score: r.score, tier: r.tier, chosen: r.choseWho.Valid && r.choseWho.Bool}
 	if c.Manual {
 		return f // every field a person's
 	}
-	f.chosen = h.choseOther(ctx, r)
 	other, own := storedSide{r.dstID, r.dstName}, storedSide{r.srcID, r.srcName}
 	if r.typ == "INCOMING" {
 		other, own = own, other
 	}
-	f.newOther, f.newOwn = h.isNewAccount(ctx, other), h.isNewAccount(ctx, own)
+	// push sends a side Firefly hasn't linked by its name, and Firefly finds or
+	// makes an account of the kind the move needs there: yours an asset; the
+	// other side an expense to pay, a revenue account to be paid by, or another
+	// of yours
+	otherKind := map[string]string{integration.TypeWithdrawal: "expense", integration.TypeDeposit: "revenue", integration.TypeTransfer: "asset"}[c.Type]
+	f.newOther = h.isNewAccount(ctx, other, otherKind)
+	f.newOwn = h.isNewAccount(ctx, own, "asset")
 	return f
 }
 
-// isNewAccount: a side named, not linked, with no account of that name in
-// Firefly — push would make one.
-func (h *Handler) isNewAccount(ctx context.Context, s storedSide) bool {
+// storedSide is one side of a row as stored: an account's id, or the name of
+// an account push asks Firefly to find or make.
+type storedSide struct {
+	id   sql.NullInt64
+	name string
+}
+
+// isNewAccount: a side named, not linked, with no account of that name and
+// kind in Firefly — push would make one. (A payee's revenue twin is another
+// account: a merchant's first refund makes it.)
+func (h *Handler) isNewAccount(ctx context.Context, s storedSide, kind string) bool {
 	name := strings.TrimSpace(s.name)
-	if s.id.Valid || name == "" || name == "(no name)" {
+	if s.id.Valid || name == "" || name == "(no name)" || kind == "" {
 		return false
 	}
 	var n int
-	_ = h.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM firefly_accounts WHERE LOWER(name) = LOWER(?)`, name).Scan(&n)
+	_ = h.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM firefly_accounts WHERE LOWER(name) = LOWER(?) AND type = ?`, name, kind).Scan(&n)
 	return n == 0
 }
 
@@ -188,58 +228,6 @@ func sureRank(c reviewCard) int {
 		rank += 3
 	}
 	return rank
-}
-
-// storedSide is one side of a row as a pair of columns stores it: an
-// account's id, or the name of an account push asks Firefly to create.
-type storedSide struct {
-	id   sql.NullInt64
-	name string
-}
-
-// choseOther reports whether a person put someone on the other side of the
-// move — who was paid, who paid, a transfer's other account — other than
-// fold's suggestion. Every save writes each side whole, copying what the card
-// showed, so a saved side that is the suggestion is a suggestion kept (a
-// title rewritten, an amount taken from the statement), not a choice made:
-// fold's own confidence still speaks for it.
-//
-// Sides compare by name. Two accounts with one name are one who to a person,
-// and a save writes a side back by its name, which can land on the other of
-// the two: a card bill paid to the payee that shares the card's name is saved
-// as the card itself; a payer saved from its payee twin as itself.
-func (h *Handler) choseOther(ctx context.Context, r cardRow) bool {
-	saved, suggested := r.savedDst, r.suggestedDst
-	if r.typ == "INCOMING" {
-		saved, suggested = r.savedSrc, r.suggestedSrc
-	}
-	if !saved.id.Valid && strings.TrimSpace(saved.name) == "" {
-		return false // never saved: the suggestion stands
-	}
-	a, okA := h.storedName(ctx, saved)
-	b, okB := h.storedName(ctx, suggested)
-	if okA && okB {
-		return !strings.EqualFold(a, b)
-	}
-	// an account no copy of Firefly can name: only two ids can tell
-	return saved.id.Valid && suggested.id.Valid && saved.id.Int64 != suggested.id.Int64
-}
-
-// storedName is a stored side's name; ok is false for an id no copy of
-// Firefly knows.
-func (h *Handler) storedName(ctx context.Context, s storedSide) (string, bool) {
-	if !s.id.Valid {
-		return strings.TrimSpace(s.name), true
-	}
-	var name sql.NullString
-	_ = h.db.QueryRowContext(ctx, `SELECT name FROM firefly_accounts WHERE firefly_id = ?`, s.id.Int64).Scan(&name)
-	if n := strings.TrimSpace(name.String); n != "" {
-		return n, true
-	}
-	if n := strings.TrimSpace(h.lookupAccountName(ctx, s.id.Int64)); n != "" {
-		return n, true
-	}
-	return "", false
 }
 
 // ---- the order -----------------------------------------------------------------

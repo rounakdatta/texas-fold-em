@@ -695,8 +695,13 @@
   }
 
   // ---- loading ----------------------------------------------------------------
+  // A load from the top (another pile, account or order; the deck asking
+  // again) takes over from one in flight, whose answer is then dropped: the
+  // deck shows what the chip says. A page more waits its turn.
+  let loadGen = 0;
   async function load(reset) {
-    if (state.loading) return;
+    if (state.loading && !reset) return;
+    const gen = ++loadGen;
     state.loading = true;
     if (reset) {
       state.cards = []; state.next = ''; state.loaded = false; state.error = '';
@@ -709,6 +714,7 @@
     if (!reset && state.next) q.set('after', state.next);
     try {
       const d = await api('deck?' + q.toString());
+      if (gen !== loadGen) return;
       // a decision not yet settled with the server may still be listed by it
       const skip = new Set(state.pending.filter(unsettled).map(p => p.card.uuid));
       const have = new Set(state.cards.map(c => c.uuid));
@@ -721,6 +727,7 @@
       state.loaded = true;
       state.error = '';
     } catch (e) {
+      if (gen !== loadGen) return;
       state.error = e.message;
     }
     state.loading = false;

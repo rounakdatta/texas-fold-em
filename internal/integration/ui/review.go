@@ -200,14 +200,11 @@ var cardSelect = `
 	       COALESCE(s.hold_by, ''), COALESCE(s.resuggest_reason, ''), s.resuggest_changed,
 	       COALESCE(s.classifier_evidence_json, ''), NULLIF(TRIM(s.confirmed_description), '') IS NULL,
 	       ` + humanTouchedSQL + `,
-	       -- how sure fold is (sureness.go): the engine's confidence, and both
-	       -- sides as saved and as suggested, to tell a person's pick of who
-	       -- from a suggestion kept
+	       -- how sure fold is (sureness.go): the engine's confidence and tier,
+	       -- and whether a person's last edit put someone other than fold's
+	       -- suggestion on the other side
 	       s.classifier_confidence, s.classifier_tier,
-	       s.confirmed_source_account_id, COALESCE(s.confirmed_source_account_name, ''),
-	       s.proposed_source_account_id, COALESCE(s.proposed_source_account_name, ''),
-	       s.confirmed_destination_account_id, COALESCE(s.confirmed_destination_account_name, ''),
-	       s.proposed_destination_account_id, COALESCE(s.proposed_destination_account_name, '')
+	       ` + choseWhoSQL + `
 	FROM staged_fold_txns s`
 
 // humanTouchedSQL: a person chose something on this row.
@@ -249,8 +246,7 @@ type cardRow struct {
 	titleIsEngines, touched            bool
 	score                              sql.NullFloat64
 	tier                               sql.NullInt64
-	savedSrc, suggestedSrc             storedSide
-	savedDst, suggestedDst             storedSide
+	choseWho                           sql.NullBool
 }
 
 func scanCardRow(rows interface{ Scan(...any) error }) (cardRow, error) {
@@ -259,8 +255,7 @@ func scanCardRow(rows interface{ Scan(...any) error }) (cardRow, error) {
 		&r.fxPaise, &r.fxCur, &r.title, &r.category, &r.tagsJSON, &r.srcID, &r.srcName, &r.dstID, &r.dstName,
 		&r.merchant, &r.notes, &r.dup, &r.hold, &r.later, &r.isRefund, &r.refundRef, &r.confType, &r.propType,
 		&r.holdBy, &r.resuggestReason, &r.resuggestChanged, &r.evidenceJSON, &r.titleIsEngines, &r.touched,
-		&r.score, &r.tier, &r.savedSrc.id, &r.savedSrc.name, &r.suggestedSrc.id, &r.suggestedSrc.name,
-		&r.savedDst.id, &r.savedDst.name, &r.suggestedDst.id, &r.suggestedDst.name)
+		&r.score, &r.tier, &r.choseWho)
 	return r, err
 }
 
