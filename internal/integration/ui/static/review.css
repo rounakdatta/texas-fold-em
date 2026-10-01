@@ -141,6 +141,16 @@ button.acct { background: none; border: 0; padding: 0; font: inherit; cursor: po
 .who-guess span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .who-guess:hover { background: color-mix(in srgb, var(--accent) 22%, transparent); }
 
+/* how sure fold is, in Surest first, under who was paid: quiet grey for a
+   good guess; fold blue where fold isn't sure — the colour of a question for
+   you here (a missing payee, a blank), never the colour of a fault */
+.sure { display: inline-flex; align-items: center; gap: 6px; margin-top: 2px; font-size: 13.5px; font-weight: 600; color: var(--fg-2); }
+.sure-unsure { color: var(--accent-2); }
+/* three bars, as a signal is drawn: the lit ones in the mark's colour */
+.bars { width: 14px; height: 14px; flex: none; }
+.bars rect { fill: var(--line-2); }
+.bars rect.on { fill: currentColor; }
+
 .what { display: flex; flex-direction: column; gap: 12px; padding-top: 16px; border-top: 1px solid var(--line); }
 .title-btn {
   display: flex; align-items: flex-start; gap: 10px; width: 100%; text-align: left; background: none; border: 0; padding: 0;
@@ -224,6 +234,13 @@ button.acct { background: none; border: 0; padding: 0; font: inherit; cursor: po
 
 /* the undo toast sits at the top of the deck: the bottom of the card is where you edit */
 .deck-page .toasts { bottom: auto; top: calc(var(--appbar-h) + 8px); }
+/* a toast with something to add — the last sure one gone — says it under
+   the decision, in smaller words that may wrap */
+.toast-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; padding: 2px 0; }
+.toast-note { font-size: 13px; line-height: 1.35; color: rgba(255, 255, 255, 0.8); }
+
+/* the Show sheet's orders, each with the icon the chip wears for it */
+.pick-order > svg { width: 16px; height: 16px; flex: none; color: var(--fg-2); }
 
 /* ---- side panel (desktop) --------------------------------------------------- */
 .deck-side { display: none; }
@@ -241,7 +258,9 @@ button.acct { background: none; border: 0; padding: 0; font: inherit; cursor: po
   .upnext .u-amt { font-weight: 600; font-size: 15px; font-variant-numeric: tabular-nums; text-align: right; }
   .upnext .u-amt.is-in { color: var(--in); }
   .upnext .u-title { font-size: 13px; color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .upnext .u-day { font-size: 12.5px; color: var(--fg-3); text-align: right; white-space: nowrap; }
+  .upnext .u-day { font-size: 12.5px; color: var(--fg-3); text-align: right; white-space: nowrap; display: inline-flex; align-items: center; justify-content: flex-end; gap: 5px; }
+  .upnext .u-day .bars { width: 12px; height: 12px; }
+  .upnext .u-day.sure-unsure .bars { color: var(--accent-2); }
   .upnext .u-attn { color: var(--accent-2); font-weight: 500; }
   .keys { display: grid; grid-template-columns: auto 1fr; gap: 8px 12px; margin: 0; font-size: 14px; color: var(--fg-2); align-items: center; }
   .keys dt { margin: 0; }
@@ -285,7 +304,10 @@ button.acct { background: none; border: 0; padding: 0; font: inherit; cursor: po
   .deck-head { gap: 8px; }
   .pile { padding: 0 10px; }
   .scope { padding: 0 11px; }
-  .scope svg { display: none; }
+  /* the icon goes where it says nothing the words don't (newest first, or a
+     label naming the order) and where it would cut a name; with only an
+     account's name left and room beside it, it is what still shows the order */
+  .scope[data-order="newest"] svg, .scope.icon-off svg { display: none; }
   .deck-actions { gap: 8px; }
   .deck-btn { font-size: 15px; gap: 6px; }
   .deck-btn.later { min-width: 0; padding: 0 14px; }

@@ -33,10 +33,11 @@
   };
 
   const params = new URLSearchParams(location.search);
+  const ORDERS = ['newest', 'oldest', 'surest'];
   const state = {
     pile: params.get('pile') === 'later' ? 'later' : 'review',
     account: params.has('account') ? params.get('account') : String(store.get('account', '')),
-    order: store.get('order', 'newest') === 'oldest' ? 'oldest' : 'newest',
+    order: ORDERS.includes(store.get('order', 'newest')) ? store.get('order', 'newest') : 'newest',
     cards: [],
     next: '',
     counts: { review: 0, later: 0 },
@@ -48,6 +49,7 @@
     perAccount: null, // {all, by: {accountId: n}} for this pile, for the account picker
     options: null,   // {categories, payees}, fetched once
     decided: store.get('decided', 0),
+    resynced: false, // ran out of cards the counts still had, and asked again (see resync)
   };
   if (!accounts.some(a => String(a.id) === state.account)) state.account = '';
 
@@ -99,6 +101,70 @@
     sync: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.4 13.5a7.5 7.5 0 0 1-13.1 3.6M4.6 10.5a7.5 7.5 0 0 1 13.1-3.6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M18.4 3.2v4.2h-4.2M5.6 20.8v-4.2h4.2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   };
   const icon = name => { const t = document.createElement('template'); t.innerHTML = SVG[name]; return t.content.firstChild; };
+
+  // ---- how sure fold is ---------------------------------------------------------------
+  // Three bars, as a signal is drawn: all three lit, fold is sure; two, fairly
+  // sure; one, not sure. The same mark wherever sureness shows — on a card,
+  // in "up next", on the Show chip in Surest first.
+  function bars(lit) {
+    const t = document.createElement('template');
+    t.innerHTML = '<svg class="bars" viewBox="0 0 14 14" aria-hidden="true">' +
+      [[1, 8, 4], [5.5, 5, 7], [10, 2, 10]].map(([x, y, ht], i) =>
+        `<rect x="${x}" y="${y}" width="3" height="${ht}" rx="1"${i < lit ? ' class="on"' : ''}/>`).join('') + '</svg>';
+    return t.content.firstChild;
+  }
+  const SURE = {
+    fairly: { lit: 2, word: 'Fairly sure', said: 'fold is fairly sure of this' },
+    unsure: { lit: 1, word: 'Not sure', said: 'fold isn’t sure of this' },
+  };
+  // In Surest first the deck is ordered by it, so each card says which part
+  // of the deck it is in — and only where fold isn't sure: there the sure ones
+  // are the norm, and a mark on every one of them would say nothing. In time
+  // order the deck is a mix and marks none (a row arriving classified and
+  // unconfirmed is not news). A held card's banner says all there is.
+  const sureBand = c => {
+    const s = c.sure;
+    return state.order === 'surest' && !c.hold && s && s.band !== 'sure' ? SURE[s.band] || null : null;
+  };
+  // On the card, what it says already is said once: a doubt with a banner of
+  // its own (a possible duplicate, a purchase to pick, fold's case for a
+  // hold), and a card asking who was paid — fold being unsure of who is
+  // what that question means.
+  const sureShown = c => {
+    const s = c.sure || {};
+    if (s.why === 'duplicate' || (s.why === 'hold' && c.why && c.why.hold) || (s.why === 'refund' && refundChoices(c).length)) return null;
+    if ((c.blockers || []).includes('payee')) return null;
+    return sureBand(c);
+  };
+  // what lies behind it, for the title on hover: the doubt, or the engine's
+  // number (cut, never rounded: 0.849 is not the 0.85 that would make it sure)
+  // A card that would make an account in Firefly says which — the name is
+  // what to check — rather than how sure fold is of the rest.
+  function sureWord(c, s) {
+    const why = c.sure && c.sure.why;
+    if (why === 'new-payee') return c.type === 'transfer' ? 'New account' : c.direction === 'in' ? 'New payer' : 'New payee';
+    if (why === 'new-account') return 'New account';
+    return s.word;
+  }
+  function sureDetail(c) {
+    const s = c.sure || {};
+    const doubt = {
+      duplicate: 'fold.money thinks it may be a duplicate alert',
+      refund: 'a refund, and which purchase it was for isn’t picked',
+      hold: 'fold thinks it may be worth holding back',
+      unsettled: 'fold couldn’t settle this one',
+      'new-payee': (c.direction === 'in' ? 'Someone who hasn’t paid you before' : 'Someone you haven’t paid before') + ' — sending it makes them in Firefly',
+      'new-account': 'An account of yours Firefly doesn’t have — sending it makes it there',
+    }[s.why];
+    const score = typeof s.score === 'number' ? 'fold’s confidence ' + (Math.floor(s.score * 100 + 1e-9) / 100).toFixed(2) : '';
+    return [doubt || (s.band === 'fairly' ? 'A good guess — worth a look before it goes' : 'A guess — check it before it goes'), score]
+      .filter(Boolean).join(' · ');
+  }
+  function sureMark(c) {
+    const s = sureShown(c);
+    if (!s) return null;
+    return h('div', { class: 'sure sure-' + c.sure.band, title: sureDetail(c) }, bars(s.lit), h('span', { text: sureWord(c, s) }));
+  }
 
   // ---- the kind of move -------------------------------------------------------------
   // Firefly's three types. A card offers the two its direction allows —
@@ -183,8 +249,9 @@
 
   function spoken(c) {
     const other = otherOf(c).name || (c.type === 'transfer' ? 'another account' : 'someone');
+    const s = sureShown(c);
     return `${TYPE_LABEL[c.type] || ''}: ${c.amount} ${c.direction === 'in' ? 'from' : 'to'} ${other}, ${c.day} ${c.clock}` +
-      (c.local ? ` ${c.local.place} time (${homeWhen(c)} in India)` : '');
+      (c.local ? ` ${c.local.place} time (${homeWhen(c)} in India)` : '') + (s ? '; ' + (sureWord(c, s) === s.word ? s.said : sureWord(c, s).toLowerCase()) : '');
   }
   // the same moment at home, for a card read where it was made: the day
   // only when it isn't the same day
@@ -269,6 +336,9 @@
         h('span', { text: g + '?' })));
     }
     hero.append(who);
+    // under who, the thing fold most often guesses
+    const sure = sureMark(c);
+    if (sure) hero.append(sure);
     scroll.append(hero);
 
     // What it was: the title and category push will send.
@@ -398,8 +468,7 @@
       navCount.hidden = !state.counts.review;
     }
     for (const b of document.querySelectorAll('.pile')) b.setAttribute('aria-selected', String(b.dataset.pile === state.pile));
-    const acct = accounts.find(a => String(a.id) === state.account);
-    $('#scope-label').textContent = (acct ? acct.short : 'All accounts') + (state.order === 'oldest' ? ' · oldest first' : '');
+    renderScope();
 
     const shown = state.cards.slice(0, 3);
     const keep = new Set(shown.map(c => c.uuid));
@@ -453,6 +522,57 @@
     renderUpNext();
     report();
   }
+
+  // The Show chip says what the deck shows — the account, and the order when
+  // it isn't the usual one — in whole words. When all of it won't fit, the
+  // default's name goes first ("All accounts" needs no saying), then the word
+  // "first"; a name is never cut. Its icon is the order as well: lines long
+  // to short for newest first, short to long for oldest first, the sureness
+  // bars for Surest first — so the order still shows when its words can't.
+  const ORDER_ICON = {
+    newest: '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5h14M6 10h8M8.5 15h3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>',
+    oldest: '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M8.5 5h3M6 10h8M3 15h14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>',
+  };
+  function orderIcon(o) {
+    let el;
+    if (o === 'surest') el = bars(3);
+    else { const t = document.createElement('template'); t.innerHTML = ORDER_ICON[o] || ORDER_ICON.newest; el = t.content.firstChild; }
+    el.dataset.order = o;
+    return el;
+  }
+  // a card Surest first leads with: one fold is sure of, that goes with a swipe
+  const leadsSurest = c => !!c.sure && c.sure.band === 'sure' && !(c.blockers || []).length;
+  function scopeLabels() {
+    const acct = accounts.find(a => String(a.id) === state.account);
+    const name = acct ? acct.short : 'All accounts';
+    const w = state.order === 'newest' ? '' : state.order;
+    if (!w) return [name];
+    if (!acct) return [name + ' · ' + w + ' first', w[0].toUpperCase() + w.slice(1) + ' first'];
+    return [name + ' · ' + w + ' first', name + ' · ' + w, name];
+  }
+  function renderScope() {
+    const labels = scopeLabels();
+    scopeBtn.setAttribute('aria-label', 'Show: ' + labels[0]);
+    scopeBtn.dataset.order = state.order;
+    const svg = scopeBtn.querySelector('svg');
+    if (svg && svg.dataset.order !== state.order) svg.replaceWith(orderIcon(state.order));
+    fitScope(labels);
+  }
+  // (a small phone drops the icon while the words say the order — see
+  // review.css — so each label is measured as it would show; and when even an
+  // account's bare name has no room beside the icon, the icon goes: the name
+  // is what was picked)
+  function fitScope(labels = scopeLabels()) {
+    const el = $('#scope-label');
+    const fits = () => el.scrollWidth <= el.clientWidth + 0.5;
+    for (const l of labels) {
+      el.textContent = l;
+      scopeBtn.classList.toggle('icon-off', state.order !== 'newest' && l.toLowerCase().includes(state.order));
+      if (fits()) return;
+    }
+    scopeBtn.classList.add('icon-off');
+  }
+  if (window.ResizeObserver) new ResizeObserver(() => fitScope()).observe(scopeBtn.parentElement);
 
   // The deck reports what it holds, for tests and anyone curious: cards
   // loaded, and decisions not yet settled with the server (waiting out the
@@ -559,9 +679,12 @@
     upnextEl.replaceChildren();
     for (const c of state.cards.slice(1, 8)) {
       const l = upNextLines(c);
-      upnextEl.append(h('li', {}, h('button', { type: 'button', onclick: () => bringToTop(c.uuid), 'aria-label': 'Review next: ' + spoken(c) },
+      // the bars by the day: where the sure ones end shows before you get there
+      const s = sureBand(c);
+      upnextEl.append(h('li', {}, h('button', { type: 'button', onclick: () => bringToTop(c.uuid), 'aria-label': 'Review next: ' + spoken(c) + (s && !sureShown(c) ? '; ' + s.said : '') },
         h('span', { class: 'u-who', text: l.head }), h('span', { class: 'u-amt num' + (c.type === 'deposit' ? ' is-in' : '') }, money(c.amount, c.type)),
-        h('span', { class: 'u-title' + (l.blocked ? ' u-attn' : ''), text: l.sub }), h('span', { class: 'u-day', text: c.day }))));
+        h('span', { class: 'u-title' + (l.blocked ? ' u-attn' : ''), text: l.sub }),
+        h('span', { class: 'u-day' + (s ? ' sure-' + c.sure.band : ''), title: s ? sureWord(c, s) : null }, s ? bars(s.lit) : null, c.day))));
     }
     if (!upnextEl.childNodes.length) upnextEl.append(h('li', { class: 'muted', text: 'Nothing else in this pile.' }));
   }
@@ -572,8 +695,13 @@
   }
 
   // ---- loading ----------------------------------------------------------------
+  // A load from the top (another pile, account or order; the deck asking
+  // again) takes over from one in flight, whose answer is then dropped: the
+  // deck shows what the chip says. A page more waits its turn.
+  let loadGen = 0;
   async function load(reset) {
-    if (state.loading) return;
+    if (state.loading && !reset) return;
+    const gen = ++loadGen;
     state.loading = true;
     if (reset) {
       state.cards = []; state.next = ''; state.loaded = false; state.error = '';
@@ -586,6 +714,7 @@
     if (!reset && state.next) q.set('after', state.next);
     try {
       const d = await api('deck?' + q.toString());
+      if (gen !== loadGen) return;
       // a decision not yet settled with the server may still be listed by it
       const skip = new Set(state.pending.filter(unsettled).map(p => p.card.uuid));
       const have = new Set(state.cards.map(c => c.uuid));
@@ -598,10 +727,29 @@
       state.loaded = true;
       state.error = '';
     } catch (e) {
+      if (gen !== loadGen) return;
       state.error = e.message;
     }
     state.loading = false;
     render();
+    resync();
+  }
+
+  // A card can move ahead of where the deck has read to — in Surest first,
+  // a correction makes fold surer of the card's siblings — and then the pages
+  // run out while the count still has it. So at the end of the hand (nothing
+  // left in it that can go: no cards, or only held ones, which come last),
+  // with more counted than in hand, the deck asks again from the top. Never
+  // sooner, so nothing moves under a card being read; and once more only if
+  // that found something.
+  async function resync() {
+    if (!state.loaded || state.loading || state.error || state.next || state.resynced) return;
+    if (state.cards.length >= (state.counts[state.pile] || 0)) return;
+    if (!state.cards.every(c => (c.blockers || []).includes('hold'))) return;
+    state.resynced = true;
+    const had = new Set(state.cards.map(c => c.uuid));
+    await load(true);
+    if (state.cards.some(c => !had.has(c.uuid))) state.resynced = false;
   }
 
   function maybePrefetch() {
@@ -611,6 +759,7 @@
   function switchPile(pile) {
     if (pile === state.pile) return;
     state.pile = pile;
+    state.resynced = false;
     const u = new URL(location.href);
     if (pile === 'later') u.searchParams.set('pile', 'later'); else u.searchParams.delete('pile');
     history.replaceState(null, '', u);
@@ -619,6 +768,7 @@
 
   function setScope(account, order) {
     state.account = account; state.order = order;
+    state.resynced = false;
     store.set('account', account); store.set('order', order);
     load(true);
   }
@@ -648,6 +798,7 @@
     }
     flyOut(c, kind === 'later' ? 'left' : kind === 'skip' ? 'down' : 'right', () => {
       state.cards.shift();
+      const note = sureRunEnds(c, state.cards[0]);
       const p = { card: c, kind, pile: state.pile, done: false, inflight: false, timer: null };
       state.pending.push(p);
       state.last = p;
@@ -658,16 +809,28 @@
         p.request = api('rows/' + c.uuid + '/later', { later: true })
           .then(() => { p.inflight = false; state.pending = state.pending.filter(x => x !== p); report(); },
                 e => failed(p, e));
-        toast('Saved for later · ' + short(c), { undo: () => undo(p) });
+        toast('Saved for later · ' + short(c), { undo: () => undo(p), note });
       } else {
         p.timer = setTimeout(() => run(p), UNDO_MS);
-        toast((kind === 'send' ? 'Sent · ' : 'Skipped · ') + short(c), { undo: () => undo(p), ms: UNDO_MS });
+        toast((kind === 'send' ? 'Sent · ' : 'Skipped · ') + short(c), { undo: () => undo(p), ms: UNDO_MS, note });
       }
       state.decided += 1; store.set('decided', state.decided);
       if (navigator.vibrate) navigator.vibrate(8);
       render();
       maybePrefetch();
+      resync();
     });
+  }
+
+  // In Surest first, the decision that takes the last card fold is sure of
+  // says so, and what the cards after it need: the moment the swiping
+  // should slow down. (Only when the next card is in hand — the pages come
+  // in order, so then no sure one is left behind it.)
+  function sureRunEnds(c, next) {
+    if (state.order !== 'surest' || !leadsSurest(c) || !next || leadsSurest(next)) return '';
+    const rest = (next.blockers || []).includes('hold') ? 'the rest are on hold.'
+      : (next.blockers || []).length ? 'the rest need something from you.' : 'the rest are worth a closer look.';
+    return 'That was the last sure one — ' + rest;
   }
 
   function short(c) {
@@ -1540,6 +1703,32 @@
   function openScope() {
     const list = h('div', { class: 'pick-list' });
     let account = state.account, order = state.order;
+    // The order first: three choices that never grow, then the accounts, a
+    // list that does — so on a phone the choice of how to work stays in view.
+    // Each with the icon the Show chip wears for it.
+    const orderRow = (o, label, hint) => {
+      const b = pickButton(label, hint, () => { order = o; apply(); }, state.order === o);
+      b.classList.add('pick-order');
+      b.prepend(orderIcon(o));
+      return b;
+    };
+    list.append(h('div', { class: 'pick-group', text: 'Order' }));
+    list.append(orderRow('newest', 'Newest first', ''));
+    list.append(orderRow('oldest', 'Oldest first', 'the way statements run'));
+    const surest = orderRow('surest', 'Surest first', '');
+    list.append(surest);
+    // how many of the sure ones lead it, once the server has counted (the
+    // same question the deck asks, one card long), less those already on
+    // their way; nothing is said until there is a number to say
+    const q = new URLSearchParams({ pile: state.pile, order: 'surest', limit: '1' });
+    if (state.account) q.set('account', state.account);
+    api('deck?' + q.toString()).then(d => {
+      if (!d.counts || typeof d.counts.sure !== 'number' || !surest.isConnected) return;
+      const going = state.pending.filter(p => unsettled(p) && p.pile === state.pile && leadsSurest(p.card)).length;
+      const n = Math.max(0, d.counts.sure - going);
+      const text = n ? 'starts with ' + group(n) + ' sure ' + (n === 1 ? 'one' : 'ones') : 'none sure right now';
+      surest.append(h('span', { class: 'pick-hint arrives', text, title: text }));
+    }).catch(() => {});
     list.append(h('div', { class: 'pick-group', text: state.pile === 'later' ? 'Account · saved for later' : 'Account · waiting' }));
     const opts = [{ id: '', short: 'All accounts' }].concat(accounts);
     const pa = state.perAccount;
@@ -1549,9 +1738,6 @@
       if (a.name && a.name !== a.short) b.title = a.name;
       list.append(b);
     }
-    list.append(h('div', { class: 'pick-group', text: 'Order' }));
-    list.append(pickButton('Newest first', '', () => { order = 'newest'; apply(); }, state.order === 'newest'));
-    list.append(pickButton('Oldest first', 'the way statements run', () => { order = 'oldest'; apply(); }, state.order === 'oldest'));
     function apply() { closeSheet(); setScope(account, order); }
     openSheet('Show', list);
   }
@@ -1560,7 +1746,9 @@
   function clearToasts() { toastsEl.replaceChildren(); }
   function toast(text, opts = {}) {
     clearToasts();
-    const t = h('div', { class: 'toast' + (opts.error ? ' toast-err' : '') }, h('span', { class: 'toast-text', text }));
+    const line = h('span', { class: 'toast-text', text });
+    const t = h('div', { class: 'toast' + (opts.error ? ' toast-err' : '') },
+      opts.note ? h('div', { class: 'toast-body' }, line, h('span', { class: 'toast-note', text: opts.note })) : line);
     if (opts.undo) t.append(h('button', { type: 'button', class: 'btn btn-sm btn-quiet', onclick: () => opts.undo(), text: 'Undo' }));
     const ms = opts.ms || (opts.error ? 6000 : 3500);
     if (opts.ms && !reduceMotion) {
