@@ -304,7 +304,10 @@ button.acct { background: none; border: 0; padding: 0; font: inherit; cursor: po
   .deck-head { gap: 8px; }
   .pile { padding: 0 10px; }
   .scope { padding: 0 11px; }
-  .scope svg { display: none; }
+  /* the icon goes where it says nothing the words don't (newest first, or a
+     label naming the order) and where it would cut a name; with only an
+     account's name left and room beside it, it is what still shows the order */
+  .scope[data-order="newest"] svg, .scope.icon-off svg { display: none; }
   .deck-actions { gap: 8px; }
   .deck-btn { font-size: 15px; gap: 6px; }
   .deck-btn.later { min-width: 0; padding: 0 14px; }

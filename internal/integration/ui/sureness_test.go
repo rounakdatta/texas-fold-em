@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -22,7 +23,7 @@ func (rh *reviewHarness) surestOrder(t *testing.T, query string) []string {
 	for i := 0; i < 50; i++ {
 		q := "order=surest&limit=2" + query
 		if after != "" {
-			q += "&after=" + after
+			q += "&after=" + url.QueryEscape(after)
 		}
 		d := rh.deck(t, q)
 		out = append(out, uuids(d.Cards)...)
@@ -83,22 +84,32 @@ func TestSurest_WithinABandTheDeckKeepsToTime(t *testing.T) {
 }
 
 func TestSurest_BandsFollowTheClassifiersOwnLines(t *testing.T) {
+	score := func(v float64) sql.NullFloat64 { return sql.NullFloat64{Float64: v, Valid: true} }
+	declined := sql.NullInt64{Int64: 4, Valid: true}
 	for _, tc := range []struct {
-		score sql.NullFloat64
+		facts sureFacts
 		band  string
 		why   string
 	}{
-		{sql.NullFloat64{Float64: 1, Valid: true}, sureYes, ""},
-		{sql.NullFloat64{Float64: 0.85, Valid: true}, sureYes, ""}, // the threshold it accepts at, unasked
-		{sql.NullFloat64{Float64: 0.849, Valid: true}, sureFairly, ""},
-		{sql.NullFloat64{Float64: 0.6, Valid: true}, sureFairly, ""},
-		{sql.NullFloat64{Float64: 0.599, Valid: true}, sureNot, ""},
-		{sql.NullFloat64{Float64: 0, Valid: true}, sureNot, sureUnscored}, // a declined card stores 0
-		{sql.NullFloat64{}, sureNot, sureUnscored},
+		{sureFacts{score: score(1)}, sureYes, ""},
+		{sureFacts{score: score(0.85)}, sureYes, ""}, // the threshold it accepts at, unasked
+		{sureFacts{score: score(0.849)}, sureFairly, ""},
+		{sureFacts{score: score(0.6)}, sureFairly, ""},
+		{sureFacts{score: score(0.599)}, sureNot, ""},
+		{sureFacts{score: score(0)}, sureNot, sureUnsettled}, // no engine at all stores 0
+		{sureFacts{}, sureNot, sureUnsettled},
+		// it declined: the model's confidence was in what it could say, not who
+		{sureFacts{score: score(0.9), tier: declined}, sureNot, sureUnsettled},
+		// it would make an account in Firefly: a person checks the name first
+		{sureFacts{score: score(0.95), newOther: true}, sureFairly, sureNewPayee},
+		{sureFacts{score: score(0.95), newOwn: true}, sureFairly, sureNewAccount},
+		{sureFacts{score: score(0.5), newOther: true}, sureNot, sureNewPayee},
+		// a person's choice outranks all of it
+		{sureFacts{score: score(0.9), tier: declined, chosen: true, newOther: true}, sureYes, sureChosen},
 	} {
-		s := sureness(reviewCard{}, tc.score, false)
+		s := sureness(reviewCard{}, tc.facts)
 		if s.Band != tc.band || s.Why != tc.why {
-			t.Errorf("score %v: %q (%q), want %q (%q)", tc.score, s.Band, s.Why, tc.band, tc.why)
+			t.Errorf("%+v: %q (%q), want %q (%q)", tc.facts, s.Band, s.Why, tc.band, tc.why)
 		}
 	}
 }
@@ -174,8 +185,10 @@ func TestSurest_ARowAddedFromAStatementIsSure(t *testing.T) {
 
 func TestSurest_PagesCoverEveryCardOnceEvenAsCardsAreDecided(t *testing.T) {
 	rh := newReviewHarness(t)
+	// timestamps as the live database writes them, a "+" and spaces in each
+	// (the cursor carries them)
 	for i, s := range []string{"0.9", "0.7", "0.95", "0.5", "0.88", "0.65", "0.3"} {
-		rh.stage(t, "c"+s, "ready_to_push", "Masala chai", 1000, "2025-12-2"+string(rune('1'+i))+"T07:00:00Z", conf(s))
+		rh.stage(t, "c"+s, "ready_to_push", "Masala chai", 1000, "2025-12-2"+string(rune('1'+i))+" 07:00:00 +0000 UTC", conf(s))
 	}
 	all := strings.Join(rh.surestOrder(t, ""), ",")
 	if all != "c0.88,c0.95,c0.9,c0.65,c0.7,c0.3,c0.5" {
@@ -184,7 +197,7 @@ func TestSurest_PagesCoverEveryCardOnceEvenAsCardsAreDecided(t *testing.T) {
 	// a card decided between pages must not move the rest
 	first := rh.deck(t, "order=surest&limit=2")
 	rh.post(t, "rows/"+first.Cards[0].UUID+"/later", `{"later":true}`)
-	second := rh.deck(t, "order=surest&limit=2&after="+first.Next)
+	second := rh.deck(t, "order=surest&limit=2&after="+url.QueryEscape(first.Next))
 	if got := strings.Join(uuids(second.Cards), ","); got != "c0.9,c0.65" {
 		t.Errorf("the page after a decision = %s, want the next two in order", got)
 	}
@@ -269,5 +282,95 @@ func TestSurest_PagesAskedAtOnceAgree(t *testing.T) {
 		if g := <-got; g != want {
 			t.Errorf("a page asked at the same time = %s, want %s", g, want)
 		}
+	}
+}
+
+// The classifier sends a card to a person, however sure it is, when sending
+// it would make an account in Firefly: the name is for a person to check.
+// Surest first must not lead with those.
+func TestSurest_ACardThatWouldMakeAnAccountIsForAPersonToCheck(t *testing.T) {
+	rh := newReviewHarness(t)
+	rh.stage(t, "new-payee", "needs_review", "Masala chai", 1000, "2025-12-25T07:00:00Z", conf("0.92"),
+		`UPDATE staged_fold_txns SET proposed_destination_account_id = NULL, proposed_destination_account_name = 'Tea Stall, Market Road' WHERE fold_uuid = ?`)
+	rh.stage(t, "new-card", "needs_review", "Masala chai", 1000, "2025-12-24T07:00:00Z", conf("0.95"),
+		`UPDATE staged_fold_txns SET proposed_source_account_id = NULL, proposed_source_account_name = 'Kestrel Travel Credit Card' WHERE fold_uuid = ?`)
+	rh.stage(t, "known-by-name", "ready_to_push", "Masala chai", 1000, "2025-12-23T07:00:00Z", conf("0.9"),
+		`UPDATE staged_fold_txns SET proposed_destination_account_id = NULL, proposed_destination_account_name = 'daily mart, market road' WHERE fold_uuid = ?`)
+	rh.stage(t, "fairly", "needs_review", "Masala chai", 1000, "2025-12-22T07:00:00Z", conf("0.7"))
+	got := map[string]string{}
+	for _, c := range rh.deck(t, "").Cards {
+		got[c.UUID] = c.Sure.Band + "/" + c.Sure.Why
+	}
+	for uuid, want := range map[string]string{
+		"new-payee":     "fairly/new-payee",
+		"new-card":      "fairly/new-account",
+		"known-by-name": "sure/", // named, but Firefly has it: push finds it
+		"fairly":        "fairly/",
+	} {
+		if got[uuid] != want {
+			t.Errorf("%s = %s, want %s", uuid, got[uuid], want)
+		}
+	}
+	if d := rh.deck(t, "order=surest&limit=1"); d.Counts.Sure == nil || *d.Counts.Sure != 1 {
+		t.Errorf("counts.sure = %v, want 1: only the payee Firefly has", d.Counts.Sure)
+	}
+	// once a person names who, it is theirs
+	rh.post(t, "rows/new-payee/edit", `{"payee":"Chai Corner, Market Road"}`)
+	if order := strings.Join(rh.surestOrder(t, ""), ","); order != "new-payee,known-by-name,new-card,fairly" {
+		t.Errorf("surest first = %s", order)
+	}
+}
+
+func TestSurest_ACardFoldDeclinedIsUnsureWhateverItsScore(t *testing.T) {
+	rh := newReviewHarness(t)
+	rh.stage(t, "declined", "needs_review", "Masala chai", 1000, "2025-12-25T07:00:00Z", conf("0.9"),
+		`UPDATE staged_fold_txns SET classifier_tier = 4, proposed_destination_account_id = NULL WHERE fold_uuid = ?`)
+	rh.stage(t, "blank", "ready_to_push", "___ from Chai Corner", 1000, "2025-12-21T07:00:00Z", conf("0.7"))
+	c := rh.deck(t, "").Cards[0]
+	if c.UUID != "declined" || c.Sure.Band != sureNot || c.Sure.Why != sureUnsettled {
+		t.Fatalf("declined = %s %+v, want unsure: fold couldn't settle who", c.UUID, c.Sure)
+	}
+	if order := strings.Join(rh.surestOrder(t, ""), ","); order != "blank,declined" {
+		t.Errorf("surest first = %s, want the declined card after one fold is fairly sure of", order)
+	}
+}
+
+// A card bill paid to the payee that shares the card's name reads as a
+// transfer to the card; any save writes that side back by name, and it lands
+// on the card itself. That is the same who, not a person's choice.
+func TestSurest_ASaveOnATwinOfYourCardIsNotAChoice(t *testing.T) {
+	rh := newReviewHarness(t)
+	mustExec(t, rh.db, `INSERT INTO firefly_accounts (firefly_id, name, type, active, raw_payload) VALUES (900, 'Tata Neu HDFC Bank Credit Card', 'expense', 1, '{}')`)
+	rh.stage(t, "bill", "needs_review", "Card bill", 100000, "2025-12-25T07:00:00Z", conf("0.5"),
+		`UPDATE staged_fold_txns SET proposed_source_account_id = 12, proposed_destination_account_id = 900 WHERE fold_uuid = ?`)
+	before := rh.deck(t, "").Cards[0]
+	if before.Type != "transfer" || before.Sure.Band != sureNot {
+		t.Fatalf("before = %s %+v", before.Type, before.Sure)
+	}
+	if code, a := rh.post(t, "rows/bill/edit", `{"title":"Tata Neu card bill"}`); code != 200 || a.Card == nil {
+		t.Fatalf("edit = %d %+v", code, a)
+	}
+	var saved sql.NullInt64
+	_ = rh.db.DB.QueryRow(`SELECT confirmed_destination_account_id FROM staged_fold_txns WHERE fold_uuid = 'bill'`).Scan(&saved)
+	after := rh.deck(t, "").Cards[0]
+	if after.Sure.Band != sureNot || after.Sure.Why == sureChosen {
+		t.Errorf("after a title edit (saved destination %v) = %+v, want still fold's 0.5 guess", saved, after.Sure)
+	}
+}
+
+// What a rank reads of the mirror is more than your own accounts: who someone
+// is decides a payee's place too.
+func TestSurest_AnAccountChangedInFireflyIsNoticed(t *testing.T) {
+	rh := newReviewHarness(t)
+	rh.stage(t, "card", "ready_to_push", "Masala chai", 1000, "2025-12-25T07:00:00Z", conf("0.95"))
+	rh.stage(t, "other", "needs_review", "Masala chai", 1000, "2025-12-21T07:00:00Z", conf("0.7"),
+		`UPDATE staged_fold_txns SET proposed_destination_account_id = 421 WHERE fold_uuid = ?`)
+	if got := strings.Join(rh.surestOrder(t, ""), ","); got != "card,other" {
+		t.Fatalf("before = %s", got)
+	}
+	// Firefly now has the payee as someone who pays you: not who a spend goes to
+	mustExec(t, rh.db, `UPDATE firefly_accounts SET type = 'revenue' WHERE firefly_id = 979`)
+	if got := strings.Join(rh.surestOrder(t, ""), ","); got != "other,card" {
+		t.Errorf("after = %s, want the card that can't go after the one that can", got)
 	}
 }

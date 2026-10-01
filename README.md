@@ -144,11 +144,13 @@ keyboard:
   fairly sure of, then its guesses; then the cards waiting on a word from you,
   surest first again; then what is on hold. Within each band the deck keeps to
   time, newest first, so a day's payments stay together. Sure means the
-  classifier would have accepted it unasked (confidence 0.85 or more), you
-  chose who was paid, or you added the row from a statement; a possible
-  duplicate, a refund with a purchase to pick or fold's own case for a hold is
-  never sure. Past the sure ones each card says how sure fold is — *Fairly
-  sure*, *Not sure* — and the send that takes the last sure one says so.
+  classifier would have accepted it unasked (confidence 0.85 or more, a card
+  it settled, naming only accounts Firefly has), you chose who was paid, or
+  you added the row from a statement. A card that would make an account in
+  Firefly is for you to check (*New payee*), and a possible duplicate, a
+  refund with a purchase to pick or fold's own case for a hold is never sure.
+  Past the sure ones each card says how sure fold is — *Fairly sure*, *Not
+  sure* — and the send that takes the last sure one says so.
 
 `/transactions` lists every transaction by status, with the editor behind each
 row: account, category, budget and tag fields are name autocompletes backed by

@@ -17,13 +17,18 @@ package ui
 // the deck keeps to time, newest first, so a day's payments stay together —
 // half of knowing what a payment was is what else happened that day.
 //
-//   - sure: a suggestion the classifier would have accepted unasked (at or
-//     above its own threshold), a card where a person chose who was paid, or
-//     a row a person added from a statement;
-//   - fairly: a good guess, worth a look before it goes;
-//   - unsure: a guess, no score at all, or a card that raises a doubt of its
-//     own — a possible duplicate alert, a refund whose purchase isn't picked,
-//     fold's case for holding it — which needs a decision fold can't make.
+//   - sure: a suggestion the classifier would have accepted unasked — by its
+//     own rules: confident (at or above its threshold), settled (not a card it
+//     declined), and naming only accounts Firefly has — or a card where a
+//     person chose who was paid, or a row a person added from a statement;
+//   - fairly: a good guess, worth a look before it goes — and any card that
+//     would make an account in Firefly (a new payee, an account of yours
+//     Firefly doesn't have), however sure fold is of the rest: the name is
+//     for a person to check, as the classifier itself asks;
+//   - unsure: a guess, a card fold couldn't settle, or one that raises a doubt
+//     of its own — a possible duplicate alert, a refund whose purchase isn't
+//     picked, fold's case for holding it — which needs a decision fold can't
+//     make.
 
 import (
 	"context"
@@ -49,12 +54,14 @@ const (
 
 // Why a card is in its band, when it isn't the engine's confidence alone.
 const (
-	sureChosen    = "chosen"    // a person chose who is on the other side
-	sureManual    = "manual"    // a person added it from a statement line
-	sureDuplicate = "duplicate" // fold.money flags it as a possible duplicate alert
-	sureRefund    = "refund"    // a refund whose purchase isn't picked
-	sureHold      = "hold"      // fold makes a case for holding it back
-	sureUnscored  = "unscored"  // the engine couldn't settle it
+	sureChosen     = "chosen"      // a person chose who is on the other side
+	sureManual     = "manual"      // a person added it from a statement line
+	sureDuplicate  = "duplicate"   // fold.money flags it as a possible duplicate alert
+	sureRefund     = "refund"      // a refund whose purchase isn't picked
+	sureHold       = "hold"        // fold makes a case for holding it back
+	sureUnsettled  = "unsettled"   // the engine declined it, or gave no score
+	sureNewPayee   = "new-payee"   // sending it makes the other side in Firefly
+	sureNewAccount = "new-account" // sending it makes one of your accounts in Firefly
 )
 
 // sureFairlyAt is where a guess becomes a good one: below it the model was
@@ -72,15 +79,44 @@ type cardSure struct {
 	Score *float64 `json:"score,omitempty"`
 }
 
+// sureFacts is what a card's sureness is made from, besides the card.
+type sureFacts struct {
+	score sql.NullFloat64 // the engine's confidence
+	tier  sql.NullInt64   // the classifier's tier that made the suggestion
+	// chosen: a person put someone other than fold's suggestion on the other
+	// side of the move.
+	chosen bool
+	// newOther, newOwn: a side names an account Firefly doesn't have, so
+	// sending the card makes one there — who was paid (or who paid), or one
+	// of your own.
+	newOther, newOwn bool
+}
+
 // sureness says how sure fold is of a card, from what the card says and how
 // it came to say it. A doubt the card raises comes first: whatever the score,
 // it needs a decision fold can't make. Then a person's choice; then the
-// engine's confidence, in bands.
-func sureness(c reviewCard, score sql.NullFloat64, chosen bool) cardSure {
+// classifier's own rules for what it may accept unasked; then its
+// confidence, in bands.
+func sureness(c reviewCard, f sureFacts) cardSure {
 	var s cardSure
-	if score.Valid && score.Float64 > 0 {
-		v := score.Float64
+	if f.score.Valid && f.score.Float64 > 0 {
+		v := f.score.Float64
 		s.Score = &v
+	}
+	band := sureNot
+	switch {
+	case s.Score == nil:
+	case *s.Score >= classifier.DefaultConfidenceThreshold:
+		band = sureYes
+	case *s.Score >= sureFairlyAt:
+		band = sureFairly
+	}
+	// a new name is for a person to check, however sure fold is of the rest
+	atMostFairly := func(b string) string {
+		if b == sureYes {
+			return sureFairly
+		}
+		return b
 	}
 	switch {
 	case c.Duplicate:
@@ -91,18 +127,47 @@ func sureness(c reviewCard, score sql.NullFloat64, chosen bool) cardSure {
 		s.Band, s.Why = sureNot, sureHold
 	case c.Manual:
 		s.Band, s.Why = sureYes, sureManual
-	case chosen:
+	case f.chosen:
 		s.Band, s.Why = sureYes, sureChosen
-	case s.Score == nil:
-		s.Band, s.Why = sureNot, sureUnscored
-	case *s.Score >= classifier.DefaultConfidenceThreshold:
-		s.Band = sureYes
-	case *s.Score >= sureFairlyAt:
-		s.Band = sureFairly
+	case s.Score == nil || (f.tier.Valid && f.tier.Int64 == int64(classifier.TierHumanReview)):
+		// a declined card keeps the model's confidence in what it could say,
+		// which is not who
+		s.Band, s.Why = sureNot, sureUnsettled
+	case f.newOther:
+		s.Band, s.Why = atMostFairly(band), sureNewPayee
+	case f.newOwn:
+		s.Band, s.Why = atMostFairly(band), sureNewAccount
 	default:
-		s.Band = sureNot
+		s.Band = band
 	}
 	return s
+}
+
+// sureFacts reads what sureness needs from a row, beyond the card built from it.
+func (h *Handler) sureFacts(ctx context.Context, r cardRow, c reviewCard) sureFacts {
+	f := sureFacts{score: r.score, tier: r.tier}
+	if c.Manual {
+		return f // every field a person's
+	}
+	f.chosen = h.choseOther(ctx, r)
+	other, own := storedSide{r.dstID, r.dstName}, storedSide{r.srcID, r.srcName}
+	if r.typ == "INCOMING" {
+		other, own = own, other
+	}
+	f.newOther, f.newOwn = h.isNewAccount(ctx, other), h.isNewAccount(ctx, own)
+	return f
+}
+
+// isNewAccount: a side named, not linked, with no account of that name in
+// Firefly — push would make one.
+func (h *Handler) isNewAccount(ctx context.Context, s storedSide) bool {
+	name := strings.TrimSpace(s.name)
+	if s.id.Valid || name == "" || name == "(no name)" {
+		return false
+	}
+	var n int
+	_ = h.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM firefly_accounts WHERE LOWER(name) = LOWER(?)`, name).Scan(&n)
+	return n == 0
 }
 
 // sureRank is a card's place in Surest first, smallest first: the cards that
@@ -138,6 +203,11 @@ type storedSide struct {
 // showed, so a saved side that is the suggestion is a suggestion kept (a
 // title rewritten, an amount taken from the statement), not a choice made:
 // fold's own confidence still speaks for it.
+//
+// Sides compare by name. Two accounts with one name are one who to a person,
+// and a save writes a side back by its name, which can land on the other of
+// the two: a card bill paid to the payee that shares the card's name is saved
+// as the card itself; a payer saved from its payee twin as itself.
 func (h *Handler) choseOther(ctx context.Context, r cardRow) bool {
 	saved, suggested := r.savedDst, r.suggestedDst
 	if r.typ == "INCOMING" {
@@ -146,17 +216,13 @@ func (h *Handler) choseOther(ctx context.Context, r cardRow) bool {
 	if !saved.id.Valid && strings.TrimSpace(saved.name) == "" {
 		return false // never saved: the suggestion stands
 	}
-	if saved.id.Valid && suggested.id.Valid {
-		return saved.id.Int64 != suggested.id.Int64
-	}
-	// A name on one side or both: the same account when the names agree (a
-	// payee fold suggested by name may have been made in Firefly since).
 	a, okA := h.storedName(ctx, saved)
 	b, okB := h.storedName(ctx, suggested)
-	if !okA || !okB {
-		return false // an account nobody can name: the suggestion's word stands
+	if okA && okB {
+		return !strings.EqualFold(a, b)
 	}
-	return !strings.EqualFold(a, b)
+	// an account no copy of Firefly can name: only two ids can tell
+	return saved.id.Valid && suggested.id.Valid && saved.id.Int64 != suggested.id.Int64
 }
 
 // storedName is a stored side's name; ok is false for an id no copy of
@@ -227,7 +293,7 @@ func (h *Handler) surestPage(ctx context.Context, where []string, args []any, af
 		return nil, "", 0, err
 	}
 	now := time.Now()
-	mirror := h.assetsMirror(ctx)
+	mirror := h.accountsMirror(ctx)
 	built := map[string]reviewCard{}
 	ranked := make([]rankedRow, len(raw))
 	sure := 0
@@ -274,9 +340,11 @@ func (h *Handler) surestPage(ctx context.Context, where []string, args []any, af
 // the live box, so a second for a backlog of a thousand, on every page. A
 // rank is kept against the row it was made from — a fingerprint of every
 // column the card reads, so an edit, a re-suggestion or a hold makes it anew
-// — and against your own accounts as the mirror had them (which of them
-// exist, by what names, open or closed), which decide whether a side is
-// yours. An hour is the longest a rank lives, for what neither notices.
+// — and against the accounts mirror as it was read (every account's name,
+// kind and whether it is open: what decides whether a side is yours, who
+// someone is, and whether Firefly has them yet). An hour is the longest a
+// rank lives, for what neither notices: a name only the ledger's history
+// knows.
 type sureMemo struct {
 	mu     sync.Mutex
 	mirror string
@@ -328,21 +396,20 @@ func rowPrint(r cardRow) uint64 {
 	return f.Sum64()
 }
 
-// assetsMirror is the part of the accounts mirror a rank reads: your own
-// accounts, their names, and whether each is open.
-func (h *Handler) assetsMirror(ctx context.Context) string {
-	rows, err := h.db.QueryContext(ctx, `SELECT firefly_id, name, active FROM firefly_accounts WHERE type = 'asset' ORDER BY firefly_id`)
+// accountsMirror fingerprints the accounts mirror as a rank reads it.
+func (h *Handler) accountsMirror(ctx context.Context) string {
+	rows, err := h.db.QueryContext(ctx, `SELECT firefly_id, name, type, active FROM firefly_accounts ORDER BY firefly_id`)
 	if err != nil {
 		return ""
 	}
 	defer rows.Close()
-	var b strings.Builder
+	f := fnv.New64a()
 	for rows.Next() {
 		var id, active int64
-		var name string
-		if rows.Scan(&id, &name, &active) == nil {
-			fmt.Fprintf(&b, "%d\x1f%s\x1f%d\x1e", id, name, active)
+		var name, kind string
+		if rows.Scan(&id, &name, &kind, &active) == nil {
+			fmt.Fprintf(f, "%d\x1f%s\x1f%s\x1f%d\x1e", id, name, kind, active)
 		}
 	}
-	return b.String()
+	return strconv.FormatUint(f.Sum64(), 16)
 }

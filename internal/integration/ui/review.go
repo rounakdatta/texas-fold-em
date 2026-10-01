@@ -203,7 +203,7 @@ var cardSelect = `
 	       -- how sure fold is (sureness.go): the engine's confidence, and both
 	       -- sides as saved and as suggested, to tell a person's pick of who
 	       -- from a suggestion kept
-	       s.classifier_confidence,
+	       s.classifier_confidence, s.classifier_tier,
 	       s.confirmed_source_account_id, COALESCE(s.confirmed_source_account_name, ''),
 	       s.proposed_source_account_id, COALESCE(s.proposed_source_account_name, ''),
 	       s.confirmed_destination_account_id, COALESCE(s.confirmed_destination_account_name, ''),
@@ -248,6 +248,7 @@ type cardRow struct {
 	evidenceJSON                       string
 	titleIsEngines, touched            bool
 	score                              sql.NullFloat64
+	tier                               sql.NullInt64
 	savedSrc, suggestedSrc             storedSide
 	savedDst, suggestedDst             storedSide
 }
@@ -258,7 +259,7 @@ func scanCardRow(rows interface{ Scan(...any) error }) (cardRow, error) {
 		&r.fxPaise, &r.fxCur, &r.title, &r.category, &r.tagsJSON, &r.srcID, &r.srcName, &r.dstID, &r.dstName,
 		&r.merchant, &r.notes, &r.dup, &r.hold, &r.later, &r.isRefund, &r.refundRef, &r.confType, &r.propType,
 		&r.holdBy, &r.resuggestReason, &r.resuggestChanged, &r.evidenceJSON, &r.titleIsEngines, &r.touched,
-		&r.score, &r.savedSrc.id, &r.savedSrc.name, &r.suggestedSrc.id, &r.suggestedSrc.name,
+		&r.score, &r.tier, &r.savedSrc.id, &r.savedSrc.name, &r.suggestedSrc.id, &r.suggestedSrc.name,
 		&r.savedDst.id, &r.savedDst.name, &r.suggestedDst.id, &r.suggestedDst.name)
 	return r, err
 }
@@ -369,7 +370,7 @@ func (h *Handler) buildCard(ctx context.Context, r cardRow) reviewCard {
 	}
 	c.EditURL = txnPath(c.UUID) + "?back=" + url.QueryEscape(pathDeck)
 	c.Why = engineWhy(r, c)
-	c.Sure = sureness(c, r.score, !c.Manual && h.choseOther(ctx, r))
+	c.Sure = sureness(c, h.sureFacts(ctx, r, c))
 	return c
 }
 

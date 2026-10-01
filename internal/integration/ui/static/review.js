@@ -138,13 +138,23 @@
   };
   // what lies behind it, for the title on hover: the doubt, or the engine's
   // number (cut, never rounded: 0.849 is not the 0.85 that would make it sure)
+  // A card that would make an account in Firefly says which — the name is
+  // what to check — rather than how sure fold is of the rest.
+  function sureWord(c, s) {
+    const why = c.sure && c.sure.why;
+    if (why === 'new-payee') return c.type === 'transfer' ? 'New account' : c.direction === 'in' ? 'New payer' : 'New payee';
+    if (why === 'new-account') return 'New account';
+    return s.word;
+  }
   function sureDetail(c) {
     const s = c.sure || {};
     const doubt = {
       duplicate: 'fold.money thinks it may be a duplicate alert',
       refund: 'a refund, and which purchase it was for isn’t picked',
       hold: 'fold thinks it may be worth holding back',
-      unscored: 'fold couldn’t settle this one',
+      unsettled: 'fold couldn’t settle this one',
+      'new-payee': (c.direction === 'in' ? 'Someone who hasn’t paid you before' : 'Someone you haven’t paid before') + ' — sending it makes them in Firefly',
+      'new-account': 'An account of yours Firefly doesn’t have — sending it makes it there',
     }[s.why];
     const score = typeof s.score === 'number' ? 'fold’s confidence ' + (Math.floor(s.score * 100 + 1e-9) / 100).toFixed(2) : '';
     return [doubt || (s.band === 'fairly' ? 'A good guess — worth a look before it goes' : 'A guess — check it before it goes'), score]
@@ -153,7 +163,7 @@
   function sureMark(c) {
     const s = sureShown(c);
     if (!s) return null;
-    return h('div', { class: 'sure sure-' + c.sure.band, title: sureDetail(c) }, bars(s.lit), h('span', { text: s.word }));
+    return h('div', { class: 'sure sure-' + c.sure.band, title: sureDetail(c) }, bars(s.lit), h('span', { text: sureWord(c, s) }));
   }
 
   // ---- the kind of move -------------------------------------------------------------
@@ -241,7 +251,7 @@
     const other = otherOf(c).name || (c.type === 'transfer' ? 'another account' : 'someone');
     const s = sureShown(c);
     return `${TYPE_LABEL[c.type] || ''}: ${c.amount} ${c.direction === 'in' ? 'from' : 'to'} ${other}, ${c.day} ${c.clock}` +
-      (c.local ? ` ${c.local.place} time (${homeWhen(c)} in India)` : '') + (s ? '; ' + s.said : '');
+      (c.local ? ` ${c.local.place} time (${homeWhen(c)} in India)` : '') + (s ? '; ' + (sureWord(c, s) === s.word ? s.said : sureWord(c, s).toLowerCase()) : '');
   }
   // the same moment at home, for a card read where it was made: the day
   // only when it isn't the same day
@@ -543,16 +553,24 @@
   function renderScope() {
     const labels = scopeLabels();
     scopeBtn.setAttribute('aria-label', 'Show: ' + labels[0]);
+    scopeBtn.dataset.order = state.order;
     const svg = scopeBtn.querySelector('svg');
     if (svg && svg.dataset.order !== state.order) svg.replaceWith(orderIcon(state.order));
     fitScope(labels);
   }
+  // (a small phone drops the icon while the words say the order — see
+  // review.css — so each label is measured as it would show; and when even an
+  // account's bare name has no room beside the icon, the icon goes: the name
+  // is what was picked)
   function fitScope(labels = scopeLabels()) {
     const el = $('#scope-label');
+    const fits = () => el.scrollWidth <= el.clientWidth + 0.5;
     for (const l of labels) {
       el.textContent = l;
-      if (el.scrollWidth <= el.clientWidth + 0.5) return;
+      scopeBtn.classList.toggle('icon-off', state.order !== 'newest' && l.toLowerCase().includes(state.order));
+      if (fits()) return;
     }
+    scopeBtn.classList.add('icon-off');
   }
   if (window.ResizeObserver) new ResizeObserver(() => fitScope()).observe(scopeBtn.parentElement);
 
@@ -666,7 +684,7 @@
       upnextEl.append(h('li', {}, h('button', { type: 'button', onclick: () => bringToTop(c.uuid), 'aria-label': 'Review next: ' + spoken(c) + (s && !sureShown(c) ? '; ' + s.said : '') },
         h('span', { class: 'u-who', text: l.head }), h('span', { class: 'u-amt num' + (c.type === 'deposit' ? ' is-in' : '') }, money(c.amount, c.type)),
         h('span', { class: 'u-title' + (l.blocked ? ' u-attn' : ''), text: l.sub }),
-        h('span', { class: 'u-day' + (s ? ' sure-' + c.sure.band : ''), title: s ? s.word : null }, s ? bars(s.lit) : null, c.day))));
+        h('span', { class: 'u-day' + (s ? ' sure-' + c.sure.band : ''), title: s ? sureWord(c, s) : null }, s ? bars(s.lit) : null, c.day))));
     }
     if (!upnextEl.childNodes.length) upnextEl.append(h('li', { class: 'muted', text: 'Nothing else in this pile.' }));
   }
@@ -702,7 +720,6 @@
       for (const p of state.pending) if (unsettled(p) && (p.kind === 'send' || p.kind === 'skip')) state.counts[p.pile] = Math.max(0, (state.counts[p.pile] || 0) - 1);
       state.loaded = true;
       state.error = '';
-      if (d.cards.length) state.resynced = false;
     } catch (e) {
       state.error = e.message;
     }
@@ -713,13 +730,19 @@
 
   // A card can move ahead of where the deck has read to — in Surest first,
   // a correction makes fold surer of the card's siblings — and then the pages
-  // run out while the count still has it. Run out like that, the deck asks
-  // again from the top, once.
-  function resync() {
-    if (!state.loaded || state.loading || state.error || state.cards.length || state.next || state.resynced) return;
-    if ((state.counts[state.pile] || 0) <= 0) return;
+  // run out while the count still has it. So at the end of the hand (nothing
+  // left in it that can go: no cards, or only held ones, which come last),
+  // with more counted than in hand, the deck asks again from the top. Never
+  // sooner, so nothing moves under a card being read; and once more only if
+  // that found something.
+  async function resync() {
+    if (!state.loaded || state.loading || state.error || state.next || state.resynced) return;
+    if (state.cards.length >= (state.counts[state.pile] || 0)) return;
+    if (!state.cards.every(c => (c.blockers || []).includes('hold'))) return;
     state.resynced = true;
-    load(true);
+    const had = new Set(state.cards.map(c => c.uuid));
+    await load(true);
+    if (state.cards.some(c => !had.has(c.uuid))) state.resynced = false;
   }
 
   function maybePrefetch() {
@@ -729,6 +752,7 @@
   function switchPile(pile) {
     if (pile === state.pile) return;
     state.pile = pile;
+    state.resynced = false;
     const u = new URL(location.href);
     if (pile === 'later') u.searchParams.set('pile', 'later'); else u.searchParams.delete('pile');
     history.replaceState(null, '', u);
@@ -737,6 +761,7 @@
 
   function setScope(account, order) {
     state.account = account; state.order = order;
+    state.resynced = false;
     store.set('account', account); store.set('order', order);
     load(true);
   }
