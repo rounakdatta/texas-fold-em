@@ -191,10 +191,29 @@ button.acct { background: none; border: 0; padding: 0; font: inherit; cursor: po
 .skeleton .sk { background: var(--surface-2); border-radius: 8px; }
 .skeleton .sk { animation: sk 1.4s ease-in-out infinite; }
 @keyframes sk { 50% { opacity: .55; } }
-.deck-state { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
+/* What the deck says when it holds no card sits in the middle of the deck's
+   room — and when it is taller than that room (a phone on its side, a small
+   phone, a month done with two ways on), it scrolls inside it from its top.
+   Centred without that, it spilt over the head of the deck and covered the
+   Show chip, the one way out. (Auto margins centre it only while it fits.) */
+.deck-state { position: absolute; inset: 0; display: flex; overflow-y: auto; overscroll-behavior: contain; }
+.deck-state > .empty { margin: auto; }
 .deck-state .empty { padding: 20px; max-width: 400px; }
 .deck-state .empty p { margin: 6px 0 0; font-size: 15.5px; }
 .deck-state .actions { display: flex; flex-direction: column; gap: 10px; align-items: center; margin-top: 20px; }
+.deck-state .actions .btn { margin-top: 0; } /* (the gap spaces them: two ways on read as a pair) */
+@media (max-height: 620px) {
+  .deck-state .empty { padding: 8px 20px 12px; }
+  .deck-state .empty-art { width: 96px; }
+  .deck-state .empty h2 { font-size: 22px; margin-top: 8px; }
+  .deck-state .actions { margin-top: 14px; }
+}
+/* little height: the cowboy steps aside for the words and the ways on, which
+   go side by side where there is width for them */
+@media (max-height: 460px) {
+  .deck-state .empty-art { display: none; }
+  .deck-state .actions { flex-flow: row wrap; justify-content: center; }
+}
 
 /* ---- action bar (thumb height) -------------------------------------------- */
 .deck-actions {
@@ -241,6 +260,39 @@ button.acct { background: none; border: 0; padding: 0; font: inherit; cursor: po
 
 /* the Show sheet's orders, each with the icon the chip wears for it */
 .pick-order > svg { width: 16px; height: 16px; flex: none; color: var(--fg-2); }
+
+/* The Show chip narrowed to a month and an account, with no room for both
+   on one line: one above the other, smaller, rather than either one cut. */
+.scope.is-stacked { height: auto; min-height: 38px; padding-top: 3px; padding-bottom: 3px; }
+.scope.is-stacked svg { display: none; }
+.scope.is-stacked #scope-label { display: flex; flex-direction: column; align-items: flex-start; font-size: 12.5px; line-height: 1.2; }
+.scope-line { max-width: 100%; white-space: nowrap; }
+
+/* The Show sheet's months: a year's calendar. Every month keeps its place;
+   one with nothing waiting is quiet and can't be pressed; the month shown is
+   the one in fold blue. A half-year to a row where the sheet is wide. */
+.months { display: flex; flex-direction: column; gap: 10px; padding: 2px 8px 4px; }
+.month-years { display: flex; gap: 2px; padding: 3px; border-radius: 11px; background: var(--surface-3); align-self: flex-start; max-width: 100%; overflow-x: auto; scrollbar-width: none; }
+.month-years::-webkit-scrollbar { display: none; }
+.month-year { flex: none; height: 30px; padding: 0 11px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--fg-2); font: inherit; font-size: 14px; font-weight: 600; white-space: nowrap; cursor: pointer; }
+.month-year[aria-selected="true"] { background: var(--surface); color: var(--fg); box-shadow: var(--shadow-sm); }
+.month-year .n { margin-left: 5px; color: var(--fg-3); font-weight: 500; }
+.month-years.no-counts .n { display: none; }
+.month-year-only { font-size: 14px; font-weight: 600; color: var(--fg-2); }
+.month-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+@media (min-width: 600px) { .month-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); } }
+.month-cell {
+  display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 1px;
+  min-width: 0; min-height: 50px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--surface); color: var(--fg); font: inherit; text-align: left; cursor: pointer;
+}
+.month-cell .m-name { font-size: 15px; font-weight: 600; }
+.month-cell .m-n { min-height: 1.25em; font-size: 12.5px; color: var(--fg-3); }
+.month-cell:hover { border-color: var(--line-2); background: var(--surface-2); }
+.month-cell[aria-current="true"] { border-color: var(--accent); background: var(--accent-soft); }
+.month-cell[aria-current="true"] .m-n { color: var(--accent-2); }
+.month-cell:disabled { border-color: transparent; background: transparent; color: var(--fg-3); cursor: default; }
+.month-cell:disabled .m-name { font-weight: 500; }
 
 /* ---- side panel (desktop) --------------------------------------------------- */
 .deck-side { display: none; }

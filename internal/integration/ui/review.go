@@ -97,12 +97,19 @@ type reviewCard struct {
 	Clock       string `json:"clock"`                // "1:21 pm" (IST, like every statement — or see Local)
 	// Local: made on a trip, Day and Clock are where it was made, and this
 	// says where — and when that was at home.
-	Local    *cardLocal `json:"local,omitempty"`
-	From     party      `json:"from"`
-	To       party      `json:"to"`
-	Title    string     `json:"title"`
-	Category string     `json:"category"`
-	Tags     []string   `json:"tags,omitempty"`
+	Local *cardLocal `json:"local,omitempty"`
+	// Month is the month Day falls in ("2026-09"): the deck's month filter
+	// goes by the day the card shows (months.go).
+	Month string `json:"month,omitempty"`
+	// AccountIDs are the accounts the Show sheet counts this card under —
+	// either side's, as the account filter reads them — so the deck can
+	// keep those counts true as cards leave the pile and come back.
+	AccountIDs []int64  `json:"accountIds,omitempty"`
+	From       party    `json:"from"`
+	To         party    `json:"to"`
+	Title      string   `json:"title"`
+	Category   string   `json:"category"`
+	Tags       []string `json:"tags,omitempty"`
 	// Note is the human's own note from fold.money, or a reconciliation hint
 	// on a row added from a statement line — context in their own words.
 	Note string `json:"note,omitempty"`
@@ -278,9 +285,17 @@ func (h *Handler) buildCard(ctx context.Context, r cardRow) reviewCard {
 	if t, ok := parseDBTime(r.tsStr); ok {
 		c.When = t.UTC().Format(time.RFC3339)
 		c.Day, c.Clock = spokenDay(t, time.Now()), spokenClock(t)
+		var zone *time.Location
 		if l, ok := h.whereabouts(ctx).For(r.uuid); ok {
 			c.Local = &cardLocal{Place: l.Place, Zone: l.Zone.String(), HomeDay: c.Day, HomeClock: c.Clock}
 			c.Day, c.Clock = spokenDayIn(t, time.Now(), l.Zone), spokenClockIn(t, l.Zone)
+			zone = l.Zone
+		}
+		c.Month = cardMonth(t, zone)
+	}
+	for _, id := range []sql.NullInt64{r.srcID, r.dstID} {
+		if id.Valid && (len(c.AccountIDs) == 0 || c.AccountIDs[0] != id.Int64) {
+			c.AccountIDs = append(c.AccountIDs, id.Int64)
 		}
 	}
 	if r.category.Valid {
@@ -781,19 +796,24 @@ func spokenClockIn(t time.Time, loc *time.Location) string {
 // deckResponse is GET /api/deck.
 type deckResponse struct {
 	Cards []reviewCard `json:"cards"`
-	// Counts are for the whole pile under the current account filter, not
-	// just this page.
+	// Counts are for the whole pile under the current filters (an account,
+	// a month), not just this page.
 	Counts struct {
 		Review int `json:"review"`
 		Later  int `json:"later"`
 		// On the first page only: this pile across every account, and per
 		// account (a transfer between two of them counts for both), for
-		// the account picker.
+		// the account picker — in the month picked, if one is.
 		All       *int           `json:"all,omitempty"`
 		ByAccount map[string]int `json:"byAccount,omitempty"`
+		// On the first page only: this pile in every month, and per month
+		// ("2026-09"), for the month picker — on the account picked, if one
+		// is. Each picker counts under the other's choice, never its own.
+		AllMonths *int           `json:"allMonths,omitempty"`
+		ByMonth   map[string]int `json:"byMonth,omitempty"`
 		// On the first page of Surest first only: how many cards in this
-		// pile, under the account filter, can go with a swipe and are ones
-		// fold is sure of.
+		// pile, under the filters, can go with a swipe and are ones fold is
+		// sure of.
 		Sure *int `json:"sure,omitempty"`
 	} `json:"counts"`
 	// Next is the cursor for the following page; empty on the last one.
@@ -823,26 +843,47 @@ func (h *Handler) handleDeck(w http.ResponseWriter, r *http.Request) {
 	if limit > 200 {
 		limit = 200
 	}
-
-	where := []string{reviewable}
-	var args []any
+	first := q.Get("after") == ""
+	pileClause := "s.later_at IS NULL"
 	if pile == "later" {
-		where = append(where, "s.later_at IS NOT NULL")
-	} else {
-		where = append(where, "s.later_at IS NULL")
+		pileClause = "s.later_at IS NOT NULL"
 	}
-	if id, err := strconv.ParseInt(strings.TrimSpace(q.Get("account")), 10, 64); err == nil {
-		where = append(where, "("+effectiveAccountIDSQL("source")+" = ? OR "+effectiveAccountIDSQL("destination")+" = ?)")
-		args = append(args, id, id)
+
+	// The filters, each a clause with its arguments. The deck takes both;
+	// each picker's counts take only the other one, so a picker says how
+	// many each of its choices would show.
+	var acctWhere, monthWhere []string
+	var acctArgs, monthArgs []any
+	account, acctErr := strconv.ParseInt(strings.TrimSpace(q.Get("account")), 10, 64)
+	hasAccount := acctErr == nil
+	if hasAccount {
+		acctWhere = []string{"(" + effectiveAccountIDSQL("source") + " = ? OR " + effectiveAccountIDSQL("destination") + " = ?)"}
+		acctArgs = []any{account, account}
 	}
-	accountWhere, accountArgs := where[2:], append([]any(nil), args...)
+	month := parseMonth(q.Get("month"))
+	var months []monthRow
+	if month != "" || first {
+		var err error
+		if months, err = h.waitingMonths(r.Context()); err != nil {
+			h.apiError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+	if month != "" {
+		clause, arg := monthClause(months, month)
+		monthWhere, monthArgs = []string{clause}, []any{arg}
+	}
+	scope := append(append([]string(nil), acctWhere...), monthWhere...)
+	scopeArgs := append(append([]any(nil), acctArgs...), monthArgs...)
+	where := append([]string{reviewable, pileClause}, scope...)
+	args := append([]any(nil), scopeArgs...)
 
 	var resp deckResponse
 	var err error
 	if order == orderSurest {
 		var sure int
 		resp.Cards, resp.Next, sure, err = h.surestPage(r.Context(), where, args, q.Get("after"), limit)
-		if q.Get("after") == "" {
+		if first {
 			resp.Counts.Sure = &sure
 		}
 	} else {
@@ -859,32 +900,36 @@ func (h *Handler) handleDeck(w http.ResponseWriter, r *http.Request) {
 		resp.Cards = []reviewCard{}
 	}
 
-	count := func(extra string) int {
-		clauses := append([]string{reviewable, extra}, accountWhere...)
+	count := func(pileClause string) int {
+		clauses := append([]string{reviewable, pileClause}, scope...)
 		var n int
-		_ = h.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM staged_fold_txns s WHERE `+strings.Join(clauses, " AND "), accountArgs...).Scan(&n)
+		_ = h.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM staged_fold_txns s WHERE `+strings.Join(clauses, " AND "), scopeArgs...).Scan(&n)
 		return n
 	}
 	resp.Counts.Review = count("s.later_at IS NULL")
 	resp.Counts.Later = count("s.later_at IS NOT NULL")
-	if q.Get("after") == "" {
-		all, by := h.pileCounts(r.Context(), where[1])
+	if first {
+		all, by := h.pileCounts(r.Context(), pileClause, monthWhere, monthArgs)
 		resp.Counts.All, resp.Counts.ByAccount = &all, by
+		allMonths, byMonth := monthCounts(months, pile == "later", account, hasAccount)
+		resp.Counts.AllMonths, resp.Counts.ByMonth = &allMonths, byMonth
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
 // pileCounts counts one pile (pileClause picks it) across every account, and
-// per account on either side of the transaction.
-func (h *Handler) pileCounts(ctx context.Context, pileClause string) (int, map[string]int) {
+// per account on either side of the transaction — of the rows the extra
+// clauses (the month filter) leave.
+func (h *Handler) pileCounts(ctx context.Context, pileClause string, extra []string, extraArgs []any) (int, map[string]int) {
+	filter := strings.Join(append([]string{reviewable, pileClause}, extra...), " AND ")
 	var all int
-	_ = h.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM staged_fold_txns s WHERE `+reviewable+` AND `+pileClause).Scan(&all)
+	_ = h.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM staged_fold_txns s WHERE `+filter, extraArgs...).Scan(&all)
 	by := map[string]int{}
 	rows, err := h.db.QueryContext(ctx, `SELECT acct, COUNT(DISTINCT fold_uuid) FROM (
-		SELECT s.fold_uuid, `+effectiveAccountIDSQL("source")+` AS acct FROM staged_fold_txns s WHERE `+reviewable+` AND `+pileClause+`
+		SELECT s.fold_uuid, `+effectiveAccountIDSQL("source")+` AS acct FROM staged_fold_txns s WHERE `+filter+`
 		UNION ALL
-		SELECT s.fold_uuid, `+effectiveAccountIDSQL("destination")+` AS acct FROM staged_fold_txns s WHERE `+reviewable+` AND `+pileClause+`
-	) WHERE acct IS NOT NULL GROUP BY acct`)
+		SELECT s.fold_uuid, `+effectiveAccountIDSQL("destination")+` AS acct FROM staged_fold_txns s WHERE `+filter+`
+	) WHERE acct IS NOT NULL GROUP BY acct`, append(append([]any(nil), extraArgs...), extraArgs...)...)
 	if err != nil {
 		return all, by
 	}

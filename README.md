@@ -137,8 +137,15 @@ keyboard:
   the merchant one tap away, the name on the alert offered as the payee.
 - **Hold** a row that must never be sent, with a reason; its next step
   becomes *Skip it*. Skips can be undone, and restored from the list.
-- **Work one account at a time**, with a count of what waits on each, newest
-  or oldest first (the order a statement runs in) — or surest first.
+- **Work a month at a time, or one account — or one account's month.** *Show*
+  holds a calendar of the months with cards waiting, a year at a time, and
+  the accounts, each with its count (counted under the other choice, so every
+  number is what that choice would show). When a month is done the deck names
+  the next one — *On to August* — or shows them all again. A month holds the
+  cards whose day is in it, the day the card shows: a trip's payments go by
+  where they were made, so dinner at 8:30 pm on 31 August in New York is
+  August's, though it was 1 September at home. Newest or oldest first (the
+  order a statement runs in) — or surest first.
 - **Surest first clears a backlog at the pace of a swipe.** The cards that go
   with one swipe and that fold is sure of come first, then the ones it is
   fairly sure of, then its guesses; then the cards waiting on a word from you,
