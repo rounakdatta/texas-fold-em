@@ -839,16 +839,29 @@
   // it again would count it twice. (Rare and cheap: one card's page.)
   let countsAsked = 0, scopeGen = 0;
   async function refreshCounts() {
-    const ask = ++countsAsked, gen = scopeGen;
+    const ask = ++countsAsked, gen = scopeGen, seen = toggled;
     const q = new URLSearchParams({ pile: state.pile, limit: '1' });
     if (state.account) q.set('account', state.account);
     if (state.month) q.set('month', state.month);
     try {
       const d = await api('deck?' + q.toString());
       if (ask !== countsAsked || gen !== scopeGen) return; // a newer ask, or the deck shows something else now
+      // a Later or Move back written since the question went may be missing
+      // from the answer: ask again once every one of them has settled
+      if (toggling || toggled !== seen) { if (toggling) recountWhenSettled = true; else refreshCounts(); return; }
       adoptCounts(d.counts);
       render();
+      resync(); // (the counts may hold a card the hand doesn't: a row synced since)
     } catch (_) { /* the counts stay as they were */ }
+  }
+  // Later and Move back are written at once, so counts that come back while
+  // one is on its way may or may not have it; refreshCounts waits them out.
+  let toggling = 0, toggled = 0, recountWhenSettled = false;
+  function toggleWrite(request) {
+    toggling++; toggled++;
+    const settled = () => { if (--toggling === 0 && recountWhenSettled) { recountWhenSettled = false; refreshCounts(); } };
+    request.then(settled, settled);
+    return request;
   }
   // has an edit (or the server) moved a card to another account or day?
   const movedCard = (a, b) => a.month !== b.month || String(a.accountIds || []) !== String(b.accountIds || []);
@@ -954,7 +967,7 @@
       if (kind === 'later') {
         tally(c, 'later', 1);
         p.done = true; p.inflight = true;
-        p.request = api('rows/' + c.uuid + '/later', { later: true })
+        p.request = toggleWrite(api('rows/' + c.uuid + '/later', { later: true }))
           .then(() => { p.inflight = false; state.pending = state.pending.filter(x => x !== p); report(); },
                 e => failed(p, e));
         toast('Saved for later · ' + short(c), { undo: () => undo(p), note });
@@ -1036,7 +1049,7 @@
       p.done = true;
     } else if (p.kind === 'later') {
       // after the Later request, never racing it
-      Promise.resolve(p.request).catch(() => {}).then(() => api('rows/' + p.card.uuid + '/later', { later: false }))
+      Promise.resolve(p.request).catch(() => {}).then(() => toggleWrite(api('rows/' + p.card.uuid + '/later', { later: false })))
         .catch(e => toast(e.message, { error: true }));
       tally(p.card, 'later', -1);
     } else {
@@ -1858,7 +1871,7 @@
   async function moveBack(c) {
     c = state.cards.find(x => x.uuid === c.uuid) || c; // (as it is now: an edit may have landed since More opened)
     try {
-      await api('rows/' + c.uuid + '/later', { later: false });
+      await toggleWrite(api('rows/' + c.uuid + '/later', { later: false }));
       state.cards = state.cards.filter(x => x.uuid !== c.uuid);
       tally(c, 'later', -1);
       tally(c, 'review', 1);
