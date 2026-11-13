@@ -105,6 +105,9 @@ type Handler struct {
 // whereabouts is where the owner was for each foreign payment (review.go
 // reads a trip's payments at their own time).
 func (h *Handler) whereabouts(ctx context.Context) *whereabouts.Timeline {
+	if tl, ok := ctx.Value(whereKey{}).(*whereabouts.Timeline); ok {
+		return tl
+	}
 	if h.cls != nil {
 		return h.cls.Whereabouts(ctx)
 	}
@@ -119,6 +122,19 @@ func (h *Handler) whereabouts(ctx context.Context) *whereabouts.Timeline {
 	}
 	h.where, h.whereAt = tl, time.Now()
 	return tl
+}
+
+// whereKey holds one reading of where the trips were, for a whole request
+// (withWhereabouts).
+type whereKey struct{}
+
+// withWhereabouts pins one reading of the trips for everything a request
+// does: a deck page decides a card's month while picking the month's cards
+// and again while building each card, and the reading is renewed every
+// minute — two readings either side of a renewal could put a card in a
+// month its card doesn't say.
+func (h *Handler) withWhereabouts(ctx context.Context) context.Context {
+	return context.WithValue(ctx, whereKey{}, h.whereabouts(ctx))
 }
 
 // SetFireflyPublicURL sets the user-facing firefly base used to link
