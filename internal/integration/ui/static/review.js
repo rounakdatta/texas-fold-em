@@ -769,8 +769,9 @@
     }
     if (!upnextEl.childNodes.length) {
       const acct = accounts.find(a => String(a.id) === state.account);
-      const where = state.month && state.pile === 'review' ? 'in ' + monthName(state.month) + (acct ? ' on ' + acct.short : '') : 'in this pile';
-      upnextEl.append(h('li', { class: 'muted', text: 'Nothing else ' + where + '.' }));
+      const where = [state.month && 'in ' + monthName(state.month), acct && 'on ' + acct.short].filter(Boolean).join(' ');
+      const text = state.pile === 'later' ? 'Nothing else saved for later' + (where ? ' ' + where : '') : 'Nothing else ' + (where || 'in this pile');
+      upnextEl.append(h('li', { class: 'muted', text: text + '.' }));
     }
   }
 
@@ -807,15 +808,7 @@
       for (const c of d.cards) if (!skip.has(c.uuid) && !have.has(c.uuid)) state.cards.push(c);
       if (state.cards.length) state.held = true;
       state.next = d.next || '';
-      // the pickers' counts come with a first page — told by its totals,
-      // which come even when they are 0 (an empty map is no counts left
-      // over from the last view: it is none)
-      const pickers = typeof d.counts.all === 'number';
-      if (pickers) state.perAccount = { all: d.counts.all, by: d.counts.byAccount || {} };
-      if (typeof d.counts.allMonths === 'number') state.perMonth = { all: d.counts.allMonths, by: d.counts.byMonth || {} };
-      state.counts = d.counts;
-      // …and isn't in its counts yet
-      for (const p of state.pending) if (unsettled(p) && (p.kind === 'send' || p.kind === 'skip')) tally(p.card, p.pile, -1, pickers);
+      adoptCounts(d.counts);
       state.loaded = true;
       state.error = '';
     } catch (e) {
@@ -826,6 +819,39 @@
     render();
     resync();
   }
+
+  // The server's counts, as the deck takes them: the pile's with every page,
+  // the pickers' with a first page — told by its totals, which come even when
+  // they are 0 (an empty map is none, not the last view's numbers) — less
+  // what the deck decided that the server doesn't know yet: a send or skip
+  // still in its undo window may still be counted.
+  function adoptCounts(counts) {
+    const pickers = typeof counts.all === 'number';
+    if (pickers) state.perAccount = { all: counts.all, by: counts.byAccount || {} };
+    if (typeof counts.allMonths === 'number') state.perMonth = { all: counts.allMonths, by: counts.byMonth || {} };
+    state.counts = counts;
+    for (const p of state.pending) if (unsettled(p) && (p.kind === 'send' || p.kind === 'skip')) tally(p.card, p.pile, -1, pickers);
+  }
+
+  // After an edit moves a card to another account or day, the counts are
+  // asked for again rather than moved by hand: a page that arrived while the
+  // edit was on its way may have counted the card moved already, and moving
+  // it again would count it twice. (Rare and cheap: one card's page.)
+  let countsAsked = 0, scopeGen = 0;
+  async function refreshCounts() {
+    const ask = ++countsAsked, gen = scopeGen;
+    const q = new URLSearchParams({ pile: state.pile, limit: '1' });
+    if (state.account) q.set('account', state.account);
+    if (state.month) q.set('month', state.month);
+    try {
+      const d = await api('deck?' + q.toString());
+      if (ask !== countsAsked || gen !== scopeGen) return; // a newer ask, or the deck shows something else now
+      adoptCounts(d.counts);
+      render();
+    } catch (_) { /* the counts stay as they were */ }
+  }
+  // has an edit (or the server) moved a card to another account or day?
+  const movedCard = (a, b) => a.month !== b.month || String(a.accountIds || []) !== String(b.accountIds || []);
 
   // A card can move ahead of where the deck has read to — in Surest first,
   // a correction makes fold surer of the card's siblings — and then the pages
@@ -851,7 +877,7 @@
   function switchPile(pile) {
     if (pile === state.pile) return;
     state.pile = pile;
-    state.resynced = false; state.held = false;
+    state.resynced = false; state.held = false; scopeGen++;
     const u = new URL(location.href);
     if (pile === 'later') u.searchParams.set('pile', 'later'); else u.searchParams.delete('pile');
     history.replaceState(null, '', u);
@@ -863,7 +889,7 @@
   // link opens the deck as it was.
   function setScope(change) {
     Object.assign(state, change);
-    state.resynced = false; state.held = false;
+    state.resynced = false; state.held = false; scopeGen++;
     store.set('account', state.account); store.set('order', state.order); store.set('month', state.month);
     const u = new URL(location.href);
     for (const k of ['account', 'month']) if (state[k]) u.searchParams.set(k, state[k]); else u.searchParams.delete(k);
@@ -878,7 +904,8 @@
   const inScope = c => onAccount(c) && inMonth(c);
 
   // where a card went back to, when the deck has moved on: "To review, in August"
-  const backIn = (pile, c) => (pile === 'later' ? 'Later' : 'To review') + (c.month && !inMonth(c) ? ', in ' + monthName(c.month) : '');
+  const backIn = (pile, c) => (pile === 'later' ? 'Later' : 'To review') + (c.month && !inMonth(c) ? ', in ' + monthName(c.month) : '') +
+    (!onAccount(c) && ownOf(c).name ? ', on ' + ownOf(c).name : '');
 
   // A card leaving a pile (d = -1) or coming back to it (+1) moves every
   // count that holds it, so no number on screen disagrees with another: the
@@ -985,15 +1012,18 @@
     c._v = String(Date.now());
     if (p.kind === 'later') tally(p.card, 'later', -1);
     tally(p.card, p.pile, 1);
+    // (the card the server sends back may have moved since it was counted —
+    // a re-suggestion, an edit that landed late: the counts are asked again)
+    if (c !== p.card && movedCard(p.card, c)) refreshCounts();
     // it comes back to the top of its pile, saying why — if the deck still
     // shows that pile, month and account; if it moved on, the toast says
     // where the card went back to, and the deck keeps what it shows
-    const here = p.pile === state.pile && inScope(p.card);
+    const here = p.pile === state.pile && inScope(c);
     if (here) {
       state.cards = state.cards.filter(x => x.uuid !== c.uuid);
       state.cards.unshift(c);
     }
-    toast(here ? e.message : short(c) + ' is back in ' + backIn(p.pile, p.card) + ' — ' + e.message, { error: true });
+    toast(here ? e.message : short(c) + ' is back in ' + backIn(p.pile, c) + ' — ' + e.message, { error: true });
     render();
   }
 
@@ -1201,14 +1231,9 @@
     const refocus = ae && ae.closest && ae.closest('.type-seg') && (ae.closest('.card') || {}).dataset?.uuid === fresh.uuid;
     const i = state.cards.findIndex(x => x.uuid === fresh.uuid);
     if (i >= 0) {
-      // An edit can move a card to another account (or another day): the
-      // counts that held it let go of it, and the ones that hold it now
-      // take it — what the server would count if asked again.
-      const old = state.cards[i];
-      if (old.month !== fresh.month || String(old.accountIds || []) !== String(fresh.accountIds || [])) {
-        tally(old, state.pile, -1);
-        tally(fresh, state.pile, 1);
-      }
+      // an edit can move a card to another account (or another day): the
+      // counts are asked for again (see refreshCounts)
+      if (movedCard(state.cards[i], fresh)) refreshCounts();
       state.cards[i] = fresh;
     }
     render();
@@ -1831,6 +1856,7 @@
   }
 
   async function moveBack(c) {
+    c = state.cards.find(x => x.uuid === c.uuid) || c; // (as it is now: an edit may have landed since More opened)
     try {
       await api('rows/' + c.uuid + '/later', { later: false });
       state.cards = state.cards.filter(x => x.uuid !== c.uuid);
