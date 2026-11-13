@@ -143,8 +143,8 @@ keyboard:
   number is what that choice would show). When a month is done the deck names
   the next one — *On to August* — or shows them all again. A month holds the
   cards whose day is in it, the day the card shows: a trip's payments go by
-  where they were made, so dinner at 8:30 pm on 31 August in New York is
-  August's, though it was 1 September at home. Newest or oldest first (the
+  where they were made, so dinner at 7:30 pm on 31 January in New York is
+  January's, though it was 1 February at home. Newest or oldest first (the
   order a statement runs in) — or surest first.
 - **Surest first clears a backlog at the pace of a swipe.** The cards that go
   with one swipe and that fold is sure of come first, then the ones it is

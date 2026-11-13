@@ -5,8 +5,8 @@ package ui
 //
 // A card belongs to the month its day falls in, the day the card shows:
 // where the payment was made, on a trip, and at home (IST) otherwise. So a
-// dinner at 8:30 pm on 31 August in New York — 6 am on 1 September at home —
-// is August's, because its card says 31 Aug. A month never holds a card
+// dinner at 7:30 pm on 31 January in New York — 6 am on 1 February at home —
+// is January's, because its card says 31 Jan. A month never holds a card
 // dated outside it.
 //
 // That is why months are worked out here and not in SQL: a trip's day needs

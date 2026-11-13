@@ -804,13 +804,16 @@ type deckResponse struct {
 		// On the first page only: this pile across every account, and per
 		// account (a transfer between two of them counts for both), for
 		// the account picker — in the month picked, if one is.
-		All       *int           `json:"all,omitempty"`
-		ByAccount map[string]int `json:"byAccount,omitempty"`
+		All *int `json:"all,omitempty"`
+		// (never left out when empty: a deck that hears nothing keeps the
+		// last view's counts, and offers what has nothing in it; later
+		// pages send null)
+		ByAccount map[string]int `json:"byAccount"`
 		// On the first page only: this pile in every month, and per month
 		// ("2026-09"), for the month picker — on the account picked, if one
 		// is. Each picker counts under the other's choice, never its own.
 		AllMonths *int           `json:"allMonths,omitempty"`
-		ByMonth   map[string]int `json:"byMonth,omitempty"`
+		ByMonth   map[string]int `json:"byMonth"`
 		// On the first page of Surest first only: how many cards in this
 		// pile, under the filters, can go with a swipe and are ones fold is
 		// sure of.
@@ -830,6 +833,7 @@ const (
 )
 
 func (h *Handler) handleDeck(w http.ResponseWriter, r *http.Request) {
+	ctx := h.withWhereabouts(r.Context()) // one reading of the trips for the whole page
 	q := r.URL.Query()
 	pile := q.Get("pile")
 	if pile != "later" {
@@ -864,7 +868,7 @@ func (h *Handler) handleDeck(w http.ResponseWriter, r *http.Request) {
 	var months []monthRow
 	if month != "" || first {
 		var err error
-		if months, err = h.waitingMonths(r.Context()); err != nil {
+		if months, err = h.waitingMonths(ctx); err != nil {
 			h.apiError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -882,19 +886,19 @@ func (h *Handler) handleDeck(w http.ResponseWriter, r *http.Request) {
 	var err error
 	if order == orderSurest {
 		var sure int
-		resp.Cards, resp.Next, sure, err = h.surestPage(r.Context(), where, args, q.Get("after"), limit)
+		resp.Cards, resp.Next, sure, err = h.surestPage(ctx, where, args, q.Get("after"), limit)
 		if first {
 			resp.Counts.Sure = &sure
 		}
 	} else {
-		resp.Cards, resp.Next, err = h.timelinePage(r.Context(), where, args, q.Get("after"), limit, order == orderOldest)
+		resp.Cards, resp.Next, err = h.timelinePage(ctx, where, args, q.Get("after"), limit, order == orderOldest)
 	}
 	if err != nil {
 		h.apiError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	for i := range resp.Cards {
-		h.fillRefundOptions(r.Context(), &resp.Cards[i])
+		h.fillRefundOptions(ctx, &resp.Cards[i])
 	}
 	if resp.Cards == nil {
 		resp.Cards = []reviewCard{}
@@ -903,13 +907,13 @@ func (h *Handler) handleDeck(w http.ResponseWriter, r *http.Request) {
 	count := func(pileClause string) int {
 		clauses := append([]string{reviewable, pileClause}, scope...)
 		var n int
-		_ = h.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM staged_fold_txns s WHERE `+strings.Join(clauses, " AND "), scopeArgs...).Scan(&n)
+		_ = h.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM staged_fold_txns s WHERE `+strings.Join(clauses, " AND "), scopeArgs...).Scan(&n)
 		return n
 	}
 	resp.Counts.Review = count("s.later_at IS NULL")
 	resp.Counts.Later = count("s.later_at IS NOT NULL")
 	if first {
-		all, by := h.pileCounts(r.Context(), pileClause, monthWhere, monthArgs)
+		all, by := h.pileCounts(ctx, pileClause, monthWhere, monthArgs)
 		resp.Counts.All, resp.Counts.ByAccount = &all, by
 		allMonths, byMonth := monthCounts(months, pile == "later", account, hasAccount)
 		resp.Counts.AllMonths, resp.Counts.ByMonth = &allMonths, byMonth

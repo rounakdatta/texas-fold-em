@@ -699,6 +699,9 @@
     const month = state.month && monthName(state.month);
     const next = state.month && nextMonth();
     const elsewhere = state.month && acct && state.perAccount ? state.perAccount.all : 0; // this month, on the other accounts
+    // (swiped to Later, they aren't decided: a month "done" says so, once —
+    // the Later tab above already counts them)
+    const laterNote = !state.counts.later ? '' : (state.counts.later === 1 ? 'One is' : group(state.counts.later) + ' are') + ' saved for later. ';
     let title, line;
     if (state.pile === 'later') {
       title = 'Nothing saved for later' + (month ? ' in ' + month : '');
@@ -708,12 +711,12 @@
       // a month done, and the next step named: the month after it, in the
       // order the deck runs, or every month at once
       title = monthDone(month, acct);
-      line = monthName(next.key) + ' has ' + (next.n === 1 ? 'one more' : group(next.n) + ' more') + ' waiting.';
+      line = laterNote + monthName(next.key) + ' has ' + (next.n === 1 ? 'one more' : group(next.n) + ' more') + ' waiting.';
       actions.append(btn('On to ' + monthName(next.key), () => setScope({ month: next.key })),
         btn('Show all months', () => setScope({ month: '' }), true));
     } else if (elsewhere) {
       title = monthDone(month, acct);
-      line = (elsewhere === 1 ? 'One more waits' : group(elsewhere) + ' more wait') + ' on your other accounts.';
+      line = laterNote + (elsewhere === 1 ? 'One more waits' : group(elsewhere) + ' more wait') + ' on your other accounts.';
       actions.append(btn('Show all accounts', () => setScope({ account: '' })));
     } else if (acct) {
       title = 'Nothing to review on ' + acct.short;
@@ -764,7 +767,11 @@
         h('span', { class: 'u-title' + (l.blocked ? ' u-attn' : ''), text: l.sub }),
         h('span', { class: 'u-day' + (s ? ' sure-' + c.sure.band : ''), title: s ? sureWord(c, s) : null }, s ? bars(s.lit) : null, c.day))));
     }
-    if (!upnextEl.childNodes.length) upnextEl.append(h('li', { class: 'muted', text: 'Nothing else ' + (state.month && state.pile === 'review' ? 'in ' + monthName(state.month) : 'in this pile') + '.' }));
+    if (!upnextEl.childNodes.length) {
+      const acct = accounts.find(a => String(a.id) === state.account);
+      const where = state.month && state.pile === 'review' ? 'in ' + monthName(state.month) + (acct ? ' on ' + acct.short : '') : 'in this pile';
+      upnextEl.append(h('li', { class: 'muted', text: 'Nothing else ' + where + '.' }));
+    }
   }
 
   function bringToTop(uuid) {
@@ -800,10 +807,12 @@
       for (const c of d.cards) if (!skip.has(c.uuid) && !have.has(c.uuid)) state.cards.push(c);
       if (state.cards.length) state.held = true;
       state.next = d.next || '';
-      // the pickers' counts come with a first page
-      const pickers = !!d.counts.byAccount;
-      if (d.counts.byAccount) state.perAccount = { all: d.counts.all || 0, by: d.counts.byAccount };
-      if (d.counts.byMonth) state.perMonth = { all: d.counts.allMonths || 0, by: d.counts.byMonth };
+      // the pickers' counts come with a first page — told by its totals,
+      // which come even when they are 0 (an empty map is no counts left
+      // over from the last view: it is none)
+      const pickers = typeof d.counts.all === 'number';
+      if (pickers) state.perAccount = { all: d.counts.all, by: d.counts.byAccount || {} };
+      if (typeof d.counts.allMonths === 'number') state.perMonth = { all: d.counts.allMonths, by: d.counts.byMonth || {} };
       state.counts = d.counts;
       // …and isn't in its counts yet
       for (const p of state.pending) if (unsettled(p) && (p.kind === 'send' || p.kind === 'skip')) tally(p.card, p.pile, -1, pickers);
@@ -867,6 +876,9 @@
   const onAccount = c => !state.account || (c.accountIds || []).some(id => String(id) === state.account);
   const inMonth = c => !state.month || c.month === state.month;
   const inScope = c => onAccount(c) && inMonth(c);
+
+  // where a card went back to, when the deck has moved on: "To review, in August"
+  const backIn = (pile, c) => (pile === 'later' ? 'Later' : 'To review') + (c.month && !inMonth(c) ? ', in ' + monthName(c.month) : '');
 
   // A card leaving a pile (d = -1) or coming back to it (+1) moves every
   // count that holds it, so no number on screen disagrees with another: the
@@ -973,11 +985,15 @@
     c._v = String(Date.now());
     if (p.kind === 'later') tally(p.card, 'later', -1);
     tally(p.card, p.pile, 1);
-    if (p.pile === state.pile) {
+    // it comes back to the top of its pile, saying why — if the deck still
+    // shows that pile, month and account; if it moved on, the toast says
+    // where the card went back to, and the deck keeps what it shows
+    const here = p.pile === state.pile && inScope(p.card);
+    if (here) {
       state.cards = state.cards.filter(x => x.uuid !== c.uuid);
       state.cards.unshift(c);
     }
-    toast(e.message, { error: true });
+    toast(here ? e.message : short(c) + ' is back in ' + backIn(p.pile, p.card) + ' — ' + e.message, { error: true });
     render();
   }
 
@@ -1005,7 +1021,7 @@
     // back where it was, and the deck stays on what it shows)
     if (p.pile !== state.pile || !inScope(p.card)) {
       render();
-      toast('Undone — it’s back in ' + (p.pile === 'later' ? 'Later' : 'To review') + (p.card.month && !inMonth(p.card) ? ', in ' + monthName(p.card.month) : ''));
+      toast('Undone — it’s back in ' + backIn(p.pile, p.card));
       return;
     }
     state.cards = state.cards.filter(x => x.uuid !== p.card.uuid);
@@ -1184,7 +1200,17 @@
     const ae = document.activeElement;
     const refocus = ae && ae.closest && ae.closest('.type-seg') && (ae.closest('.card') || {}).dataset?.uuid === fresh.uuid;
     const i = state.cards.findIndex(x => x.uuid === fresh.uuid);
-    if (i >= 0) state.cards[i] = fresh;
+    if (i >= 0) {
+      // An edit can move a card to another account (or another day): the
+      // counts that held it let go of it, and the ones that hold it now
+      // take it — what the server would count if asked again.
+      const old = state.cards[i];
+      if (old.month !== fresh.month || String(old.accountIds || []) !== String(fresh.accountIds || [])) {
+        tally(old, state.pile, -1);
+        tally(fresh, state.pile, 1);
+      }
+      state.cards[i] = fresh;
+    }
     render();
     if (refocus) {
       const b = (nodes.get(fresh.uuid) || document).querySelector('.type-opt[aria-pressed="true"]');
