@@ -57,10 +57,15 @@ type FoldClient struct {
 
 // NewFoldClient returns a client with sensible timeouts. Callers can swap
 // HTTP for a stubbed transport in tests.
+//
+// Each call gets a connection of its own. A pooled one that died in a network
+// stall would take the retry too, queued behind the request it abandoned.
 func NewFoldClient(baseURL string, timeout time.Duration) *FoldClient {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.DisableKeepAlives = true
 	return &FoldClient{
 		BaseURL: strings.TrimRight(baseURL, "/"),
-		HTTP:    &http.Client{Timeout: timeout},
+		HTTP:    &http.Client{Timeout: timeout, Transport: tr},
 		UA:      "texas-fold-em/1.0 (+https://github.com/rounakdatta/texas-fold-em)",
 	}
 }

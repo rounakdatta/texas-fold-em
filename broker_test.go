@@ -476,8 +476,9 @@ func TestBroker_KeepWarm_RefreshGetsTheClientsWholeTimeout(t *testing.T) {
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go b.KeepWarm(ctx, 10*time.Millisecond)
+	done := make(chan struct{})
+	go func() { b.KeepWarm(ctx, 10*time.Millisecond); close(done) }()
+	defer func() { cancel(); <-done }()
 
 	select {
 	case d := <-left:
@@ -535,44 +536,79 @@ func rotatingFold(t *testing.T, late func(n int64) time.Duration) *httptest.Serv
 	return srv
 }
 
-// The 21 Nov 2026 failure, end to end: fold sits on the answer to a refresh
-// for longer than the client waits. Giving up spends the chain; waiting keeps it.
+// rotatingBroker is a seeded broker in front of rotatingFold. The seed is
+// call 1; the answer to call 2 comes after late2.
+func rotatingBroker(t *testing.T, timeout, late2 time.Duration) *Broker {
+	t.Helper()
+	srv := rotatingFold(t, func(n int64) time.Duration {
+		if n == 2 {
+			return late2
+		}
+		return 0
+	})
+	store, err := OpenStore(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := NewBroker(store, NewFoldClient(srv.URL, timeout), slog.New(slog.NewTextHandler(io.Discard, nil)), 5*time.Minute)
+	if _, err := b.Init(context.Background(), makeJWT("u"), "dh"); err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// eventually polls cond for up to 5s.
+func eventually(cond func() bool) bool {
+	for end := time.Now().Add(5 * time.Second); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		if cond() {
+			return true
+		}
+	}
+	return false
+}
+
+// The 21 Nov 2026 failure, end to end: fold sits on its answer to keep-warm's
+// refresh for longer than the client waits. Giving up spends the chain;
+// waiting the answer out keeps it.
 func TestBroker_KeepWarm_LateAnswer(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		timeout  time.Duration
-		rejected bool
-	}{
-		{"abandoned, the retry presents a spent token", 100 * time.Millisecond, true},
-		{"waited out, the chain lives", 2 * time.Second, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			// Call 1 is the seed; call 2, keep-warm's first refresh, is answered late.
-			srv := rotatingFold(t, func(n int64) time.Duration {
-				if n == 2 {
-					return 300 * time.Millisecond
-				}
-				return 0
-			})
-			store, err := OpenStore(filepath.Join(t.TempDir(), "state.json"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			b := NewBroker(store, NewFoldClient(srv.URL, tc.timeout), slog.New(slog.NewTextHandler(io.Discard, nil)), 5*time.Minute)
-			if _, err := b.Init(context.Background(), makeJWT("u"), "dh"); err != nil {
-				t.Fatal(err)
-			}
+	t.Run("abandoned, the retry presents a spent token", func(t *testing.T) {
+		b := rotatingBroker(t, 150*time.Millisecond, time.Second)
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() { b.KeepWarm(ctx, 10*time.Millisecond); close(done) }()
+		defer func() { cancel(); <-done }()
+		if !eventually(func() bool { return b.store.Get().Rejected() }) {
+			t.Fatal("the chain survived a retry with a spent token; the stub no longer models fold")
+		}
+	})
+	t.Run("waited out, the chain lives", func(t *testing.T) {
+		b := rotatingBroker(t, 3*time.Second, 300*time.Millisecond)
+		seed := b.store.Get().AccessToken
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() { b.KeepWarm(ctx, 10*time.Millisecond); close(done) }()
+		defer func() { cancel(); <-done }()
+		if !eventually(func() bool { s := b.store.Get(); return s.AccessToken != seed || s.Rejected() }) {
+			t.Fatal("keep-warm never refreshed")
+		}
+		if b.store.Get().Rejected() {
+			t.Fatal("the chain was lost although the late answer was waited out")
+		}
+	})
+}
 
-			ctx, cancel := context.WithCancel(context.Background())
-			done := make(chan struct{})
-			go func() { b.KeepWarm(ctx, 10*time.Millisecond); close(done) }()
-			time.Sleep(time.Second)
-			cancel()
-			<-done
+// A caller that stops waiting (a /token or sync deadline) must not abandon the
+// refresh it started: fold has spent the old token by the time it answers.
+func TestBroker_Token_CallerDeadlineDoesNotAbandonARefresh(t *testing.T) {
+	b := rotatingBroker(t, 3*time.Second, 300*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, _ = b.Token(ctx) // gives up long before fold answers
 
-			if got := b.store.Get().Rejected(); got != tc.rejected {
-				t.Fatalf("rejected = %v, want %v", got, tc.rejected)
-			}
-		})
+	if _, err := b.Token(context.Background()); err != nil {
+		t.Fatalf("the next Token failed: %v", err)
+	}
+	if b.store.Get().Rejected() {
+		t.Fatal("the chain was lost when a caller stopped waiting")
 	}
 }
