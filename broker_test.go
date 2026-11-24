@@ -445,3 +445,170 @@ func TestBroker_Status(t *testing.T) {
 		t.Fatal("ExpiresAt/UpdatedAt should be populated after Init")
 	}
 }
+
+// roundTripFunc lets a test watch each request on its way to fold.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// A keep-warm refresh must get the fold client's whole timeout. A shorter
+// deadline of KeepWarm's own (it was 20s) abandons a refresh that fold may
+// already have answered, and the retry then presents a spent token.
+func TestBroker_KeepWarm_RefreshGetsTheClientsWholeTimeout(t *testing.T) {
+	stub := newStubFold(t)
+	stub.accessLife = 30 * time.Second // inside the lead at once: the first tick refreshes
+	defer stub.Close()
+	b := newTestBroker(t, stub, 5*time.Minute)
+	if _, err := b.Init(context.Background(), makeJWT("u"), "dh"); err != nil {
+		t.Fatal(err)
+	}
+
+	b.client.HTTP.Timeout = 90 * time.Second
+	left := make(chan time.Duration, 1)
+	b.client.HTTP.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if dl, ok := r.Context().Deadline(); ok {
+			select {
+			case left <- time.Until(dl):
+			default:
+			}
+		}
+		return http.DefaultTransport.RoundTrip(r)
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { b.KeepWarm(ctx, 10*time.Millisecond); close(done) }()
+	defer func() { cancel(); <-done }()
+
+	select {
+	case d := <-left:
+		if d < 80*time.Second {
+			t.Fatalf("a keep-warm refresh may wait only %v; it needs the client's 90s", d.Round(time.Second))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("keep-warm never refreshed")
+	}
+}
+
+// rotatingFold behaves as fold did on 21 Nov 2026: a refresh spends the token
+// it is given as soon as it arrives, and a spent token is refused for good
+// (401, code 2004). late says how long to sit on the answer to the n-th call.
+func rotatingFold(t *testing.T, late func(n int64) time.Duration) *httptest.Server {
+	t.Helper()
+	var (
+		mu    sync.Mutex
+		spent = map[string]bool{}
+		calls atomic.Int64
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := calls.Add(1)
+		var body struct {
+			RefreshToken string `json:"refresh_token"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		reused := spent[body.RefreshToken]
+		spent[body.RefreshToken] = true
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if reused {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"meta":{},"data":null,"error":{"code":2004,"message":"Refresh token is invalid"}}`))
+			return
+		}
+		time.Sleep(late(n))
+		// Distinct tokens each time, so a spent one is recognisable.
+		mint := func(kind string) string {
+			payload := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"u","exp":1784037336,"jti":"` + kind + `-` + time.Now().Format(time.RFC3339Nano) + `"}`))
+			return "eyJhbGciOiJIUzI1NiJ9." + payload + ".c2ln"
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{
+				"token_type":    "Bearer",
+				"access_token":  mint("at"),
+				"refresh_token": mint("rt"),
+				// Inside the lead at once, so keep-warm refreshes on every tick.
+				"expires_at": time.Now().Add(30 * time.Second).UTC().Format(time.RFC3339Nano),
+			},
+		})
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// rotatingBroker is a seeded broker in front of rotatingFold. The seed is
+// call 1; the answer to call 2 comes after late2.
+func rotatingBroker(t *testing.T, timeout, late2 time.Duration) *Broker {
+	t.Helper()
+	srv := rotatingFold(t, func(n int64) time.Duration {
+		if n == 2 {
+			return late2
+		}
+		return 0
+	})
+	store, err := OpenStore(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := NewBroker(store, NewFoldClient(srv.URL, timeout), slog.New(slog.NewTextHandler(io.Discard, nil)), 5*time.Minute)
+	if _, err := b.Init(context.Background(), makeJWT("u"), "dh"); err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// eventually polls cond for up to 5s.
+func eventually(cond func() bool) bool {
+	for end := time.Now().Add(5 * time.Second); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		if cond() {
+			return true
+		}
+	}
+	return false
+}
+
+// The 21 Nov 2026 failure, end to end: fold sits on its answer to keep-warm's
+// refresh for longer than the client waits. Giving up spends the chain;
+// waiting the answer out keeps it.
+func TestBroker_KeepWarm_LateAnswer(t *testing.T) {
+	t.Run("abandoned, the retry presents a spent token", func(t *testing.T) {
+		b := rotatingBroker(t, 150*time.Millisecond, time.Second)
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() { b.KeepWarm(ctx, 10*time.Millisecond); close(done) }()
+		defer func() { cancel(); <-done }()
+		if !eventually(func() bool { return b.store.Get().Rejected() }) {
+			t.Fatal("the chain survived a retry with a spent token; the stub no longer models fold")
+		}
+	})
+	t.Run("waited out, the chain lives", func(t *testing.T) {
+		b := rotatingBroker(t, 3*time.Second, 300*time.Millisecond)
+		seed := b.store.Get().AccessToken
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() { b.KeepWarm(ctx, 10*time.Millisecond); close(done) }()
+		defer func() { cancel(); <-done }()
+		if !eventually(func() bool { s := b.store.Get(); return s.AccessToken != seed || s.Rejected() }) {
+			t.Fatal("keep-warm never refreshed")
+		}
+		if b.store.Get().Rejected() {
+			t.Fatal("the chain was lost although the late answer was waited out")
+		}
+	})
+}
+
+// A caller that stops waiting (a /token or sync deadline) must not abandon the
+// refresh it started: fold has spent the old token by the time it answers.
+func TestBroker_Token_CallerDeadlineDoesNotAbandonARefresh(t *testing.T) {
+	b := rotatingBroker(t, 3*time.Second, 300*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, _ = b.Token(ctx) // gives up long before fold answers
+
+	if _, err := b.Token(context.Background()); err != nil {
+		t.Fatalf("the next Token failed: %v", err)
+	}
+	if b.store.Get().Rejected() {
+		t.Fatal("the chain was lost when a caller stopped waiting")
+	}
+}

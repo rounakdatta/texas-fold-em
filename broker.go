@@ -96,7 +96,8 @@ func (b *Broker) Init(ctx context.Context, refreshToken, deviceHash string) (Acc
 
 	wasRejected := b.store.Get().Rejected()
 
-	bundle, err := b.client.RefreshTokens(ctx, refreshToken, deviceHash)
+	// Not cancellable by the caller: see refreshLocked.
+	bundle, err := b.client.RefreshTokens(context.WithoutCancel(ctx), refreshToken, deviceHash)
 	if err != nil {
 		// Note: we deliberately do NOT tombstone here. A bad /init seed is
 		// the operator's problem, not Fold's revocation — we want the
@@ -158,8 +159,18 @@ func (b *Broker) refreshLocked(ctx context.Context) (AccessToken, error) {
 	if time.Until(s.ExpiresAt) > b.refreshLead && s.AccessToken != "" {
 		return toAccessToken(s)
 	}
+	// A caller that has already given up (or shutdown) starts nothing: a
+	// refresh, once sent, can't be called back.
+	if err := ctx.Err(); err != nil {
+		return AccessToken{}, err
+	}
 
-	bundle, err := b.client.RefreshTokens(ctx, s.RefreshToken, s.DeviceHash)
+	// Fold spends the refresh token as it handles this call, so the call is
+	// never abandoned for the caller's sake (a /token or sync deadline, a
+	// disconnect, shutdown): only the fold client's timeout bounds it. An
+	// abandoned call can still be answered upstream, and the next one would
+	// then present a spent token, which fold refuses for good.
+	bundle, err := b.client.RefreshTokens(context.WithoutCancel(ctx), s.RefreshToken, s.DeviceHash)
 	if err != nil {
 		var rej *ErrRefreshRejected
 		if errors.As(err, &rej) {
@@ -249,9 +260,11 @@ func (b *Broker) KeepWarm(ctx context.Context, every time.Duration) {
 				b.log.Debug("keep-warm tick: token still fresh", "expires_at", s.ExpiresAt)
 				continue
 			}
-			refreshCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-			_, err := b.refreshLocked(refreshCtx)
-			cancel()
+			// No deadline of our own: the fold client's timeout bounds the
+			// attempt (see refreshLocked). A 20s one used to abandon slow
+			// refreshes; on 21 Nov 2026, in a minute-long network stall, the
+			// retry after one of them got 2004, "Refresh token is invalid".
+			_, err := b.refreshLocked(ctx)
 			if err != nil {
 				var rej *ErrRefreshRejected
 				switch {
