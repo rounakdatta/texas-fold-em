@@ -159,6 +159,11 @@ func (b *Broker) refreshLocked(ctx context.Context) (AccessToken, error) {
 	if time.Until(s.ExpiresAt) > b.refreshLead && s.AccessToken != "" {
 		return toAccessToken(s)
 	}
+	// A caller that has already given up (or shutdown) starts nothing: a
+	// refresh, once sent, can't be called back.
+	if err := ctx.Err(); err != nil {
+		return AccessToken{}, err
+	}
 
 	// Fold spends the refresh token as it handles this call, so the call is
 	// never abandoned for the caller's sake (a /token or sync deadline, a

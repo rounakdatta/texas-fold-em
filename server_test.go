@@ -212,8 +212,10 @@ func TestServer_Token_NoResponseCaching(t *testing.T) {
 }
 
 func TestServer_ContextDeadlinePropagation(t *testing.T) {
-	// Regression: the handler wraps request ctx with its own timeout; cancelling
-	// the request ctx should still cancel the upstream refresh promptly.
+	// Regression: the handler wraps request ctx with its own timeout. A request
+	// whose ctx has ended must not 500. (An upstream refresh already sent is
+	// never cancelled, since fold spends the token on arrival; one not yet
+	// started is not started.)
 	srv, _, _ := newTestServer(t)
 	_ = do(t, srv.Handler(), "POST", "/init", "admin-key", map[string]string{"refresh_token": makeJWT("u"), "device_hash": "dh"})
 
