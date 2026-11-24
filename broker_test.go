@@ -445,3 +445,134 @@ func TestBroker_Status(t *testing.T) {
 		t.Fatal("ExpiresAt/UpdatedAt should be populated after Init")
 	}
 }
+
+// roundTripFunc lets a test watch each request on its way to fold.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// A keep-warm refresh must get the fold client's whole timeout. A shorter
+// deadline of KeepWarm's own (it was 20s) abandons a refresh that fold may
+// already have answered, and the retry then presents a spent token.
+func TestBroker_KeepWarm_RefreshGetsTheClientsWholeTimeout(t *testing.T) {
+	stub := newStubFold(t)
+	stub.accessLife = 30 * time.Second // inside the lead at once: the first tick refreshes
+	defer stub.Close()
+	b := newTestBroker(t, stub, 5*time.Minute)
+	if _, err := b.Init(context.Background(), makeJWT("u"), "dh"); err != nil {
+		t.Fatal(err)
+	}
+
+	b.client.HTTP.Timeout = 90 * time.Second
+	left := make(chan time.Duration, 1)
+	b.client.HTTP.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if dl, ok := r.Context().Deadline(); ok {
+			select {
+			case left <- time.Until(dl):
+			default:
+			}
+		}
+		return http.DefaultTransport.RoundTrip(r)
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go b.KeepWarm(ctx, 10*time.Millisecond)
+
+	select {
+	case d := <-left:
+		if d < 80*time.Second {
+			t.Fatalf("a keep-warm refresh may wait only %v; it needs the client's 90s", d.Round(time.Second))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("keep-warm never refreshed")
+	}
+}
+
+// rotatingFold behaves as fold did on 21 Nov 2026: a refresh spends the token
+// it is given as soon as it arrives, and a spent token is refused for good
+// (401, code 2004). late says how long to sit on the answer to the n-th call.
+func rotatingFold(t *testing.T, late func(n int64) time.Duration) *httptest.Server {
+	t.Helper()
+	var (
+		mu    sync.Mutex
+		spent = map[string]bool{}
+		calls atomic.Int64
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := calls.Add(1)
+		var body struct {
+			RefreshToken string `json:"refresh_token"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		reused := spent[body.RefreshToken]
+		spent[body.RefreshToken] = true
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if reused {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"meta":{},"data":null,"error":{"code":2004,"message":"Refresh token is invalid"}}`))
+			return
+		}
+		time.Sleep(late(n))
+		// Distinct tokens each time, so a spent one is recognisable.
+		mint := func(kind string) string {
+			payload := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"u","exp":1784037336,"jti":"` + kind + `-` + time.Now().Format(time.RFC3339Nano) + `"}`))
+			return "eyJhbGciOiJIUzI1NiJ9." + payload + ".c2ln"
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{
+				"token_type":    "Bearer",
+				"access_token":  mint("at"),
+				"refresh_token": mint("rt"),
+				// Inside the lead at once, so keep-warm refreshes on every tick.
+				"expires_at": time.Now().Add(30 * time.Second).UTC().Format(time.RFC3339Nano),
+			},
+		})
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// The 21 Nov 2026 failure, end to end: fold sits on the answer to a refresh
+// for longer than the client waits. Giving up spends the chain; waiting keeps it.
+func TestBroker_KeepWarm_LateAnswer(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		timeout  time.Duration
+		rejected bool
+	}{
+		{"abandoned, the retry presents a spent token", 100 * time.Millisecond, true},
+		{"waited out, the chain lives", 2 * time.Second, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Call 1 is the seed; call 2, keep-warm's first refresh, is answered late.
+			srv := rotatingFold(t, func(n int64) time.Duration {
+				if n == 2 {
+					return 300 * time.Millisecond
+				}
+				return 0
+			})
+			store, err := OpenStore(filepath.Join(t.TempDir(), "state.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			b := NewBroker(store, NewFoldClient(srv.URL, tc.timeout), slog.New(slog.NewTextHandler(io.Discard, nil)), 5*time.Minute)
+			if _, err := b.Init(context.Background(), makeJWT("u"), "dh"); err != nil {
+				t.Fatal(err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			go func() { b.KeepWarm(ctx, 10*time.Millisecond); close(done) }()
+			time.Sleep(time.Second)
+			cancel()
+			<-done
+
+			if got := b.store.Get().Rejected(); got != tc.rejected {
+				t.Fatalf("rejected = %v, want %v", got, tc.rejected)
+			}
+		})
+	}
+}

@@ -19,9 +19,9 @@ type Config struct {
 	AdminKey      string        // TEXAS_FOLDEM_ADMIN_KEY        required; protects POST /init
 	APIBase       string        // TEXAS_FOLDEM_API_BASE         default https://api.fold.money/api
 	LogLevel      string        // TEXAS_FOLDEM_LOG_LEVEL        default "info"
-	RefreshLead   time.Duration // TEXAS_FOLDEM_REFRESH_LEAD     default 2m
+	RefreshLead   time.Duration // TEXAS_FOLDEM_REFRESH_LEAD     default 5m
 	KeepWarmEvery time.Duration // TEXAS_FOLDEM_KEEPWARM_EVERY   default 1m (0 to disable)
-	HTTPTimeout   time.Duration // TEXAS_FOLDEM_HTTP_TIMEOUT     default 15s
+	HTTPTimeout   time.Duration // TEXAS_FOLDEM_HTTP_TIMEOUT     default 90s; bounds each refresh, so it must outlast a stall
 	ShutdownGrace time.Duration // TEXAS_FOLDEM_SHUTDOWN_GRACE   default 10s
 
 	// IntegrationEnabled gates the entire fold→firefly classification
@@ -149,9 +149,9 @@ func LoadConfig() (Config, error) {
 		AdminKey:            os.Getenv("TEXAS_FOLDEM_ADMIN_KEY"),
 		APIBase:             strings.TrimRight(envStr("TEXAS_FOLDEM_API_BASE", "https://api.fold.money/api"), "/"),
 		LogLevel:            envStr("TEXAS_FOLDEM_LOG_LEVEL", "info"),
-		RefreshLead:         envDur("TEXAS_FOLDEM_REFRESH_LEAD", 2*time.Minute),
+		RefreshLead:         envDur("TEXAS_FOLDEM_REFRESH_LEAD", 5*time.Minute),
 		KeepWarmEvery:       envDur("TEXAS_FOLDEM_KEEPWARM_EVERY", time.Minute),
-		HTTPTimeout:         envDur("TEXAS_FOLDEM_HTTP_TIMEOUT", 15*time.Second),
+		HTTPTimeout:         envDur("TEXAS_FOLDEM_HTTP_TIMEOUT", 90*time.Second),
 		ShutdownGrace:       envDur("TEXAS_FOLDEM_SHUTDOWN_GRACE", 10*time.Second),
 		IntegrationEnabled:  envBool("TEXAS_FOLDEM_INTEGRATION_ENABLED", false),
 		StagingDBPath:       envStr("TEXAS_FOLDEM_STAGING_DB_PATH", filepath.Join(home, ".texas-fold-em", "staging.db")),
@@ -188,6 +188,10 @@ func LoadConfig() (Config, error) {
 	}
 	if cfg.RefreshLead < 30*time.Second {
 		problems = append(problems, "TEXAS_FOLDEM_REFRESH_LEAD must be at least 30s")
+	}
+	// Zero would let a refresh wait forever, holding every caller behind it.
+	if cfg.HTTPTimeout <= 0 {
+		problems = append(problems, "TEXAS_FOLDEM_HTTP_TIMEOUT must be positive")
 	}
 	if cfg.IntegrationEnabled {
 		if cfg.FireflyBase == "" {

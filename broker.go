@@ -249,9 +249,14 @@ func (b *Broker) KeepWarm(ctx context.Context, every time.Duration) {
 				b.log.Debug("keep-warm tick: token still fresh", "expires_at", s.ExpiresAt)
 				continue
 			}
-			refreshCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-			_, err := b.refreshLocked(refreshCtx)
-			cancel()
+			// No deadline of our own: the fold client's timeout bounds the
+			// attempt. Fold rotates the refresh token as it handles the
+			// call, so an attempt abandoned before the answer arrives may
+			// have spent the token, and the retry then presents a spent one,
+			// which fold refuses for good (2004, "Refresh token is invalid").
+			// That is how the chain was lost on 21 Nov 2026, in a minute-long
+			// network stall. Waiting the answer out keeps the new token.
+			_, err := b.refreshLocked(ctx)
 			if err != nil {
 				var rej *ErrRefreshRejected
 				switch {
